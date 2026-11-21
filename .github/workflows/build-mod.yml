@@ -11,6 +11,12 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+# A push supersedes the run still building the same ref: CI minutes go to the
+# newest code only.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Must match [package.metadata.horizon] sdk in Cargo.toml.
   HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
@@ -25,15 +31,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Cargo registry/git index and target/. shared-key pins the cache to the
+      # SDK commit (the path dependency set comes from it); the repo has no
+      # Cargo.lock for the default key to hash. rust-cache's own restore
+      # fallback is safe here: stale crates are re-resolved by Cargo.
       - name: Cache Cargo and build output
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-sdk-${{ env.HORIZON_SDK_COMMIT }}
+
+      # Exact-pin caches, no restore-keys on purpose: Horizon requires the
+      # tool, the SDK and the wasm toolchain to match the pinned commit
+      # byte-for-byte, and a partial fallback would restore a mismatched one
+      # silently. On a miss each install/fetch path below rebuilds it safely.
 
       # rust-cache does not restore installed binaries; cache the tool itself.
       - name: Cache the cargo-horizon-mod binary
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-horizon-mod
-          key: cargo-horizon-mod-${{ env.HORIZON_SDK_COMMIT }}
+          key: cargo-horizon-mod-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      # The SDK fetch from the signed GitHub release; the tool re-verifies the
+      # pin in .horizon/sdk/build before using a restored copy.
+      - name: Cache the pinned Horizon SDK
+        uses: actions/cache@v4
+        with:
+          path: .horizon/sdk
+          key: horizon-sdk-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      # The toolchain the tool installs through rustup for the wasm build
+      # (with rust-src). The directory name tracks the SDK's pinned toolchain;
+      # an SDK bump changes the key and the tool installs the new one.
+      - name: Cache the pinned wasm toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
+          key: horizon-wasm-toolchain-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
 
       # The wasm-mods doc requires a cargo-horizon-mod built from the same
       # commit as the pinned SDK, or the game refuses the mod's std symbols.
