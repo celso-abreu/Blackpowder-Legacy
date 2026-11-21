@@ -2,7 +2,9 @@ name: Build mod
 
 # Builds the wasm mod end to end on every push: installs the cargo-horizon-mod
 # tool from the pinned SDK commit, compiles mod.wasm, packs the .hmod and runs
-# the registry's checks on it. The .hmod is published as a workflow artifact.
+# the registry's checks on it. The .hmod is published as a workflow artifact,
+# and the build log lands in the job summary (and in annotations on failure)
+# so it is readable without downloading the raw log archive.
 
 on:
   push:
@@ -25,8 +27,10 @@ jobs:
 
       # The wasm-mods doc requires a cargo-horizon-mod built from the same
       # commit as the pinned SDK, or the game refuses the mod's std symbols.
+      # rust-cache restores ~/.cargo/bin, so this only compiles the tool once.
       - name: Install cargo-horizon-mod (pinned SDK commit)
         run: >-
+          command -v cargo-horizon-mod >/dev/null 2>&1 ||
           cargo install --locked
           --git https://github.com/horizon-rust/horizon
           --rev "$HORIZON_SDK_COMMIT"
@@ -35,10 +39,10 @@ jobs:
       # Fetches the pinned SDK into .horizon/sdk/, installs the pinned Rust
       # toolchain through rustup, writes mod.wasm and packs the .hmod.
       - name: Build mod.wasm and pack the .hmod
-        run: cargo horizon-mod build --wasm
+        run: cargo horizon-mod build --wasm 2>&1 | tee build-log.txt
 
       - name: Registry check
-        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod
+        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
 
       - name: Upload the .hmod
         uses: actions/upload-artifact@v4
@@ -46,3 +50,21 @@ jobs:
           name: blackpowder_legacy-hmod
           path: target/horizon-mod/blackpowder_legacy.hmod
           if-no-files-found: error
+
+      - name: Build log to the job summary
+        if: always()
+        run: |
+          {
+            echo '### build-log.txt (tail)'
+            echo '```text'
+            tail -n 400 build-log.txt || echo '(no build log captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Actions log downloads go through a host the dev sandbox cannot reach;
+      # annotations are served by api.github.com and stay readable everywhere.
+      - name: Surface the failure in annotations
+        if: failure()
+        run: |
+          MSG=$(tail -n 80 build-log.txt | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"}1')
+          echo "::error title=cargo horizon-mod failed::${MSG}"
