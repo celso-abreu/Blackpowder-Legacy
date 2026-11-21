@@ -19,12 +19,12 @@
 //! A shot also puffs black-powder smoke past the muzzle (`level_send_particles`).
 
 use mod_api::{
-    ClientHost, Hooks, Host, HostSide, Identifier, ItemBarEvent, ItemKey, ItemPart, ItemStack,
-    LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions, Registrar, RegistrationContext,
+    ClientHost, Hooks, Host, HostSide, Identifier, ItemBarEvent, ItemPart, ItemStack, LivingRef,
+    OnUseTickEvent, ParticleKey, ParticleOptions, Registrar, RegistrationContext,
     ReleaseUsingEvent, ServerHost, SoundSource, Text, UseDurationEvent,
 };
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 const WINCHESTER: &str = "blackpowder_legacy:winchester_1873";
 const CARTRIDGE: &str = "blackpowder_legacy:cartridge_44";
@@ -54,9 +54,6 @@ const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
 /// The ammo gauge's colour (0xRRGGBB): brass, like the cartridge cases.
 const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 
-/// The rifle's registration token, kept for the per-frame `item_bar` filter.
-static WINCHESTER_KEY: OnceLock<ItemKey> = OnceLock::new();
-
 /// Players whose current use already loaded a cartridge (a loading use never
 /// fires on release). Keyed by player UUID; consumed by `release_using`.
 static LOADED_THIS_USE: Mutex<BTreeMap<u128, ()>> = Mutex::new(BTreeMap::new());
@@ -68,25 +65,8 @@ struct Mod;
 impl Hooks for Mod {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let winchester = r.item_key(WINCHESTER);
-        let _ = WINCHESTER_KEY.set(r.item_key(WINCHESTER));
         let smoke = r.particle_key(SMOKE_PARTICLE);
         r.item_part(winchester, Winchester { smoke });
-    }
-
-    /// Ammo gauge under the rifle. Vanilla's damage bar would lie here: our
-    /// "damage" component is the tube's load (0..=8) on a max_damage=100 item,
-    /// so it would show a nearly full green bar on a full tube and none when
-    /// empty. Replace it with the tube's fullness; other stacks keep theirs.
-    fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
-        let Some(&winchester) = WINCHESTER_KEY.get() else {
-            return;
-        };
-        if event.stack.item() != winchester {
-            return;
-        }
-        let rounds = event.stack.damage().min(TUBE_CAPACITY);
-        let width = (rounds * 13 / TUBE_CAPACITY) as i32;
-        event.bar = Some((width, AMMO_BAR_RGB));
     }
 }
 
@@ -113,25 +93,25 @@ fn shooter(host: &dyn ServerHost) -> Option<mod_api::PlayerRef> {
 /// command feedback reaches anyone's chat.
 fn play_sound_at(host: &mut dyn ServerHost, player: mod_api::PlayerRef, sound: &str, volume: f32, pitch: f32) {
     let entity = player.entity();
-    let Some(level) = host.entity_level(entity) else {
+    let Some(level) = entity.level(host) else {
         return;
     };
-    let Some(at) = host.entity_position(entity) else {
+    let Some(at) = entity.position(host) else {
         return;
     };
-    host.level_play_sound(level, sound, at, SoundSource::Players, volume, pitch);
+    level.play_sound(host, sound, at, SoundSource::Players, volume, pitch);
 }
 
 /// A puff of black-powder smoke just past the muzzle, along the view vector.
 fn smoke_at_muzzle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
     let entity = player.entity();
-    let Some(level) = host.entity_level(entity) else {
+    let Some(level) = entity.level(host) else {
         return;
     };
-    let Some(eye) = host.entity_eye_position(entity) else {
+    let Some(eye) = entity.eye_position(host) else {
         return;
     };
-    let Some(view) = host.entity_view_vector(entity) else {
+    let Some(view) = entity.view_vector(host) else {
         return;
     };
     let muzzle = [
@@ -140,7 +120,7 @@ fn smoke_at_muzzle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke:
         eye[2] + view[2] * 0.7,
     ];
     let options = ParticleOptions::simple(smoke);
-    host.level_send_particles(level, &options, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
+    level.send_particles(host, &options, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
 }
 
 /// The slot holding the in-use rifle: the one whose wear matches the stack
@@ -194,6 +174,16 @@ impl ItemPart for Winchester {
     /// on a right click (vanilla's `Item.use` → `startUsingItem`).
     fn use_duration(&self, _: &dyn Host, event: &mut UseDurationEvent<'_>) {
         event.duration = USE_DURATION;
+    }
+
+    /// Ammo gauge under the rifle icon. Vanilla's damage bar would lie here:
+    /// our "damage" component is the tube's load (0..=8) on a max_damage=100
+    /// item, so it would show a nearly full green bar on a full tube and none
+    /// when empty. Replace it with the tube's fullness, in brass.
+    fn item_bar(&self, _: &mut dyn ClientHost, event: &mut ItemBarEvent<'_>) {
+        let rounds = rounds(&event.stack);
+        let width = (rounds * 13 / TUBE_CAPACITY) as i32;
+        event.bar = Some((width, AMMO_BAR_RGB));
     }
 
     /// Loading gate: every RELOAD_TICKS of holding, one cartridge moves from
