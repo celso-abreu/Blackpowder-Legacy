@@ -1,0 +1,9 @@
+# Horizon mod tooling
+.horizon/
+target/
+
+# Local reference material fetched from horizon-rust/horizon (not part of the mod)
+.refs/
+
+# Python
+__pycache__/

@@ -1,0 +1,5 @@
+{
+  "title": "itemGroup.blackpowder_legacy.blackpowder",
+  "icon": "blackpowder_legacy:winchester_1873",
+  "items": ["blackpowder_legacy:winchester_1873", "blackpowder_legacy:cartridge_44"]
+}
