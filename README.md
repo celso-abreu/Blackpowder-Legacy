@@ -67,6 +67,7 @@ assets/blackpowder_legacy/
   items/ models/item/       # 26.3 item model definitions
   textures/item/            # 16x16 pixel art (tools/make_textures.py regenerates)
   lang/                     # en_us, pt_br
+models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
 tools/make_textures.py      # regenerates the textures (python3 + Pillow)
 ```
 
