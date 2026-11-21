@@ -10,6 +10,8 @@ description = "Blackpowder-era firearms for Horizon (Winchester 1873)"
 # This path form is the only one the tool and the launcher accept (E_SDK_SOURCE).
 [dependencies]
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+# Referenced by the PayloadCodec derive's fully-qualified macro path.
+horizon-mod-api-macros = { path = ".horizon/sdk/api/crates/horizon-mod-api-macros" }
 
 # The build this mod is made for: Nightly 2026-11-20 (0a875da).
 [package.metadata.horizon]
