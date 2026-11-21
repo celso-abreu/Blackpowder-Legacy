@@ -35,15 +35,21 @@ Every push builds and checks the mod on GitHub Actions
 toolchain and the Cargo caches reused between runs. The checked
 `blackpowder_legacy.hmod` is downloadable from the run's artifacts.
 
-## Installing from GitHub
+## Installing
 
-The launcher's **Add from GitHub** resolves a repository link to its latest
-release's `.hmod` asset — without a release it falls back to the source tree,
-which is not an installable wasm package on its own. Version tags
-(`v*`, matching `version` in `horizon-mod.toml`) trigger
-`.github/workflows/release.yml`, which rebuilds, re-checks and attaches the
-`.hmod` to the GitHub release; it can also be run by hand with the tag as
-input. Install in the launcher with the plain repository URL.
+This is a **wasm** mod: install the packaged `.hmod`, no build needed.
+
+1. Download `blackpowder_legacy.hmod` from the [latest
+   release](https://github.com/celso-abreu/Blackpowder-Legacy/releases/latest).
+2. Drop it into the instance's **`horizon-mods/`** folder (from the launcher:
+   open the instance and use **Open the instance folder**; create
+   `horizon-mods` if missing).
+3. Play — wasm mods need no native-code consent.
+
+Note: the launcher's *Add a native mod from GitHub* dialog is for **native**
+mods only; it refuses wasm packages (`not a native package`). Tagged releases
+(`v*`, matching `version` in `horizon-mod.toml`) are built, checked and
+published by `.github/workflows/release.yml`.
 
 ## Layout
 

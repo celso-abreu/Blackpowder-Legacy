@@ -1,6 +1,6 @@
 //! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod).
 //!
-//! Mechanics (v0.1):
+//! Mechanics (v0.2):
 //! - The Winchester holds up to 8 cartridges in its tube magazine.
 //! - Hold right click: with an empty tube (or after loading), cartridges are
 //!   loaded one every 8 ticks; with rounds loaded, you shoulder the rifle.
@@ -10,12 +10,18 @@
 //! The magazine lives in the stack's vanilla `damage` component (0..=8);
 //! the item declares `max_damage = 100` so every write is valid and the rifle
 //! never breaks. Rounds are therefore saved, synced and shown by vanilla
-//! item-stack machinery. `item_bar` will draw a proper ammo gauge in v0.2.
+//! item-stack machinery. The `item_bar` hook replaces the (misleading) vanilla
+//! damage bar with a proper brass ammo gauge.
+//!
+//! Sounds go through the level's own sound broadcast
+//! (`level_play_sound`), not `/playsound` commands: the command path answered
+//! every shot with a "Played sound …" feedback line in the shooter's chat.
+//! A shot also puffs black-powder smoke past the muzzle (`level_send_particles`).
 
 use mod_api::{
-    Hooks, Host, HostSide, Identifier, ItemPart, ItemStack, LivingRef, OnUseTickEvent,
-    PermissionLevel, Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, Text,
-    UseDurationEvent,
+    ClientHost, Hooks, Host, HostSide, Identifier, ItemBarEvent, ItemPart, ItemStack, LivingRef,
+    OnUseTickEvent, ParticleKey, ParticleOptions, Registrar, RegistrationContext,
+    ReleaseUsingEvent, ServerHost, SoundSource, Text, UseDurationEvent,
 };
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -29,13 +35,24 @@ const USE_DURATION: i32 = 72000; // vanilla's "use forever" duration
 const LEVER_TICKS: i32 = 8; // minimum hold (0.4 s) before a shot can leave
 const RELOAD_TICKS: i32 = 8; // hold ticks per cartridge loaded
 
-const SHOT_SOUND: &str =
-    "playsound minecraft:entity.firework_rocket.blast player @a[distance=..48] ~ ~ ~ 3.0 0.6";
-const DRY_SOUND: &str = "playsound minecraft:block.lever.click player @a[distance=..16] ~ ~ ~ 0.7 0.7";
-const LOAD_SOUND: &str =
-    "playsound minecraft:item.crossbow.loading_middle player @a[distance=..16] ~ ~ ~ 0.7 1.2";
-const READY_SOUND: &str =
-    "playsound minecraft:item.crossbow.loading_end player @a[distance=..16] ~ ~ ~ 0.7 1.0";
+// Vanilla sound events; played through the level broadcast, never via commands.
+const SHOT_SOUND: &str = "minecraft:entity.firework_rocket.blast";
+const DRY_SOUND: &str = "minecraft:block.lever.click";
+const LOAD_SOUND: &str = "minecraft:item.crossbow.loading_middle";
+const READY_SOUND: &str = "minecraft:item.crossbow.loading_end";
+
+// Volume above 1.0 extends the hearing range past 16 blocks (3.0 → ~48, as a
+// gunshot should carry); the rest stay inside the vanilla 16-block bubble.
+const SHOT_VOLUME: f32 = 3.0;
+const SHOT_PITCH: f32 = 0.6;
+const UI_VOLUME: f32 = 0.7;
+const DRY_PITCH: f32 = 0.7;
+const LOAD_PITCH: f32 = 1.2;
+const READY_PITCH: f32 = 1.0;
+
+const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
+/// The ammo gauge's colour (0xRRGGBB): brass, like the cartridge cases.
+const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 
 /// Players whose current use already loaded a cartridge (a loading use never
 /// fires on release). Keyed by player UUID; consumed by `release_using`.
@@ -48,11 +65,14 @@ struct Mod;
 impl Hooks for Mod {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let winchester = r.item_key(WINCHESTER);
-        r.item_part(winchester, Winchester);
+        let smoke = r.particle_key(SMOKE_PARTICLE);
+        r.item_part(winchester, Winchester { smoke });
     }
 }
 
-struct Winchester;
+struct Winchester {
+    smoke: ParticleKey,
+}
 
 /// Rounds in the tube, read from the stack's damage component.
 fn rounds(stack: &ItemStack) -> u32 {
@@ -68,17 +88,44 @@ fn shooter(host: &dyn ServerHost) -> Option<mod_api::PlayerRef> {
     None
 }
 
-/// Play a sound at an entity, at its position, through the command path.
-/// MVP note: a dedicated host sound call replaces this once verified.
-fn play_sound_at(host: &mut dyn ServerHost, player: mod_api::PlayerRef, line: &str) {
-    let _ = player
-        .entity()
-        .run_command(host, line, PermissionLevel::Gamemasters);
+/// Play a sound at the player through the level's own broadcast
+/// (`ServerLevel.playSound(null, ...)`): every nearby player hears it and no
+/// command feedback reaches anyone's chat.
+fn play_sound_at(host: &mut dyn ServerHost, player: mod_api::PlayerRef, sound: &str, volume: f32, pitch: f32) {
+    let entity = player.entity();
+    let Some(level) = entity.level(host) else {
+        return;
+    };
+    let Some(at) = entity.position(host) else {
+        return;
+    };
+    level.play_sound(host, sound, at, SoundSource::Players, volume, pitch);
+}
+
+/// A puff of black-powder smoke just past the muzzle, along the view vector.
+fn smoke_at_muzzle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+    let entity = player.entity();
+    let Some(level) = entity.level(host) else {
+        return;
+    };
+    let Some(eye) = entity.eye_position(host) else {
+        return;
+    };
+    let Some(view) = entity.view_vector(host) else {
+        return;
+    };
+    let muzzle = [
+        eye[0] + view[0] * 0.7,
+        eye[1] + view[1] * 0.7 - 0.1,
+        eye[2] + view[2] * 0.7,
+    ];
+    let options = ParticleOptions::simple(smoke);
+    level.send_particles(host, &options, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
 }
 
 /// The slot holding the in-use rifle: the one whose wear matches the stack
 /// the hook saw, else the first rifle found. Two rifles with identical
-/// wear in one inventory are ambiguous in v0.1.
+/// wear in one inventory are ambiguous in v0.2.
 fn find_rifle(
     host: &mut dyn ServerHost,
     player: mod_api::PlayerRef,
@@ -129,6 +176,16 @@ impl ItemPart for Winchester {
         event.duration = USE_DURATION;
     }
 
+    /// Ammo gauge under the rifle icon. Vanilla's damage bar would lie here:
+    /// our "damage" component is the tube's load (0..=8) on a max_damage=100
+    /// item, so it would show a nearly full green bar on a full tube and none
+    /// when empty. Replace it with the tube's fullness, in brass.
+    fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
+        let rounds = rounds(&event.stack);
+        let width = (rounds * 13 / TUBE_CAPACITY) as i32;
+        *event.bar = Some((width, AMMO_BAR_RGB));
+    }
+
     /// Loading gate: every RELOAD_TICKS of holding, one cartridge moves from
     /// the inventory into the tube, until full.
     fn on_use_tick(&self, host: HostSide<'_>, event: &mut OnUseTickEvent<'_>) {
@@ -156,7 +213,11 @@ impl ItemPart for Winchester {
         }
         LOADED_THIS_USE.lock().unwrap().insert(player.uuid(), ());
         let full = loaded + 1 == TUBE_CAPACITY;
-        play_sound_at(host, player, if full { READY_SOUND } else { LOAD_SOUND });
+        if full {
+            play_sound_at(host, player, READY_SOUND, UI_VOLUME, READY_PITCH);
+        } else {
+            play_sound_at(host, player, LOAD_SOUND, UI_VOLUME, LOAD_PITCH);
+        }
         let _ = player.action_bar(
             host,
             Text::literal(format!("{} / {}", loaded + 1, TUBE_CAPACITY)),
@@ -180,7 +241,7 @@ impl ItemPart for Winchester {
         }
         let loaded = rounds(&event.stack);
         if loaded == 0 {
-            play_sound_at(host, player, DRY_SOUND);
+            play_sound_at(host, player, DRY_SOUND, UI_VOLUME, DRY_PITCH);
             return;
         }
         let Ok(bullet) = Identifier::parse(BULLET) else { return };
@@ -199,7 +260,8 @@ impl ItemPart for Winchester {
         };
         rifle.set_damage(loaded - 1);
         let _ = player.set_inventory_slot(host, slot, Some(rifle));
-        play_sound_at(host, player, SHOT_SOUND);
+        play_sound_at(host, player, SHOT_SOUND, SHOT_VOLUME, SHOT_PITCH);
+        smoke_at_muzzle(host, player, self.smoke);
         let _ = player.action_bar(
             host,
             Text::literal(format!("{} / {}", loaded - 1, TUBE_CAPACITY)),

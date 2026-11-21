@@ -1,7 +1,7 @@
 id = "blackpowder_legacy"
 name = "Blackpowder Legacy"
-version = "0.1.0"
-description = "Blackpowder-era firearms for Horizon. v0.1: the Winchester 1873 lever-action rifle, with tube-magazine reloading and .44-40 cartridges."
+version = "0.2.0"
+description = "Blackpowder-era firearms for Horizon. v0.2: level-broadcast sounds (no chat spam), muzzle smoke and an ammo gauge for the Winchester 1873."
 authors = ["celso-abreu"]
 license = "MIT"
 api = "0.2"
