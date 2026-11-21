@@ -2,15 +2,16 @@
 
 Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), as one WebAssembly `.hmod`.
 
-**v0.1 — Winchester 1873 lever-action rifle.**
+**v0.4 — Winchester 1873 lever-action rifle, with aim-down-sights controls.**
 
 ## How it plays
 
 - Craft the rifle (iron, oak, a stick and a tripwire hook) and .44-40 cartridges (gunpowder + copper + iron nugget, 6 at a time).
-- The tube magazine holds **8 rounds**; the item's wear bar tracks them.
-- **Hold right click with an empty tube** to work the loading gate: one cartridge every 0.4 s, with the counter on the action bar.
-- **Hold right click with rounds loaded** to shoulder the rifle; **release** (after at least 0.4 s — the lever cycle) to fire.
-- Releasing a loading use never fires: click-clack, no bang.
+- The tube magazine holds **8 rounds**; a brass bar under the icon tracks them, and the counter shows on the action bar.
+- **Hold right click** to shoulder and aim: the view zooms in and a light vignette frames it. Aiming for 0.4 s works the lever — the rifle is then ready to fire.
+- **Left click while aiming** fires one round. Work the lever again (keep holding right click) before the next shot.
+- **R** loads one cartridge per press, until the tube is full.
+- Away from the aim the rifle never mines or punches; left click behaves normally.
 
 ## Build and test
 
@@ -56,7 +57,7 @@ published by `.github/workflows/release.yml`.
 ```text
 horizon-mod.toml            # manifest: id, version, api 0.2, capabilities
 Cargo.toml                  # wasm code crate + SDK pin
-src/lib.rs                  # the Winchester's ItemPart (use_duration / on_use_tick / release_using)
+src/lib.rs                  # the mod: input hooks, the typed fire/reload channel and the Winchester's ItemPart
 data/blackpowder_legacy/
   horizon/item/             # winchester_1873, cartridge_44, bullet (item declarations)
   horizon/entity_type/      # bullet: thrown projectile (snowball template, 12 damage)
@@ -71,11 +72,12 @@ tools/make_textures.py      # regenerates the textures (python3 + Pillow)
 
 ## Design notes
 
-- **Magazine storage:** the tube count lives in the stack's vanilla `damage` component (0–8). `max_damage = 100` keeps every write valid and the rifle unstackable; nothing ever breaks. A custom component replaces this in a later version, together with a proper ammo bar (`item_bar` hook).
-- **Projectile:** `blackpowder_legacy:bullet` is a content-declared thrown type (snowball template) launched server-side with `host.spawn_projectile_from_rotation` at 6× throw power and tight spread. Bullet drop and damage falloff are v0.2 material.
-- **Sounds:** vanilla events played through `entity.run_command` (`firework_rocket.blast` for the shot, crossbow loading for the gate). Custom `.ogg` gunshots replace them in a later version.
+- **Magazine storage:** the tube count lives in the stack's vanilla `damage` component (0–8). `max_damage = 100` keeps every write valid and the rifle unstackable; nothing ever breaks. The `item_bar` hook replaces the (misleading) vanilla damage bar with a brass ammo gauge.
+- **Controls:** aiming is the item's use-over-time (`use_duration` > 0 on right click); the client flags it locally, so the fixed zoom (`compute_fov_modifier`) and the vignette (`gui_render_post`) never wait on the network. Firing is `key_mapping_pre` cancelling the vanilla attack while aiming, plus a typed serverbound payload; reloading is `input_key` on R. The server stays authoritative over the tube, the lever timing and the projectile.
+- **Projectile:** `blackpowder_legacy:bullet` is a content-declared thrown type (snowball template) launched server-side with `host.spawn_projectile_from_rotation` at 6× throw power and tight spread. Bullet drop and damage falloff are future material.
+- **Sounds:** vanilla events broadcast through `LevelRef::play_sound` (`firework_rocket.blast` for the shot, crossbow loading for the gate) — no chat spam. Custom `.ogg` gunshots replace them in a later version.
 
 ## Roadmap
 
-- v0.2: proper ammo bar (`item_bar`), aim pose/animation (`get_arm_pose`, `use_animation`), muzzle smoke, custom sounds, top-off reload keybind, recoil.
-- v0.3: Colt SAA revolver and blunderbuss (spread shot), misfires, per-part durability.
+- v0.3: a proper 3D model for the rifle (first/third person), aim pose and recoil.
+- v0.5: Colt SAA revolver and blunderbuss (spread shot), misfires, per-part durability, a settings screen (zoom strength, vignette, keybinds).
