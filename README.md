@@ -27,6 +27,14 @@ Or copy the `.hmod` into the game folder's `horizon-mods/` and add `mod.blackpow
 
 The build this mod is made for is pinned in `Cargo.toml` (`[package.metadata.horizon] sdk`, Nightly 2026-11-20, `0a875da`). `cargo horizon-mod update` moves the pin.
 
+## CI
+
+Every push builds and checks the mod on GitHub Actions
+(`.github/workflows/build-mod.yml`): `cargo horizon-mod build --wasm` then
+`cargo horizon-mod check`, with the tool binary, the pinned SDK, the wasm
+toolchain and the Cargo caches reused between runs. The checked
+`blackpowder_legacy.hmod` is downloadable from the run's artifacts.
+
 ## Layout
 
 ```text
