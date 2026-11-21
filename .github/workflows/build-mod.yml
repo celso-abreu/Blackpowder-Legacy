@@ -1,0 +1,48 @@
+name: Build mod
+
+# Builds the wasm mod end to end on every push: installs the cargo-horizon-mod
+# tool from the pinned SDK commit, compiles mod.wasm, packs the .hmod and runs
+# the registry's checks on it. The .hmod is published as a workflow artifact.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  # Must match [package.metadata.horizon] sdk in Cargo.toml.
+  HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo and build output
+        uses: Swatinem/rust-cache@v2
+
+      # The wasm-mods doc requires a cargo-horizon-mod built from the same
+      # commit as the pinned SDK, or the game refuses the mod's std symbols.
+      - name: Install cargo-horizon-mod (pinned SDK commit)
+        run: >-
+          cargo install --locked
+          --git https://github.com/horizon-rust/horizon
+          --rev "$HORIZON_SDK_COMMIT"
+          cargo-horizon-mod
+
+      # Fetches the pinned SDK into .horizon/sdk/, installs the pinned Rust
+      # toolchain through rustup, writes mod.wasm and packs the .hmod.
+      - name: Build mod.wasm and pack the .hmod
+        run: cargo horizon-mod build --wasm
+
+      - name: Registry check
+        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod
+
+      - name: Upload the .hmod
+        uses: actions/upload-artifact@v4
+        with:
+          name: blackpowder_legacy-hmod
+          path: target/horizon-mod/blackpowder_legacy.hmod
+          if-no-files-found: error
