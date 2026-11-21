@@ -8,7 +8,8 @@
 //!   vanilla attack, so the rifle never mines or punches, and a typed payload
 //!   asks the server to shoot). After each shot the lever must be cycled
 //!   again (keep holding right click for LEVER_TICKS).
-//! - R (`input_key`): load one cartridge per press, up to the tube's 8.
+//! - R (a real Controls keybind, remappable): load one cartridge per press,
+//!   up to the tube's 8.
 //!
 //! The server stays authoritative: tube load, lever timing, cartridge
 //! consumption and the projectile all live server-side. The client only
@@ -23,13 +24,13 @@
 
 use mod_api::{
     ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiRenderPostEvent, Hooks, Host,
-    HostSide, Identifier, IPayloadContext, InputKeyEvent, ItemBarEvent, ItemPart, ItemStack,
-    KeyAction, KeyMappingPreEvent, LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions,
-    PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, SoundSource, Text,
-    ToServer, UseDurationEvent, VarInt,
+    HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemPart, ItemStack, KeyConflictContext,
+    KeyMappingPreEvent, KeyRegistration, LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions,
+    PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, ServerTickEvent,
+    ServerTickPhase, SoundSource, Text, ToServer, UseDurationEvent, VarInt,
 };
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const WINCHESTER: &str = "blackpowder_legacy:winchester_1873";
@@ -40,7 +41,10 @@ const TUBE_CAPACITY: u32 = 8;
 const USE_DURATION: i32 = 72000; // vanilla's "use forever" duration
 const LEVER_TICKS: i32 = 8; // aim ticks (0.4 s) cycling the lever before a shot
 
-const RELOAD_KEY: &str = "key.keyboard.r";
+/// The mod's own id (horizon-mod.toml), owning the registered keybind.
+const MOD_ID: &str = "blackpowder_legacy";
+/// The registered reload keybind's id within the mod (`Options > Controls`).
+const RELOAD_MAPPING: &str = "reload";
 const ATTACK_MAPPING: &str = "key.attack";
 
 /// The aim zoom as a FOV scale (smaller = narrower). Fixed, on purpose.
@@ -74,13 +78,26 @@ const ACTION_RELOAD: i32 = 2;
 /// Client-side aim state: set while the rifle is in use (aimed), cleared on
 /// release. Drives the zoom, the vignette and the left-click fire gate.
 static AIMING: AtomicBool = AtomicBool::new(false);
-/// Inputs the client hooks queued for the next client tick's payload send.
+/// A fire input queued by `key_mapping_pre` for the next client tick's send.
 static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
-static PENDING_RELOAD: AtomicBool = AtomicBool::new(false);
 
-/// Aim ticks per player (lever cycle progress), server-side. Written by
-/// `on_use_tick`, cleared by `release_using` and by each shot.
-static AIM_TICKS: Mutex<BTreeMap<u128, i32>> = Mutex::new(BTreeMap::new());
+/// Client tick counter, bumped by `client_tick_pre`.
+static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
+/// The last client tick `on_use_tick` saw the rifle in use. Dropping or
+/// swapping the held item stops the use *without* a release, so the heartbeat
+/// — not `release_using` alone — is what reliably ends an aim.
+static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+/// The vignette's animated strength (f32 bits, 0.0..=1.0), eased per frame.
+static VIGNETTE_BITS: AtomicU32 = AtomicU32::new(0);
+
+/// Server tick counter, bumped by `server_tick` (end phase).
+static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
+/// Per-player lever state, server-side: (aim ticks, last server tick seen).
+/// Written by `on_use_tick`, cleared by `release_using` and reset by each
+/// shot. The timestamp keeps a dropped or swapped rifle from leaving a
+/// "lever armed" state behind — a shot is only honoured while the use is
+/// still ticking.
+static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
 
 /// The registered serverbound channel for rifle inputs.
 static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
@@ -104,6 +121,14 @@ impl Hooks for Mod {
         let smoke = r.particle_key(SMOKE_PARTICLE);
         r.item_part(winchester, Winchester { smoke });
         let _ = SMOKE_KEY.set(r.particle_key(SMOKE_PARTICLE));
+        // The reload key as a real Controls binding: remappable, persisted in
+        // horizon-mods.txt and silent while a screen or the chat is open
+        // (which the raw `input_key` listener was not).
+        r.register_key_mapping(
+            KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
+                .label("key.blackpowder_legacy.reload")
+                .context(KeyConflictContext::InGame),
+        );
         let mut payloads = r.payload_handlers();
         let mut view = payloads.registrar("1");
         let input = view.play_to_server_typed::<RifleInput>(
@@ -111,15 +136,6 @@ impl Hooks for Mod {
             on_rifle_input,
         );
         let _ = RIFLE_INPUT.set(input);
-    }
-
-    /// R reloads: a physical R press queues one cartridge load. The server
-    /// validates (rifle in hand, room in the tube, cartridges in the
-    /// inventory), so stray presses cost one harmless packet.
-    fn input_key(&self, _: &mut dyn ClientHost, event: &mut InputKeyEvent<'_>) {
-        if event.key == RELOAD_KEY && event.action == KeyAction::Press {
-            PENDING_RELOAD.store(true, Ordering::Relaxed);
-        }
     }
 
     /// Left click while aiming fires: cancel the vanilla attack press (no
@@ -140,10 +156,29 @@ impl Hooks for Mod {
         mod_api::Flow::Continue
     }
 
-    /// Send the queued rifle inputs on the client tick, the moment a mutable
-    /// client host is available (payload sends need one).
+    /// The client tick: heartbeat for the aim flag, then the payload sends
+    /// (they need this mutable client host).
     fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
+        // End a stale aim: dropping or swapping the rifle stops its use
+        // without a release, which used to leave the vignette and the fire
+        // gate stuck on.
+        let tick = CLIENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if AIMING.load(Ordering::Relaxed)
+            && tick - AIM_LAST_TICK.load(Ordering::Relaxed) > 2
+        {
+            AIMING.store(false, Ordering::Relaxed);
+        }
         let Some(input) = RIFLE_INPUT.get() else { return };
+        // One reload payload per queued keybind click; clicks that happened
+        // behind an open screen never reach us.
+        while host.consume_click(MOD_ID, RELOAD_MAPPING) {
+            let _ = input.send(
+                host,
+                &RifleInput {
+                    action: VarInt(ACTION_RELOAD),
+                },
+            );
+        }
         if PENDING_FIRE.swap(false, Ordering::Relaxed) {
             let _ = input.send(
                 host,
@@ -152,13 +187,12 @@ impl Hooks for Mod {
                 },
             );
         }
-        if PENDING_RELOAD.swap(false, Ordering::Relaxed) {
-            let _ = input.send(
-                host,
-                &RifleInput {
-                    action: VarInt(ACTION_RELOAD),
-                },
-            );
+    }
+
+    /// The server tick feeds the lever state's clock.
+    fn server_tick(&self, _: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
+        if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
+            SERVER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -170,16 +204,26 @@ impl Hooks for Mod {
     }
 
     /// A light vignette while aiming: soft dark bands fading in from the
-    /// screen edges. Hidden with the F1 HUD. `batch` is the GUI's
-    /// `DrawContext`; colours are ARGB.
+    /// screen edges, eased in and out over a few frames instead of popping.
+    /// Hidden with the F1 HUD. `batch` is the GUI's `DrawContext`; colours
+    /// are ARGB.
     fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-        if !AIMING.load(Ordering::Relaxed) || event.gui_hidden {
+        let target: f32 = if AIMING.load(Ordering::Relaxed) && !event.gui_hidden {
+            1.0
+        } else {
+            0.0
+        };
+        let value = f32::from_bits(VIGNETTE_BITS.load(Ordering::Relaxed));
+        let value = value + (target - value) * 0.25;
+        VIGNETTE_BITS.store(value.to_bits(), Ordering::Relaxed);
+        if value < 0.02 {
             return;
         }
         let [w, h] = event.batch.size();
         let band = h * 0.16;
         let side = w * 0.10;
-        let solid = VIGNETTE_ALPHA << 24; // opaque at the edge
+        let solid = ((VIGNETTE_ALPHA as f32) * value) as u32; // peak alpha at the edge…
+        let solid = solid << 24; // …scaled by the eased strength
         let clear = 0u32; // transparent toward the centre
         let batch = &mut *event.batch;
         // Top and bottom fade down/up; left and right are drawn sideways by
@@ -321,13 +365,20 @@ fn reload_one(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
     );
 }
 
-/// Fire one round, if the lever was cycled (aimed LEVER_TICKS) and the tube
-/// is loaded. Cycling starts over after each shot. Server-side.
+/// Fire one round, if the lever was cycled (aimed LEVER_TICKS, with the use
+/// still ticking) and the tube is loaded. Cycling starts over after each
+/// shot. Server-side.
 fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
     let uuid = player.uuid();
-    let aimed = AIM_TICKS.lock().unwrap().get(&uuid).copied().unwrap_or(0);
-    if aimed < LEVER_TICKS {
-        return; // the lever is still cycling
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    let (aimed, last_seen) = AIM_TICKS
+        .lock()
+        .unwrap()
+        .get(&uuid)
+        .copied()
+        .unwrap_or((0, 0));
+    if aimed < LEVER_TICKS || now - last_seen > 2 {
+        return; // the lever is still cycling, or the aim went stale (dropped)
     }
     let Some((slot, rifle)) = find_rifle(host, player) else {
         return;
@@ -351,7 +402,7 @@ fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: Part
     let mut rifle = rifle;
     rifle.set_damage(loaded - 1);
     let _ = player.set_inventory_slot(host, slot, Some(rifle));
-    AIM_TICKS.lock().unwrap().insert(uuid, 0);
+    AIM_TICKS.lock().unwrap().insert(uuid, (0, now));
     play_sound_at(host, player, SHOT_SOUND, SHOT_VOLUME, SHOT_PITCH);
     smoke_at_muzzle(host, player, smoke);
     let _ = player.action_bar(
@@ -382,14 +433,18 @@ impl ItemPart for Winchester {
     }
 
     /// While aimed: the client flags the aim (zoom, vignette, fire gate) and
-    /// the server counts lever ticks for the next shot.
+    /// stamps the heartbeat; the server counts lever ticks with a timestamp.
     fn on_use_tick(&self, host: HostSide<'_>, event: &mut OnUseTickEvent<'_>) {
         match host {
-            HostSide::Client(_) => AIMING.store(true, Ordering::Relaxed),
+            HostSide::Client(_) => {
+                AIMING.store(true, Ordering::Relaxed);
+                AIM_LAST_TICK.store(CLIENT_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
             HostSide::Server(host) => {
                 let Some(player) = shooter(host) else { return };
                 let held = USE_DURATION - event.remaining;
-                AIM_TICKS.lock().unwrap().insert(player.uuid(), held);
+                let now = SERVER_TICKS.load(Ordering::Relaxed);
+                AIM_TICKS.lock().unwrap().insert(player.uuid(), (held, now));
             }
         }
     }

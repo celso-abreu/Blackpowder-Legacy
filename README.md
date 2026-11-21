@@ -10,7 +10,7 @@ Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) 
 - The tube magazine holds **8 rounds**; a brass bar under the icon tracks them, and the counter shows on the action bar.
 - **Hold right click** to shoulder and aim: the view zooms in and a light vignette frames it. Aiming for 0.4 s works the lever — the rifle is then ready to fire.
 - **Left click while aiming** fires one round. Work the lever again (keep holding right click) before the next shot.
-- **R** loads one cartridge per press, until the tube is full.
+- **R** loads one cartridge per press, until the tube is full (remappable in **Options > Controls**, under Blackpowder Legacy).
 - Away from the aim the rifle never mines or punches; left click behaves normally.
 
 ## Build and test
