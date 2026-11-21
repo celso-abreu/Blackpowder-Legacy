@@ -180,10 +180,10 @@ impl ItemPart for Winchester {
     /// our "damage" component is the tube's load (0..=8) on a max_damage=100
     /// item, so it would show a nearly full green bar on a full tube and none
     /// when empty. Replace it with the tube's fullness, in brass.
-    fn item_bar(&self, _: &mut dyn ClientHost, event: &mut ItemBarEvent<'_>) {
+    fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
         let rounds = rounds(&event.stack);
         let width = (rounds * 13 / TUBE_CAPACITY) as i32;
-        event.bar = Some((width, AMMO_BAR_RGB));
+        *event.bar = Some((width, AMMO_BAR_RGB));
     }
 
     /// Loading gate: every RELOAD_TICKS of holding, one cartridge moves from
