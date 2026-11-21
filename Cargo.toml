@@ -1,0 +1,19 @@
+[package]
+name = "blackpowder-legacy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Blackpowder-era firearms for Horizon (Winchester 1873)"
+
+# The mod API is named by the pinned SDK that `cargo horizon-mod` fetches.
+# This path form is the only one the tool and the launcher accept (E_SDK_SOURCE).
+[dependencies]
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+
+# The build this mod is made for: Nightly 2026-11-20 (0a875da).
+[package.metadata.horizon]
+sdk = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
+
+# A mod is its own project, not a member of the game's workspace.
+[workspace]
