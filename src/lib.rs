@@ -22,10 +22,11 @@
 //! chat). A shot also puffs black-powder smoke past the muzzle.
 
 use mod_api::{
-    ClientHost, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemPart,
-    ItemStack, KeyAction, LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions, PayloadId,
-    Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, SoundSource, Text, ToServer,
-    UseDurationEvent, VarInt,
+    ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiRenderPostEvent, Hooks, Host,
+    HostSide, Identifier, IPayloadContext, InputKeyEvent, ItemBarEvent, ItemPart, ItemStack,
+    KeyAction, KeyMappingPreEvent, LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions,
+    PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, SoundSource, Text,
+    ToServer, UseDurationEvent, VarInt,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
