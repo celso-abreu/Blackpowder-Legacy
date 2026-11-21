@@ -2,7 +2,7 @@
 
 Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), as one WebAssembly `.hmod`.
 
-**v0.4 — Winchester 1873 lever-action rifle, with aim-down-sights controls.**
+**v0.5 — the Winchester gets its true 3D model, converted from Blockbench.**
 
 ## How it plays
 
@@ -64,10 +64,12 @@ data/blackpowder_legacy/
   horizon/creative_tab/     # the mod's creative tab
   recipe/                   # rifle + cartridge recipes
 assets/blackpowder_legacy/
-  items/ models/item/       # 26.3 item model definitions
-  textures/item/            # 16x16 pixel art (tools/make_textures.py regenerates)
+  items/ models/item/       # 26.3 item model definitions (the rifle's is a 336-element 3D model)
+  textures/item/            # 16x16 pixel art (tools/make_textures.py) + the rifle's 1024px sheet
   lang/                     # en_us, pt_br
-tools/make_textures.py      # regenerates the textures (python3 + Pillow)
+models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
+tools/make_textures.py      # regenerates the 16x16 textures (python3 + Pillow)
+tools/bbmodel_convert.py    # converts the .bbmodel into a Horizon item model + texture
 ```
 
 ## Design notes
@@ -76,8 +78,9 @@ tools/make_textures.py      # regenerates the textures (python3 + Pillow)
 - **Controls:** aiming is the item's use-over-time (`use_duration` > 0 on right click); the client flags it locally, so the fixed zoom (`compute_fov_modifier`) and the vignette (`gui_render_post`) never wait on the network. Firing is `key_mapping_pre` cancelling the vanilla attack while aiming, plus a typed serverbound payload; reloading is `input_key` on R. The server stays authoritative over the tube, the lever timing and the projectile.
 - **Projectile:** `blackpowder_legacy:bullet` is a content-declared thrown type (snowball template) launched server-side with `host.spawn_projectile_from_rotation` at 6× throw power and tight spread. Bullet drop and damage falloff are future material.
 - **Sounds:** vanilla events broadcast through `LevelRef::play_sound` (`firework_rocket.blast` for the shot, crossbow loading for the gate) — no chat spam. Custom `.ogg` gunshots replace them in a later version.
+- **3D model:** `models/winchester_1873.bbmodel` (Blockbench "free" project, 336 elements, one 1024×1024 sheet) is converted by `tools/bbmodel_convert.py` into `assets/blackpowder_legacy/models/item/winchester_1873.json`. The converter scales the model ×0.48 into Horizon's [-16, 32] element bounds, divides the pixel UVs into the 0–16 space and keeps Blockbench's Euler-XYZ element rotations, which Horizon's model parser accepts natively. Run it again (`python3 tools/bbmodel_convert.py`) after editing the model in Blockbench.
 
 ## Roadmap
 
-- v0.3: a proper 3D model for the rifle (first/third person), aim pose and recoil.
-- v0.5: Colt SAA revolver and blunderbuss (spread shot), misfires, per-part durability, a settings screen (zoom strength, vignette, keybinds).
+- Done in v0.5: a proper 3D model for the rifle (first/third person, ground, GUI). Still open: aim pose and recoil animation.
+- v0.6: Colt SAA revolver and blunderbuss (spread shot), misfires, per-part durability, a settings screen (zoom strength, vignette, keybinds).
