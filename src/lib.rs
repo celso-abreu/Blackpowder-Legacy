@@ -125,19 +125,24 @@ impl Hooks for Mod {
     /// Left click while aiming fires: cancel the vanilla attack press (no
     /// mining, no punch) and queue the shot. Outside an aim the attack
     /// behaves as usual, so carrying the rifle never blocks the pickaxe use.
-    fn key_mapping_pre(&self, _: &mut dyn ClientHost, event: &mut KeyMappingPreEvent<'_>) {
+    fn key_mapping_pre(
+        &self,
+        _: &mut dyn ClientHost,
+        event: &mut KeyMappingPreEvent<'_>,
+    ) -> mod_api::Flow {
         if event.mapping == ATTACK_MAPPING
             && event.pressed
             && AIMING.load(Ordering::Relaxed)
         {
-            event.canceled = true;
             PENDING_FIRE.store(true, Ordering::Relaxed);
+            return mod_api::Flow::Cancel;
         }
+        mod_api::Flow::Continue
     }
 
     /// Send the queued rifle inputs on the client tick, the moment a mutable
     /// client host is available (payload sends need one).
-    fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent<'_>) {
+    fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
         let Some(input) = RIFLE_INPUT.get() else { return };
         if PENDING_FIRE.swap(false, Ordering::Relaxed) {
             let _ = input.send(
