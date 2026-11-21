@@ -1,0 +1,115 @@
+name: Build mod
+
+# Builds the wasm mod end to end on every push: installs the cargo-horizon-mod
+# tool from the pinned SDK commit, compiles mod.wasm, packs the .hmod and runs
+# the registry's checks on it. The .hmod is published as a workflow artifact,
+# and the build log lands in the job summary (and in annotations on failure)
+# so it is readable without downloading the raw log archive.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+# A push supersedes the run still building the same ref: CI minutes go to the
+# newest code only.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match [package.metadata.horizon] sdk in Cargo.toml.
+  HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+  # Wasm builds compile std from source; Horizon's docs warn one wasm compile
+  # wants ~10 GiB, over the 7 GiB runner's RAM. One job at a time stays under.
+  CARGO_BUILD_JOBS: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo registry/git index and target/. shared-key pins the cache to the
+      # SDK commit (the path dependency set comes from it); the repo has no
+      # Cargo.lock for the default key to hash. rust-cache's own restore
+      # fallback is safe here: stale crates are re-resolved by Cargo.
+      - name: Cache Cargo and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-sdk-${{ env.HORIZON_SDK_COMMIT }}
+
+      # Exact-pin caches, no restore-keys on purpose: Horizon requires the
+      # tool, the SDK and the wasm toolchain to match the pinned commit
+      # byte-for-byte, and a partial fallback would restore a mismatched one
+      # silently. On a miss each install/fetch path below rebuilds it safely.
+
+      # rust-cache does not restore installed binaries; cache the tool itself.
+      - name: Cache the cargo-horizon-mod binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-horizon-mod
+          key: cargo-horizon-mod-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      # The SDK fetch from the signed GitHub release; the tool re-verifies the
+      # pin in .horizon/sdk/build before using a restored copy.
+      - name: Cache the pinned Horizon SDK
+        uses: actions/cache@v4
+        with:
+          path: .horizon/sdk
+          key: horizon-sdk-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      # The toolchain the tool installs through rustup for the wasm build
+      # (with rust-src). The directory name tracks the SDK's pinned toolchain;
+      # an SDK bump changes the key and the tool installs the new one.
+      - name: Cache the pinned wasm toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
+          key: horizon-wasm-toolchain-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      # The wasm-mods doc requires a cargo-horizon-mod built from the same
+      # commit as the pinned SDK, or the game refuses the mod's std symbols.
+      - name: Install cargo-horizon-mod (pinned SDK commit)
+        run: >-
+          command -v cargo-horizon-mod >/dev/null 2>&1 ||
+          cargo install --locked
+          --git https://github.com/horizon-rust/horizon
+          --rev "$HORIZON_SDK_COMMIT"
+          cargo-horizon-mod
+
+      # Fetches the pinned SDK into .horizon/sdk/, installs the pinned Rust
+      # toolchain through rustup, writes mod.wasm and packs the .hmod.
+      - name: Build mod.wasm and pack the .hmod
+        run: cargo horizon-mod build --wasm 2>&1 | tee build-log.txt
+
+      - name: Registry check
+        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
+
+      - name: Upload the .hmod
+        uses: actions/upload-artifact@v4
+        with:
+          name: blackpowder_legacy-hmod
+          path: target/horizon-mod/blackpowder_legacy.hmod
+          if-no-files-found: error
+
+      - name: Build log to the job summary
+        if: always()
+        run: |
+          {
+            echo '### build-log.txt (tail)'
+            echo '```text'
+            tail -n 400 build-log.txt || echo '(no build log captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Actions log downloads go through a host the dev sandbox cannot reach;
+      # annotations are served by api.github.com and stay readable everywhere.
+      - name: Surface the failure in annotations
+        if: failure()
+        run: |
+          ERRORS=$(grep -n -E "^error|error\[|panicked|refused|denied" build-log.txt | head -n 40)
+          TAIL=$(tail -n 40 build-log.txt)
+          MSG=$(printf 'errors:\n%s\n\nlog tail:\n%s\n' "$ERRORS" "$TAIL" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"}1')
+          echo "::error title=cargo horizon-mod failed::${MSG}"
