@@ -1,0 +1,135 @@
+name: Release
+
+# Publishes a GitHub release with the checked .hmod attached, so the
+# launcher's "Add from GitHub" installs the package directly: a bare repo
+# link resolves to the latest release and its .hmod asset. Without a release
+# the launcher falls back to the source tree, which is not an installable
+# wasm package ([wasm] only exists inside the packed .hmod), and it refuses
+# it with "inconsistent code declaration ([native] or [wasm]) and source".
+#
+# Two ways to release:
+#   - push a version tag:            git tag v0.1.0 <commit> && git push origin v0.1.0
+#   - run this workflow by hand with the tag as input (the tag is created at
+#     the selected ref).
+# The tag must equal the version in horizon-mod.toml with a "v" prefix.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to release (e.g. v0.1.0); created at the selected ref"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Releases are not cancelled: a superseded publish must finish, not stop
+# halfway between tag and asset upload.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Must match [package.metadata.horizon] sdk in Cargo.toml.
+  HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+  # See build-mod.yml: one wasm compile job stays under the runner's RAM.
+  CARGO_BUILD_JOBS: "1"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify the tag matches the manifest version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' horizon-mod.toml | head -n 1)
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match horizon-mod.toml version v$VERSION"
+            exit 1
+          fi
+          echo "tag $TAG matches manifest version $VERSION"
+
+      # Same cache layers as build-mod.yml; see its comments for the key
+      # design (exact pins for tool/SDK/toolchain, rust-cache for Cargo).
+      - name: Cache Cargo and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: horizon-sdk-${{ env.HORIZON_SDK_COMMIT }}
+
+      - name: Cache the cargo-horizon-mod binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-horizon-mod
+          key: cargo-horizon-mod-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      - name: Cache the pinned Horizon SDK
+        uses: actions/cache@v4
+        with:
+          path: .horizon/sdk
+          key: horizon-sdk-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      - name: Cache the pinned wasm toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
+          key: horizon-wasm-toolchain-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
+
+      - name: Install cargo-horizon-mod (pinned SDK commit)
+        run: >-
+          command -v cargo-horizon-mod >/dev/null 2>&1 ||
+          cargo install --locked
+          --git https://github.com/horizon-rust/horizon
+          --rev "$HORIZON_SDK_COMMIT"
+          cargo-horizon-mod
+
+      - name: Build mod.wasm and pack the .hmod
+        run: cargo horizon-mod build --wasm 2>&1 | tee build-log.txt
+
+      - name: Registry check
+        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
+
+      # Publish the checked .hmod. A rerun of the same tag replaces the asset
+      # instead of failing, so a flaky first attempt stays recoverable.
+      - name: Publish the release with the .hmod
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          HMOD=target/horizon-mod/blackpowder_legacy.hmod
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$HMOD" --clobber
+          else
+            gh release create "$TAG" "$HMOD" \
+              --target "${{ github.sha }}" \
+              --title "Blackpowder Legacy $TAG" \
+              --generate-notes
+          fi
+          gh release view "$TAG" --json tagName,assets \
+            -q '.tagName + " -> " + ([.assets[].name] | join(", "))'
+
+      - name: Build log to the job summary
+        if: always()
+        run: |
+          {
+            echo '### build-log.txt (tail)'
+            echo '```text'
+            tail -n 400 build-log.txt || echo '(no build log captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Surface the failure in annotations
+        if: failure()
+        run: |
+          ERRORS=$(grep -n -E "^error|error\[|panicked|refused|denied" build-log.txt | head -n 40)
+          TAIL=$(tail -n 40 build-log.txt)
+          MSG=$(printf 'errors:\n%s\n\nlog tail:\n%s\n' "$ERRORS" "$TAIL" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"}1')
+          echo "::error title=cargo horizon-mod failed::${MSG}"
