@@ -14,6 +14,9 @@ on:
 env:
   # Must match [package.metadata.horizon] sdk in Cargo.toml.
   HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+  # Wasm builds compile std from source; Horizon's docs warn one wasm compile
+  # wants ~10 GiB, over the 7 GiB runner's RAM. One job at a time stays under.
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   build:
@@ -25,9 +28,15 @@ jobs:
       - name: Cache Cargo and build output
         uses: Swatinem/rust-cache@v2
 
+      # rust-cache does not restore installed binaries; cache the tool itself.
+      - name: Cache the cargo-horizon-mod binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-horizon-mod
+          key: cargo-horizon-mod-${{ env.HORIZON_SDK_COMMIT }}
+
       # The wasm-mods doc requires a cargo-horizon-mod built from the same
       # commit as the pinned SDK, or the game refuses the mod's std symbols.
-      # rust-cache restores ~/.cargo/bin, so this only compiles the tool once.
       - name: Install cargo-horizon-mod (pinned SDK commit)
         run: >-
           command -v cargo-horizon-mod >/dev/null 2>&1 ||
@@ -66,5 +75,7 @@ jobs:
       - name: Surface the failure in annotations
         if: failure()
         run: |
-          MSG=$(tail -n 80 build-log.txt | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"}1')
+          ERRORS=$(grep -n -E "^error|error\[|panicked|refused|denied" build-log.txt | head -n 40)
+          TAIL=$(tail -n 40 build-log.txt)
+          MSG=$(printf 'errors:\n%s\n\nlog tail:\n%s\n' "$ERRORS" "$TAIL" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN{ORS="%0A"}1')
           echo "::error title=cargo horizon-mod failed::${MSG}"
