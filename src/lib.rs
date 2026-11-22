@@ -42,7 +42,7 @@ use mod_api::{
     ProjectileImpactEvent, Registrar, RegistrationContext, ReleaseUsingEvent, RenderFramePreEvent,
     RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase,
     ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource, StandaloneModelsEvent,
-    SubmitCustomGeometryEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
+    SubmitCustomGeometryEvent, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
     WorldDrawContext,
 };
 use std::collections::BTreeMap;
@@ -3352,12 +3352,13 @@ fn on_bullet_impact_sync(value: BulletImpactSync, cx: &mut dyn IPayloadContext) 
     let slot_bias = fx.next_slot_bias & 7;
     fx.next_slot_bias = fx.next_slot_bias.wrapping_add(1);
 
+    let dim = if value.dimension.is_empty() {
+        fx.active_dimension.clone()
+    } else {
+        value.dimension
+    };
     fx.holes.push(BulletHoleDecal {
-        dimension: if value.dimension.is_empty() {
-            fx.active_dimension.clone()
-        } else {
-            value.dimension
-        },
+        dimension: dim,
         block,
         face,
         at,
