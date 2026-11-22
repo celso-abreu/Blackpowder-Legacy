@@ -26,12 +26,12 @@
 //! chat). A shot also puffs black-powder smoke past the muzzle.
 
 use mod_api::{
-    ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
+    ClientHost, ClientSetupEvent, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
     Hand, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemKey, ItemPart,
-    ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, OnUseTickEvent,
-    ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
-    RenderHandEvent, ServerHost, ServerTickEvent, ServerTickPhase, SoundSource, Text, ToServer,
-    UseDurationEvent, VarInt,
+    ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, ModelPart,
+    OnUseTickEvent, ParticleKey, ParticleOptions, PayloadId, PartPose, Registrar,
+    RegistrationContext, ReleaseUsingEvent, RenderHandEvent, ServerHost, ServerTickEvent,
+    ServerTickPhase, SoundSource, Text, ToServer, UseDurationEvent, VarInt,
 };
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
@@ -136,9 +136,74 @@ static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
 /// The rifle's item key, cached so `render_hand` can recognise the held stack
 /// without a registry lookup per frame.
 static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
+/// The player model baked once at client setup, so the first-person hand is
+/// the player's own arm and skin rather than a box of the mod's own. `None`
+/// until the first draw, or when the layer cannot be baked.
+static PLAYER_ARM: OnceLock<Option<ModelPart>> = OnceLock::new();
 /// The smoke particle key, kept for the payload handler (the Part owns one
 /// copy; the free-function handler reaches this one).
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+
+/// The rifle's `firstperson_righthand` display transform, copied from the
+/// baked model. Vanilla writes item-model translation in sixteenths of a
+/// block, so the arm divides it back out (`tools/bbmodel_convert.py`).
+const RIFLE_DISPLAY: ([f32; 3], [f32; 3], f32) = ([0.0, 0.3, -4.75], [0.0, 0.0, 0.0], 0.45);
+
+/// Where the fist closes, in the rifle model's own texels (16 to a block). The
+/// item model is baked around its 8,8 centre, so the barrel runs down -z and
+/// this is the small of the stock, just behind the lever's tail.
+const GRIP_TEXELS: [f32; 3] = [8.14, 6.90, 23.50];
+
+/// How far the shoulder sits behind the fist, in blocks, and which way: to the
+/// right, below the frame and back toward the player, so the forearm enters
+/// screen-right and low. Tuned to the gun's own first-person framing.
+const ARM_BACK: [f32; 3] = [0.30, 0.52, 0.66];
+
+/// Draws the player's own right arm from off-screen to the fist on the rifle's
+/// wrist. `bake_layer` hands back the whole player tree, so the arm is taken
+/// out by name and posed here. It draws under `render`'s pose, which means it
+/// recoils, levers and reloads with the gun for free.
+fn draw_forearm(event: &mut RenderHandEvent<'_, '_>) {
+    let Some(arm) = PLAYER_ARM.get_or_init(|| None).as_ref() else {
+        return;
+    };
+    let (translate, _rotation, scale) = RIFLE_DISPLAY;
+    // Where the fist goes, in the hand's view space: the grip put through the
+    // same display transform the gun's model is drawn under.
+    let grip = [
+        (GRIP_TEXELS[0] - 8.0) / 16.0,
+        (GRIP_TEXELS[1] - 8.0) / 16.0,
+        GRIP_TEXELS[2] / 16.0,
+    ];
+    let mut fist = [grip[0] * scale, grip[1] * scale, grip[2] * scale];
+    for axis in 0..3 {
+        fist[axis] += translate[axis] / 16.0;
+    }
+    let draw = &mut *event.draw;
+    draw.push();
+    // The arm's pivot is its shoulder, and a player model's arm hangs down +y
+    // from there in texels; start the shoulder a forearm's length back from
+    // the fist along `ARM_BACK` and turn the hanging arm onto the fist.
+    let back = ARM_BACK;
+    let len = (back[0] * back[0] + back[1] * back[1] + back[2] * back[2]).sqrt();
+    let reach = 12.0 / 16.0; // a vanilla forearm, in blocks
+    let dir = [back[0] / len, back[1] / len, back[2] / len];
+    draw.translate([
+        fist[0] + dir[0] * reach,
+        fist[1] + dir[1] * reach,
+        fist[2] + dir[2] * reach,
+    ]);
+    // Part space is +y down; flip it into the view's +y up, then roll the
+    // hanging arm back onto `-dir` (shoulder to fist).
+    draw.scale([1.0, -1.0, 1.0]);
+    // Rotating about x by -90 lifts the hanging arm to point at -z (away from
+    // the player); the remaining tilt lands it on the grip.
+    draw.rotate_about([1.0, 0.0, 0.0], -90.0, [0.0; 3]);
+    draw.rotate_about([0.0, 1.0, 0.0], -28.0, [0.0; 3]);
+    draw.rotate_about([0.0, 0.0, 1.0], 12.0, [0.0; 3]);
+    let _ = draw.model_part(arm, "minecraft:entity/player/wide/steve", 0xFF_FFFF);
+    draw.pop();
+}
 
 /// One rifle input from the owning client: fire (1) or reload one round (2).
 #[derive(horizon_mod_api_macros::PayloadCodec)]
@@ -231,6 +296,13 @@ impl Hooks for Mod {
         }
     }
 
+    /// Bake the player model once, so the first-person arm is the player's own
+    /// (skin, sleeve and all) rather than a box of the mod's. A layer that will
+    /// not bake leaves the rifle handless, as it was before.
+    fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
+        let _ = PLAYER_ARM.set(host.bake_layer("minecraft:player#main"));
+    }
+
     /// The server tick feeds the lever state's clock.
     fn server_tick(&self, _: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
@@ -305,6 +377,7 @@ impl Hooks for Mod {
             render.translation[axis] += offset[axis];
             render.rotation[axis] += rotate[axis];
         }
+        draw_forearm(event);
         mod_api::Flow::Continue
     }
 
