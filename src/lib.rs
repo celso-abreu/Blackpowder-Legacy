@@ -290,7 +290,7 @@ impl Hooks for Mod {
     /// Bake the player model once, so the first-person arm is the player's own
     /// (skin, sleeve and all) rather than a box of the mod's. A layer that will
     /// not bake leaves the rifle handless, as it was before.
-    fn client_setup(&self, host: &dyn ClientHost, _: &mut ClientSetupEvent<'_>, _: &mut dyn FnMut()) {
+    fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
         let _ = PLAYER_ARM.set(host.bake_layer("minecraft:player#main"));
     }
 
