@@ -13,8 +13,9 @@
 //!   slim `3x12x4`, `9..18` wide `4x12x4`). Online custom skins are resolved on the server
 //!   via `ServerHost::profile_by_uuid`, decoding Base64 `"textures"` into Horizon's
 //!   `"skins/" + sha1_utf16le(hash)` sprite key + `"metadata"."model" == "slim"`, synced
-//!   once over `RifleSkinSync`. Both arms use TAC's identical `[1.0, 1.55, 1.0]` gun-space
-//!   scale (`[0.45, 0.70, 0.45]` world) so arm thickness and reach match seamlessly.
+//!   once over `RifleSkinSync`. Both arms use `[1.92, 2.12, 1.92]` gun-space scale
+//!   (`[0.864, 0.954, 0.864]` world blocks) so 1st-person hand size matches the player's
+//!   vanilla empty hand while wrapping naturally underneath the stock wrist and forestock.
 //! - **TAC-style keyframe state machine & bundled CC0 `.ogg` audio (`sounds.json`):**
 //!   Covers `Draw`, `Idle`/`Walk`/`Sprint`/`ADS`, `FireCycle` (trigger pull, hammer fall,
 //!   lever throw `+48°`, hammer re-cock), `DryClick`, `ReloadIntro`, per-shell `ReloadLoop`
@@ -139,14 +140,20 @@ const TRIGGER_PIVOT_TEX: [f32; 3] = [8.139, 9.104, 14.768];
 const GATE_PIVOT_TEX: [f32; 3] = [8.936, 10.592, 10.432];
 const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
 
-/// Hand grip anchors in `[0..16]` JSON texels.
-const GRIP_WRIST_TEXELS: [f32; 3] = [8.20, 8.20, 17.50];
-const FORESTOCK_TEXELS: [f32; 3] = [7.85, 9.55, 5.20];
+/// Hand grip anchors in `[0..16]` JSON texels (wrapping underneath `punho` stock wrist
+/// and cradling underneath `guarda_mao` wooden forestock without rising over top sights).
+const GRIP_WRIST_TEXELS: [f32; 3] = [9.55, 5.45, 16.50];
+const FORESTOCK_TEXELS: [f32; 3] = [7.65, 5.15, 4.60];
 
-/// TAC `m870_static.gltf` arm scale inside the `0.45` weapon pose (`[0.45, 0.70, 0.45]` world),
-/// giving both right and left arms identical `1:1` texel cross-section and matching reach.
-const ARM_GUN_SPACE_WIDTH: f32 = 1.0;
-const ARM_GUN_SPACE_LENGTH: f32 = 1.55;
+/// First-person player arm scale compensated for `RIFLE_DISPLAY_SCALE` (`0.45`):
+/// - Cross-section `1.92 * 0.45 = 0.864` world blocks (`~202–208 px` on `1280x720`, matching
+///   the vanilla empty hand's visual size so switching slots keeps hand proportions consistent).
+/// - Forearm reach `2.12 * 0.45 = 0.954` world blocks (near-1:1 skin texel aspect ratio while
+///   extending both shoulders cleanly past the bottom edge of the viewport).
+/// - Both right and left arms share identical world thickness and `3x12x4` (`slim`) / `4x12x4`
+///   (`wide`) geometry with `+0.25` 3D outer sleeves.
+const ARM_GUN_SPACE_WIDTH: f32 = 1.92;
+const ARM_GUN_SPACE_LENGTH: f32 = 2.12;
 
 /// Modern 18-skin default table (`crates/horizon-client-render/src/skins.rs`).
 const DEFAULT_SKINS: [(&str, bool); 18] = [
@@ -1704,17 +1711,25 @@ fn evaluate_weapon_pose(
     let mut cartridge_tex = [11.2, 8.2, 11.2];
     let mut cartridge_rot = [0.0, 0.0, 0.0];
 
-    let base_right_tex = GRIP_WRIST_TEXELS;
-    let base_right_rot = [
-        112.0 + 2.0 * aim_clamped,
-        12.0 - 2.0 * aim_clamped,
-        -8.0 + 2.0 * aim_clamped,
+    let base_right_tex = [
+        GRIP_WRIST_TEXELS[0] - 0.20 * aim_clamped,
+        GRIP_WRIST_TEXELS[1] - 0.35 * aim_clamped,
+        GRIP_WRIST_TEXELS[2] + 0.10 * aim_clamped,
     ];
-    let base_left_tex = FORESTOCK_TEXELS;
+    let base_right_rot = [
+        124.0 + 12.0 * aim_clamped,
+        18.0 - 6.0 * aim_clamped,
+        -30.0 + 4.0 * aim_clamped,
+    ];
+    let base_left_tex = [
+        FORESTOCK_TEXELS[0],
+        FORESTOCK_TEXELS[1] - 0.20 * aim_clamped,
+        FORESTOCK_TEXELS[2],
+    ];
     let base_left_rot = [
-        118.0 + 18.0 * aim_clamped,
-        -22.0 + 2.0 * aim_clamped,
-        16.0 - 2.0 * aim_clamped,
+        126.0 + 8.0 * aim_clamped,
+        -24.0 + 4.0 * aim_clamped,
+        32.0 - 4.0 * aim_clamped,
     ];
 
     let mut right_hand_tex = base_right_tex;
@@ -1766,10 +1781,10 @@ fn evaluate_weapon_pose(
 
                 right_hand_tex = [
                     base_right_tex[0],
-                    base_right_tex[1] - 2.35 * lever_curve,
-                    base_right_tex[2] - 2.15 * lever_curve,
+                    base_right_tex[1] - 2.15 * lever_curve,
+                    base_right_tex[2] - 1.95 * lever_curve,
                 ];
-                right_hand_rot[0] = base_right_rot[0] + 24.0 * lever_curve;
+                right_hand_rot[0] = base_right_rot[0] + 16.0 * lever_curve;
             }
         }
         ActionAnim::DryClick { elapsed } => {
@@ -1782,8 +1797,8 @@ fn evaluate_weapon_pose(
             let open_secs = (RELOAD_OPEN_TICKS as f32) * 0.05;
             let p = smoothstep((elapsed / open_secs).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
-            left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], p);
-            left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], p);
+            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], p);
+            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], p);
         }
         ActionAnim::ReloadInsert { elapsed } => {
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, 1.0);
@@ -1820,35 +1835,35 @@ fn evaluate_weapon_pose(
             gun_rot[2] -= 2.4 * seat_bump;
 
             left_hand_tex = if u < 0.32 {
-                lerp3([10.55, 8.75, 11.75], [9.85, 10.15, 11.65], smoothstep(u / 0.32))
+                lerp3([12.95, 4.55, 12.55], [12.25, 5.75, 12.05], smoothstep(u / 0.32))
             } else if u < 0.70 {
                 lerp3(
-                    [9.85, 10.15, 11.65],
-                    [9.40, 10.30, 10.85],
+                    [12.25, 5.75, 12.05],
+                    [11.85, 6.05, 11.45],
                     smoothstep((u - 0.32) / 0.38),
                 )
             } else {
                 lerp3(
-                    [9.40, 10.30, 10.85],
-                    [10.55, 8.75, 11.75],
+                    [11.85, 6.05, 11.45],
+                    [12.95, 4.55, 12.55],
                     smoothstep((u - 0.70) / 0.30),
                 )
             };
-            left_hand_rot = [108.0, -12.0 + 6.0 * seat_bump, 26.0];
+            left_hand_rot = [124.0, -14.0 + 5.0 * seat_bump, 32.0];
         }
         ActionAnim::ReloadEndNorm { elapsed } => {
             let dur = (RELOAD_CLOSE_NORM_TICKS as f32) * 0.05;
             let p = 1.0 - smoothstep((elapsed / dur).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
-            left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], p);
-            left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], p);
+            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], p);
+            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], p);
         }
         ActionAnim::ReloadEndEmpty { elapsed, .. } => {
             let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
             let settle = 1.0 - smoothstep((elapsed / 0.28).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, settle);
-            left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], settle);
-            left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], settle);
+            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], settle);
+            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], settle);
 
             if elapsed >= 0.15 {
                 let lt = ((elapsed - 0.15) / (dur - 0.17)).clamp(0.0, 1.0);
@@ -1868,10 +1883,10 @@ fn evaluate_weapon_pose(
                 gun_trans[2] += 0.024 * lever_curve;
                 right_hand_tex = [
                     base_right_tex[0],
-                    base_right_tex[1] - 2.45 * lever_curve,
-                    base_right_tex[2] - 2.25 * lever_curve,
+                    base_right_tex[1] - 2.25 * lever_curve,
+                    base_right_tex[2] - 2.05 * lever_curve,
                 ];
-                right_hand_rot[0] = base_right_rot[0] + 25.0 * lever_curve;
+                right_hand_rot[0] = base_right_rot[0] + 17.0 * lever_curve;
             }
         }
         ActionAnim::Inspect { elapsed } => {
@@ -1939,8 +1954,8 @@ fn evaluate_weapon_pose(
             gun_rot[0] += rx;
             gun_rot[1] += ry;
             gun_rot[2] += rz;
-            left_hand_tex = lerp3(base_left_tex, [7.85, 9.45, 6.20], l_shift);
-            left_hand_rot = lerp3(base_left_rot, [124.0, -18.0, 14.0], l_shift);
+            left_hand_tex = lerp3(base_left_tex, [7.85, 5.45, 6.10], l_shift);
+            left_hand_rot = lerp3(base_left_rot, [128.0, -18.0, 28.0], l_shift);
         }
     }
 
