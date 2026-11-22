@@ -1,29 +1,28 @@
-//! Blackpowder Legacy (`v0.9.0`) — TAC-inspired Winchester Model 1873 for Horizon.
+//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod, v0.9.0).
 //!
-//! Architecture (`v0.9.0` clean-room Rust port inspired by TAC `0.3.10.1`):
-//! - **Multi-part animated weapon rendering (`models/special/winchester_*.json`):**
+//! Clean-room Rust `v0.9.0` architecture (inspired by TAC `0.3.10.1` design & timings):
+//! - **Multi-part articulated 1st-person model (`models/special/winchester_*.json`):**
 //!   `standalone_models` registers 6 sub-models (`body`, `lever`, `hammer`, `trigger`,
-//!   `gate`, `cartridge`) baked into Horizon's model store and resolved as `ModelRef`s.
-//!   In `render_hand`, when holding the Winchester in `Hand::Main`, vanilla's static item
-//!   draw is cancelled (`Flow::Cancel`) and all 6 articulated parts + both 1st-person arms
-//!   are posed in one unified `[0..1]` rifle space so sub-parts and hands never drift apart.
-//! - **Real player skin + `slim`/`wide` 1st-person arms with outer sleeves:**
-//!   Offline/immediate fallback resolves `default_skin(uuid)` (`18` modern vanilla skins,
-//!   `0..9` slim `3x12x4`, `9..18` wide `4x12x4`) directly from `event.render.player` on
-//!   frame 0. Online skins are resolved on the server via `ServerHost::profile_by_uuid`,
-//!   decoding Base64 `"textures"` JSON into Horizon's `"skins/" + sha1_utf16le(hash)` sprite
-//!   key + `"metadata"."model" == "slim"`, and synced once over `RifleSkinSync`.
-//! - **TAC-style keyframe state machine & custom CC0 `.ogg` audio (`sounds.json`):**
-//!   Full state controller covering `Draw`, `Idle`/`Walk`/`Sprint`/`ADS`, `Fire` + `Lever`
-//!   cycle (cocking hammer, opening lever, cycling action, locking), `ReloadIntro`,
-//!   per-cartridge `ReloadLoop` (brass `.44-40` round pushed through depressed loading gate),
-//!   `ReloadEndNorm`, `ReloadEndEmpty` (full lever chambering on empty reload), `DryClick`,
-//!   and `Inspect` (`I` key), synchronized with bundled CC0 `.ogg` firearm audio.
+//!   `gate`, `cartridge`) resolved in `model_baking_completed` via `host.render_assets().model`.
+//!   In `render_hand`, vanilla's static 1-piece item render is replaced (`Flow::Cancel`) by
+//!   all 6 articulated parts + both 1st-person player arms inside one unified `[0..1]` rifle
+//!   coordinate frame (`1` unit = `16` JSON texels), keeping hands and moving parts locked
+//!   together through ADS, 2nd-order recoil, lever cycling, per-round gate loading, and inspect.
+//! - **Real player skin + `slim`/`wide` 1st-person arms with 3D sleeves:**
+//!   Immediate fallback resolves `default_skin_for_uuid(uuid)` (`18` modern skins: `0..9`
+//!   slim `3x12x4`, `9..18` wide `4x12x4`). Online custom skins are resolved on the server
+//!   via `ServerHost::profile_by_uuid`, decoding Base64 `"textures"` into Horizon's
+//!   `"skins/" + sha1_utf16le(hash)` sprite key + `"metadata"."model" == "slim"`, synced
+//!   once over `RifleSkinSync`. Both arms use TAC's identical `[1.0, 1.55, 1.0]` gun-space
+//!   scale (`[0.45, 0.70, 0.45]` world) so arm thickness and reach match seamlessly.
+//! - **TAC-style keyframe state machine & bundled CC0 `.ogg` audio (`sounds.json`):**
+//!   Covers `Draw`, `Idle`/`Walk`/`Sprint`/`ADS`, `FireCycle` (trigger pull, hammer fall,
+//!   lever throw `+48°`, hammer re-cock), `DryClick`, `ReloadIntro`, per-shell `ReloadLoop`
+//!   (brass `.44-40` cartridge sliding through the depressed `-23°` King's loading gate),
+//!   `ReloadEndNorm`, `ReloadEndEmpty` (full lever chambering on empty reload), and
+//!   `Inspect` (`I` key, remappable).
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
-use horizon_mod_api::{
+use mod_api::{
     BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
     ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent,
     CubeDeformation, CubeListBuilder, EntityUuid, Flow, GuiDraw, GuiRenderPostEvent, Hand, Hooks,
@@ -33,15 +32,21 @@ use horizon_mod_api::{
     PartPose, ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext,
     ReleaseUsingEvent, RenderFramePreEvent, RenderHandEvent, ServerHost, ServerTickEvent,
     ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource,
-    StandaloneModelForm, StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, VarInt,
+    StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, VarInt,
 };
+use std::collections::BTreeMap;
+use std::f32::consts::{PI, TAU};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
-// Content identifiers & gameplay constants
+// Content & Asset Identifiers
 // ---------------------------------------------------------------------------
 
-const WINCHESTER_ID: &str = "blackpowder_legacy:winchester_1873";
-const AMMO_ID: &str = "blackpowder_legacy:rifle_cartridge";
+const MOD_ID: &str = "blackpowder_legacy";
+const WINCHESTER: &str = "blackpowder_legacy:winchester_1873";
+const CARTRIDGE: &str = "blackpowder_legacy:cartridge_44";
+const BULLET: &str = "blackpowder_legacy:bullet";
 
 const MODEL_BODY_ID: &str = "blackpowder_legacy:special/winchester_body";
 const MODEL_LEVER_ID: &str = "blackpowder_legacy:special/winchester_lever";
@@ -60,98 +65,90 @@ const SND_RELOAD_END: &str = "blackpowder_legacy:animation.winchester_reload_end
 const SND_DRAW: &str = "blackpowder_legacy:animation.winchester_draw";
 const SND_INSPECT: &str = "blackpowder_legacy:animation.winchester_inspect";
 
-const KEY_CATEGORY: &str = "key.categories.blackpowder_legacy";
-const KEY_RELOAD: &str = "key.blackpowder_legacy.reload";
-const KEY_RELOAD_DEFAULT: &str = "key.keyboard.r";
-const KEY_INSPECT: &str = "key.blackpowder_legacy.inspect";
-const KEY_INSPECT_DEFAULT: &str = "key.keyboard.i";
+const RELOAD_MAPPING: &str = "reload";
+const INSPECT_MAPPING: &str = "inspect";
+const ATTACK_MAPPING: &str = "key.attack";
 
-const VANILLA_KEY_ATTACK: &str = "key.attack";
-const VANILLA_KEY_USE: &str = "key.use";
+const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
+const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
+const SKIN_CHANNEL: &str = "blackpowder_legacy:rifle_skin";
 
-/// Tubular magazine capacity (8 `.44-40` rounds; item damage `0` = full, `8` = empty).
-const MAGAZINE_CAPACITY: i32 = 8;
-
-/// Hitscan range in blocks.
-const RANGE_BLOCKS: f64 = 96.0;
-
-/// Ray step for solid-block line-of-sight checks.
-const BLOCK_RAY_STEP: f64 = 0.25;
-
-/// Extra hit radius around entity hitboxes, matching vanilla `ProjectileUtil`.
-const ENTITY_HIT_INFLATE: f64 = 0.3;
-
-/// Damage dealt by a `.44-40` round (14 HP = 7 hearts).
-const SHOT_DAMAGE: f32 = 14.0;
-
-/// Minimum ticks between shots: fire recoil (`3t`) + lever-action cycle (`11t`) = `14t` (`0.70s`).
-const FIRE_COOLDOWN_TICKS: u64 = 14;
-/// Delay after shot before the lever-action sound/throw starts (`3t` = `0.15s`).
-const LEVER_DELAY_TICKS: u64 = 3;
-/// Duration of the lever-action throw (`11t` = `0.55s`).
-const LEVER_DURATION_TICKS: u64 = 11;
-
-/// Ticks after reload start before the first cartridge seats into the loading gate (`8t` = `0.40s`).
-const RELOAD_INTRO_TICKS: u64 = 8;
-/// Ticks per single `.44-40` cartridge pushed into the King's side gate (`10t` = `0.50s`).
-const RELOAD_SHELL_TICKS: u64 = 10;
-/// Normal reload recovery ticks once magazine/ammo finishes (`8t` = `0.40s`).
-const RELOAD_END_NORM_TICKS: u64 = 8;
-/// Empty-reload finale ticks (tilts back + works lever to chamber round #1: `15t` = `0.75s`).
-const RELOAD_END_EMPTY_TICKS: u64 = 15;
-/// Equip/draw animation duration (`10t` = `0.50s`).
-const DRAW_TICKS: f32 = 10.0;
-/// Full weapon inspect duration (`68t` = `3.40s`).
-const INSPECT_TICKS: f32 = 68.0;
-
-/// Smooth ADS transition rate (~135 ms to settle, matching TAC `aimProgress`).
-const ADS_RATE_PER_SEC: f32 = 7.8;
-
-/// FOV multiplier at full ADS (~41° from a 70° base FOV).
-const ADS_FOV_FACTOR: f32 = 0.58;
-
-/// Mouse turn multiplier at full ADS.
-const ADS_TURN_SENSITIVITY: f64 = 0.52;
-
-/// Hip-fire angular spread in radians (~1.6°); ADS is pinpoint (`0.0`).
-const HIP_SPREAD_RAD: f64 = 0.028;
+const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
+const FLAME_PARTICLE: &str = "minecraft:flame";
+const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
+const DEFAULT_STEVE_WIDE: &str = "entity/player/wide/steve";
 
 // ---------------------------------------------------------------------------
-// Exact model-space geometry (`winchester_1873.bbmodel` / `item/winchester_1873.json`)
+// Weapon Balance & Timing Constants (20 TPS)
 // ---------------------------------------------------------------------------
-//
-// Horizon's `first_person.rs` (`item_pose` at `attack = 0`) places the right hand at
-// `[0.56, -0.52 - equip * 0.6, -0.72]`. Our JSON's `display.firstperson_righthand`
-// applies `translation = [0.0, 0.3 / 16.0, -4.75 / 16.0]`, `scale = 0.45`, followed by
-// `translate([-0.5, -0.5, -0.5])` so `[0..1]` model units map to `[0..16]` JSON texels.
-//
-// Sight axis inside `[0..16]` JSON texels:
-//   - Rear buckhorn notch (`alca_entalhe_base` + `alca_parede_esq/dir`): X = 8.139, Y = 11.46
-//   - Front blade tip (`massa_lamina`, Y = 11.248..11.616):             X = 8.139, Y = 11.55
-// At `[0.56, -0.52, -0.72]`, the sight line sits at `[+0.5639, -0.3695, ...]`, so
-// `ADS_OFFSET = [-0.5639, +0.3695, +0.05]` locks the front blade centered in the rear
-// notch at `[0.0, 0.0]` eye height.
 
+const TUBE_CAPACITY: u32 = 8;
+const USE_DURATION: i32 = 72_000;
+
+/// Ticks between shots: recoil (`3t`) + lever throw & lockup (`10t`) = `13t` (`0.65 s`).
+const LEVER_TICKS: u64 = 13;
+const LEVER_DELAY_SECS: f32 = 0.14;
+const LEVER_DURATION_SECS: f32 = 0.48;
+
+/// Ticks holding right-click before full server-side ADS accuracy settles.
+const ADS_SETTLE_TICKS: i32 = 4;
+
+// Per-cartridge server reload timing (at 20 TPS).
+const RELOAD_OPEN_TICKS: u64 = 8;
+const RELOAD_INSERT_TICKS: u64 = 10;
+const RELOAD_CLOSE_NORM_TICKS: u64 = 7;
+const RELOAD_CLOSE_EMPTY_TICKS: u64 = 15;
+
+// Draw & inspect durations in seconds.
+const DRAW_DURATION_SECS: f32 = 0.48;
+const INSPECT_DURATION_SECS: f32 = 3.40;
+
+// Winchester 1873 (.44-40) projectile speed & stance-dependent inaccuracy.
+const BULLET_SPEED: f32 = 15.0;
+const SPREAD_ADS_CROUCH: f32 = 0.04;
+const SPREAD_ADS_STAND: f32 = 0.06;
+const SPREAD_ADS_MOVING: f32 = 0.12;
+const SPREAD_HIP_CROUCH: f32 = 1.10;
+const SPREAD_HIP_STAND: f32 = 1.50;
+const SPREAD_HIP_MOVING: f32 = 2.20;
+
+/// World FOV scale at full ADS (`~1.5x` magnification, TAC iron-sight baseline).
+const AIM_FOV: f32 = 0.67;
+/// Vignette darkness at full aim (`1.0` is invisible).
+const AIM_VIGNETTE: f32 = 0.68;
+
+// ---------------------------------------------------------------------------
+// Exact Model-Space Coordinates (`winchester_1873.bbmodel` / `item/winchester_1873.json`)
+// ---------------------------------------------------------------------------
+
+/// `ItemInHandRenderer` right-hand base translation (`equip = 0`, `attack = 0`).
 const HAND_BASE: [f32; 3] = [0.56, -0.52, -0.72];
+
+/// First-person right-hand offset placing the cocked Winchester 1873 iron sights
+/// (`massa_lamina` over `alca_entalhe_base` at baked `X = 8.139`) dead-center on screen.
+const ADS_OFFSET: [f32; 3] = [-0.5639, 0.3695, 0.05];
+
+/// Mirror of `display.firstperson_righthand` in `models/item/winchester_1873.json`.
 const RIFLE_DISPLAY_TRANS: [f32; 3] = [0.0, 0.3 / 16.0, -4.75 / 16.0];
 const RIFLE_DISPLAY_SCALE: f32 = 0.45;
-const ADS_OFFSET: [f32; 3] = [-0.5639, 0.3695, 0.05];
 
 /// Sub-model pivots in `[0..16]` JSON texel coordinates (`BB -> JM`: `8 + x`, `y`, `8 + z`).
 const LEVER_PIVOT_TEX: [f32; 3] = [8.139, 8.912, 13.376];
 const HAMMER_PIVOT_TEX: [f32; 3] = [8.139, 11.072, 15.488];
 const TRIGGER_PIVOT_TEX: [f32; 3] = [8.139, 9.104, 14.768];
 const GATE_PIVOT_TEX: [f32; 3] = [8.936, 10.592, 10.432];
+const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
 
-/// TAC `m870_static.gltf` arm scale inside the `0.45` weapon pose: `[1.0, 1.55, 1.0]`
-/// (`[0.45, 0.70, 0.45]` world), giving both arms identical `1:1` texel cross-section and reach.
+/// Hand grip anchors in `[0..16]` JSON texels.
+const GRIP_WRIST_TEXELS: [f32; 3] = [8.20, 8.20, 17.50];
+const FORESTOCK_TEXELS: [f32; 3] = [7.85, 9.55, 5.20];
+
+/// TAC `m870_static.gltf` arm scale inside the `0.45` weapon pose (`[0.45, 0.70, 0.45]` world),
+/// giving both right and left arms identical `1:1` texel cross-section and matching reach.
 const ARM_GUN_SPACE_WIDTH: f32 = 1.0;
 const ARM_GUN_SPACE_LENGTH: f32 = 1.55;
 
-// ---------------------------------------------------------------------------
-// Modern 18-skin default table (`crates/horizon-client-render/src/skins.rs`)
-// ---------------------------------------------------------------------------
-
+/// Modern 18-skin default table (`crates/horizon-client-render/src/skins.rs`).
 const DEFAULT_SKINS: [(&str, bool); 18] = [
     ("entity/player/slim/alex", true),
     ("entity/player/slim/ari", true),
@@ -174,7 +171,7 @@ const DEFAULT_SKINS: [(&str, bool); 18] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Payloads
+// Network Payloads
 // ---------------------------------------------------------------------------
 
 const ACTION_FIRE: i32 = 1;
@@ -190,18 +187,18 @@ const SYNC_RELOAD_END_NORM: i32 = 5;
 const SYNC_RELOAD_END_EMPTY: i32 = 6;
 const SYNC_RELOAD_ABORTED: i32 = 7;
 
-#[derive(horizon_mod_api::PayloadCodec)]
+#[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleInput {
     action: VarInt,
 }
 
-#[derive(horizon_mod_api::PayloadCodec)]
+#[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleSync {
     kind: VarInt,
     rounds: VarInt,
 }
 
-#[derive(horizon_mod_api::PayloadCodec)]
+#[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleSkinSync {
     sprite: String,
     fallback: String,
@@ -209,19 +206,36 @@ struct RifleSkinSync {
 }
 
 // ---------------------------------------------------------------------------
-// Static handles & runtime state
+// Static State & Spring-Damper Dynamics
 // ---------------------------------------------------------------------------
 
-struct Handles {
-    winchester: ItemKey,
-    ammo: ItemKey,
-    input_channel: PayloadId<RifleInput, ToServer>,
-    sync_channel: PayloadId<RifleSync, ToClient>,
-    skin_channel: PayloadId<RifleSkinSync, ToClient>,
-    smoke_particle: ParticleKey,
-    crit_particle: ParticleKey,
-    flame_particle: ParticleKey,
-}
+static AIMING: AtomicBool = AtomicBool::new(false);
+static CLIENT_RELOADING: AtomicBool = AtomicBool::new(false);
+static CLIENT_SPRINTING: AtomicBool = AtomicBool::new(false);
+static CLIENT_SNEAKING: AtomicBool = AtomicBool::new(false);
+static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
+static PENDING_RELOAD_CANCEL: AtomicBool = AtomicBool::new(false);
+
+static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
+static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
+static ADS_BITS: AtomicU32 = AtomicU32::new(0);
+
+static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
+static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
+static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
+static RELOAD_SESSIONS: Mutex<BTreeMap<u128, ReloadSession>> = Mutex::new(BTreeMap::new());
+
+static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
+static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
+static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
+static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
+static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
+static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
+static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct RifleModels {
@@ -233,133 +247,248 @@ struct RifleModels {
     cartridge: ModelRef,
 }
 
-struct PlayerArms {
-    wide_right: ModelPart,
-    wide_left: ModelPart,
-    slim_right: ModelPart,
-    slim_left: ModelPart,
-}
-
 #[derive(Clone)]
 struct ResolvedSkin {
-    primary: Identifier,
-    fallback: Identifier,
+    primary: String,
+    fallback: String,
     slim: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AnimMode {
-    None,
-    Draw,
-    FireCycle { cock_sound_played: bool, lever_sound_played: bool, keep_uncocked: bool },
-    DryClick,
-    ReloadIntro { from_empty: bool },
-    ReloadLoop { from_empty: bool },
-    ReloadEndNorm,
-    ReloadEndEmpty { lever_sound_played: bool, cock_sound_played: bool },
-    Inspect,
-}
-
-struct ClientState {
-    aim_down: bool,
-    aim_progress: f32,
-    holding_rifle: bool,
-    was_holding_rifle: bool,
-    last_slot: u8,
-    known_rounds: i32,
-    hammer_uncocked: bool,
-    sprinting: bool,
-    walk_phase: f32,
-    walk_speed: f32,
-    idle_time: f32,
-    recoil: f32,
-    camera_pitch_kick: f32,
-    camera_yaw_kick: f32,
-    muzzle_flash: f32,
-    mode: AnimMode,
-    mode_ticks: f32,
-    skin_requested_uuid: Option<u128>,
-    cached_default_uuid: Option<(u128, ResolvedSkin)>,
-    server_skin: Option<(u128, ResolvedSkin)>,
-}
-
-impl ClientState {
-    const fn new() -> Self {
+impl Default for ResolvedSkin {
+    fn default() -> Self {
         Self {
-            aim_down: false,
-            aim_progress: 0.0,
-            holding_rifle: false,
-            was_holding_rifle: false,
-            last_slot: 0,
-            known_rounds: MAGAZINE_CAPACITY,
-            hammer_uncocked: false,
-            sprinting: false,
-            walk_phase: 0.0,
-            walk_speed: 0.0,
-            idle_time: 0.0,
-            recoil: 0.0,
-            camera_pitch_kick: 0.0,
-            camera_yaw_kick: 0.0,
-            muzzle_flash: 0.0,
-            mode: AnimMode::None,
-            mode_ticks: 0.0,
-            skin_requested_uuid: None,
-            cached_default_uuid: None,
-            server_skin: None,
+            primary: DEFAULT_STEVE_WIDE.into(),
+            fallback: DEFAULT_STEVE_WIDE.into(),
+            slim: false,
         }
-    }
-
-    fn is_reloading(&self) -> bool {
-        matches!(
-            self.mode,
-            AnimMode::ReloadIntro { .. }
-                | AnimMode::ReloadLoop { .. }
-                | AnimMode::ReloadEndNorm
-                | AnimMode::ReloadEndEmpty { .. }
-        )
-    }
-
-    fn blocks_ads(&self) -> bool {
-        matches!(
-            self.mode,
-            AnimMode::Draw
-                | AnimMode::ReloadIntro { .. }
-                | AnimMode::ReloadLoop { .. }
-                | AnimMode::ReloadEndNorm
-                | AnimMode::ReloadEndEmpty { .. }
-                | AnimMode::Inspect
-        )
     }
 }
 
 #[derive(Clone, Copy)]
-struct ReloadTracker {
-    slot: u8,
-    next_insert_tick: u64,
+enum ReloadPhase {
+    Opening { until: u64 },
+    Inserting { next_tick: u64 },
+    Closing { until: u64, empty_chamber: bool },
+}
+
+#[derive(Clone, Copy)]
+struct ReloadSession {
+    slot: u32,
     from_empty: bool,
     inserted_any: bool,
-    finishing_until: Option<(u64, bool)>,
+    phase: ReloadPhase,
 }
 
-#[derive(Default)]
-struct ServerState {
-    tick: u64,
-    next_fire_tick: HashMap<u128, u64>,
-    reloading: HashMap<u128, ReloadTracker>,
+#[derive(Clone, Copy, PartialEq)]
+enum ActionAnim {
+    None,
+    Draw {
+        elapsed: f32,
+    },
+    FireCycle {
+        elapsed: f32,
+        keep_uncocked: bool,
+        lever_sound_played: bool,
+        cock_sound_played: bool,
+    },
+    DryClick {
+        elapsed: f32,
+    },
+    ReloadIntro {
+        elapsed: f32,
+    },
+    ReloadInsert {
+        elapsed: f32,
+    },
+    ReloadEndNorm {
+        elapsed: f32,
+    },
+    ReloadEndEmpty {
+        elapsed: f32,
+        lever_sound_played: bool,
+        cock_sound_played: bool,
+    },
+    Inspect {
+        elapsed: f32,
+    },
 }
 
-static HANDLES: OnceLock<Handles> = OnceLock::new();
-static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
-static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
-static CLIENT: Mutex<ClientState> = Mutex::new(ClientState::new());
-static SERVER: Mutex<ServerState> = Mutex::new(ServerState {
-    tick: 0,
-    next_fire_tick: HashMap::new(),
-    reloading: HashMap::new(),
-});
+/// Semi-implicit second-order spring-damper (`f` Hz natural frequency, `zeta` damping,
+/// `r` initial velocity response). Sub-stepped so arbitrary frame deltas remain stable.
+#[derive(Clone, Copy)]
+struct SecondOrder {
+    k1: f32,
+    k2: f32,
+    k3: f32,
+    xp: f32,
+    y: f32,
+    yd: f32,
+}
 
-fn handles() -> &'static Handles {
-    HANDLES.get().expect("Handles initialized during register()")
+impl SecondOrder {
+    fn new(f: f32, zeta: f32, r: f32, x0: f32) -> Self {
+        let w = 2.0 * PI * f;
+        Self {
+            k1: zeta / (PI * f),
+            k2: 1.0 / (w * w),
+            k3: r * zeta / w,
+            xp: x0,
+            y: x0,
+            yd: 0.0,
+        }
+    }
+
+    fn step(&mut self, dt: f32, x: f32) -> f32 {
+        let dt = dt.clamp(0.0, 0.05);
+        if dt <= 1e-6 {
+            return self.y;
+        }
+        let steps = ((dt / 0.008).ceil() as u32).clamp(1, 8);
+        let h = dt / (steps as f32);
+        let xd = (x - self.xp) / dt;
+        self.xp = x;
+        let k2_stable = self
+            .k2
+            .max(0.5 * h * h + 0.5 * h * self.k1)
+            .max(h * self.k1);
+        for _ in 0..steps {
+            self.y += h * self.yd;
+            self.yd += h * (x + self.k3 * xd - self.y - self.k1 * self.yd) / k2_stable;
+        }
+        self.y
+    }
+
+    fn reset(&mut self, x0: f32) {
+        self.xp = x0;
+        self.y = x0;
+        self.yd = 0.0;
+    }
+}
+
+struct ClientAnimState {
+    aim_dyn: SecondOrder,
+    recoil_dyn: SecondOrder,
+    sprint_dyn: SecondOrder,
+    action: ActionAnim,
+    was_holding: bool,
+    known_rounds: u32,
+    hammer_uncocked: bool,
+    walk_phase: f32,
+    walk_speed: f32,
+    idle_time: f32,
+    shot_ads_factor: f32,
+    shot_crouch_factor: f32,
+    shot_roll_sign: f32,
+    recoil_target_timer: Option<f32>,
+    cam_recoil_timer: Option<f32>,
+    cam_pitch_kick: f32,
+    cam_yaw_kick: f32,
+    jolt_timer: f32,
+    jolt_yaw_sign: f32,
+    rng: u32,
+    skin_requested: bool,
+    skin: ResolvedSkin,
+}
+
+impl ClientAnimState {
+    fn new() -> Self {
+        Self {
+            aim_dyn: SecondOrder::new(3.8, 0.88, 1.05, 0.0),
+            recoil_dyn: SecondOrder::new(5.6, 0.60, 2.35, 0.0),
+            sprint_dyn: SecondOrder::new(3.4, 0.90, 0.75, 0.0),
+            action: ActionAnim::None,
+            was_holding: false,
+            known_rounds: TUBE_CAPACITY,
+            hammer_uncocked: false,
+            walk_phase: 0.0,
+            walk_speed: 0.0,
+            idle_time: 0.0,
+            shot_ads_factor: 1.0,
+            shot_crouch_factor: 1.0,
+            shot_roll_sign: 1.0,
+            recoil_target_timer: None,
+            cam_recoil_timer: Some(1.0),
+            cam_pitch_kick: 0.0,
+            cam_yaw_kick: 0.0,
+            jolt_timer: 0.0,
+            jolt_yaw_sign: 1.0,
+            rng: 0x6D2B_79F5,
+            skin_requested: false,
+            skin: ResolvedSkin::default(),
+        }
+    }
+
+    fn next_unit_f32(&mut self) -> f32 {
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((self.rng >> 8) as f32) * (1.0 / 16_777_216.0)
+    }
+
+    fn blocks_ads(&self) -> bool {
+        matches!(
+            self.action,
+            ActionAnim::Draw { .. }
+                | ActionAnim::ReloadIntro { .. }
+                | ActionAnim::ReloadInsert { .. }
+                | ActionAnim::ReloadEndNorm { .. }
+                | ActionAnim::ReloadEndEmpty { .. }
+                | ActionAnim::Inspect { .. }
+        )
+    }
+
+    fn on_shot(&mut self, remaining_rounds: u32) {
+        let aim = self.aim_dyn.y.clamp(0.0, 1.0);
+        let sneaking = CLIENT_SNEAKING.load(Ordering::Relaxed);
+        let ads_factor = 1.0 - 0.32 * aim;
+        let crouch_factor = if sneaking { 0.875 } else { 1.0 };
+        let variance = 0.88 + 0.24 * self.next_unit_f32();
+        let yaw_rand = self.next_unit_f32() * 2.0 - 1.0;
+
+        self.known_rounds = remaining_rounds;
+        self.shot_ads_factor = ads_factor;
+        self.shot_crouch_factor = crouch_factor;
+        self.shot_roll_sign = if yaw_rand >= 0.0 { 1.0 } else { -1.0 };
+        self.recoil_target_timer = Some(0.0);
+
+        self.cam_recoil_timer = Some(0.0);
+        self.cam_pitch_kick = 5.2 * ads_factor * crouch_factor * variance;
+        self.cam_yaw_kick = 0.68 * ads_factor * yaw_rand;
+
+        self.jolt_timer = 0.065;
+        self.jolt_yaw_sign = self.shot_roll_sign;
+
+        let keep_uncocked = remaining_rounds == 0;
+        if keep_uncocked {
+            self.hammer_uncocked = true;
+        }
+        self.action = ActionAnim::FireCycle {
+            elapsed: 0.0,
+            keep_uncocked,
+            lever_sound_played: false,
+            cock_sound_played: false,
+        };
+    }
+
+    fn on_dry_click(&mut self, rounds: u32) {
+        self.known_rounds = rounds;
+        if rounds == 0 {
+            self.hammer_uncocked = true;
+        }
+        self.action = ActionAnim::DryClick { elapsed: 0.0 };
+    }
+}
+
+fn client_anim() -> &'static Mutex<ClientAnimState> {
+    CLIENT_ANIM.get_or_init(|| Mutex::new(ClientAnimState::new()))
+}
+
+fn aim_progress() -> f32 {
+    f32::from_bits(ADS_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.2)
+}
+
+fn holding_rifle_recently() -> bool {
+    let seen = RIFLE_SEEN_FRAME.load(Ordering::Relaxed);
+    let now = FRAME_SEQ.load(Ordering::Relaxed);
+    seen > 0 && now.saturating_sub(seen) <= 2
 }
 
 // ---------------------------------------------------------------------------
@@ -469,13 +598,12 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Extracts `(skins/<sha1>, is_slim)` from Mojang's Base64 `"textures"` property JSON.
+/// Extracts `("skins/<sha1>", is_slim)` from Mojang's Base64 `"textures"` property JSON.
 fn parse_mojang_skin_property(b64_value: &str) -> Option<(String, bool)> {
     let raw = base64_decode(b64_value)?;
     let json = core::str::from_utf8(&raw).ok()?;
     let skin_idx = json.find("\"SKIN\"")?;
     let skin_tail = &json[skin_idx..];
-    // Bound to the SKIN object (before any sibling `"CAPE"` entry).
     let skin_section = match skin_tail.find("\"CAPE\"") {
         Some(cape_pos) => &skin_tail[..cape_pos],
         None => skin_tail,
@@ -506,35 +634,132 @@ fn parse_mojang_skin_property(b64_value: &str) -> Option<(String, bool)> {
     Some((sprite, slim))
 }
 
-fn build_player_arms() -> PlayerArms {
-    let build_one = |origin_x: f32, width: f32, skin_uv: (i32, i32), sleeve_uv: (i32, i32)| {
-        let mut mesh = MeshDefinition::new();
-        mesh.root().add_or_replace_child(
-            "arm",
-            CubeListBuilder::create()
-                .tex_offs(skin_uv.0, skin_uv.1)
-                .add_box([origin_x, -2.0, -2.0], [width, 12.0, 4.0])
-                .tex_offs(sleeve_uv.0, sleeve_uv.1)
-                .add_box_with(
-                    [origin_x, -2.0, -2.0],
-                    [width, 12.0, 4.0],
-                    CubeDeformation::new(0.25),
-                ),
-            PartPose::ZERO,
-        );
-        LayerDefinition::create(mesh, 64, 64)
-            .bake_root()
-            .child("arm")
-            .expect("arm child exists")
-    };
+// ---------------------------------------------------------------------------
+// Player Arm Geometry (`wide` 4x12x4 + `slim` 3x12x4 + `0.25` 3D Sleeves)
+// ---------------------------------------------------------------------------
 
-    PlayerArms {
-        wide_right: build_one(-3.0, 4.0, (40, 16), (40, 32)),
-        wide_left: build_one(-1.0, 4.0, (32, 48), (48, 48)),
-        slim_right: build_one(-2.0, 3.0, (40, 16), (40, 32)),
-        slim_left: build_one(-1.0, 3.0, (32, 48), (48, 48)),
+struct LimbModel {
+    limb: ModelPart,
+    detached_sleeve: Option<ModelPart>,
+}
+
+struct ArmPair {
+    right: LimbModel,
+    left: LimbModel,
+}
+
+struct PlayerArms {
+    wide: ArmPair,
+    slim: ArmPair,
+}
+
+impl LimbModel {
+    fn extract(root: &ModelPart, limb_name: &str, sleeve_name: &str) -> Option<Self> {
+        let mut limb = root.get_child(limb_name)?.clone();
+        limb.load_pose(PartPose::ZERO);
+        let detached_sleeve = if limb.get_child(sleeve_name).is_some() {
+            None
+        } else {
+            root.get_child(sleeve_name).cloned().map(|mut s| {
+                s.load_pose(PartPose::ZERO);
+                s
+            })
+        };
+        Some(Self {
+            limb,
+            detached_sleeve,
+        })
+    }
+
+    fn draw_part_with_skin(draw: &mut dyn BlockEntityDrawContext, part: &ModelPart, skin: &ResolvedSkin) {
+        if !draw.model_part(part, &skin.primary, 0xFF_FFFF) {
+            if !draw.model_part(part, &skin.fallback, 0xFF_FFFF) {
+                let _ = draw.model_part(part, DEFAULT_STEVE_WIDE, 0xFF_FFFF);
+            }
+        }
+    }
+
+    fn draw(&self, draw: &mut dyn BlockEntityDrawContext, skin: &ResolvedSkin) {
+        Self::draw_part_with_skin(draw, &self.limb, skin);
+        if let Some(sleeve) = &self.detached_sleeve {
+            Self::draw_part_with_skin(draw, sleeve, skin);
+        }
     }
 }
+
+impl ArmPair {
+    fn from_baked_root(root: &ModelPart) -> Option<Self> {
+        Some(Self {
+            right: LimbModel::extract(root, "right_arm", "right_sleeve")?,
+            left: LimbModel::extract(root, "left_arm", "left_sleeve")?,
+        })
+    }
+
+    fn procedural(slim: bool) -> Self {
+        let width = if slim { 3.0 } else { 4.0 };
+        let right_origin_x = if slim { -2.0 } else { -3.0 };
+        let build_limb = |origin_x: f32, arm_uv: (i32, i32), sleeve_uv: (i32, i32)| -> LimbModel {
+            let mut mesh = MeshDefinition::new();
+            let root = mesh.root();
+            let arm = mesh.add_or_replace_child(
+                root,
+                "arm",
+                CubeListBuilder::create()
+                    .tex_offs(arm_uv.0, arm_uv.1)
+                    .add_box([origin_x, -2.0, -2.0], [width, 12.0, 4.0]),
+                PartPose::ZERO,
+            );
+            mesh.add_or_replace_child(
+                arm,
+                "sleeve",
+                CubeListBuilder::create()
+                    .tex_offs(sleeve_uv.0, sleeve_uv.1)
+                    .add_box_with(
+                        [origin_x, -2.0, -2.0],
+                        [width, 12.0, 4.0],
+                        CubeDeformation::new(0.25),
+                    ),
+                PartPose::ZERO,
+            );
+            let baked = LayerDefinition::create(mesh, 64, 64).bake_root();
+            let mut limb = baked.get_child("arm").cloned().unwrap_or(baked);
+            limb.load_pose(PartPose::ZERO);
+            LimbModel {
+                limb,
+                detached_sleeve: None,
+            }
+        };
+        Self {
+            right: build_limb(right_origin_x, (40, 16), (40, 32)),
+            left: build_limb(-1.0, (32, 48), (48, 48)),
+        }
+    }
+}
+
+impl PlayerArms {
+    fn bake(host: &dyn ClientHost) -> Self {
+        let wide = host
+            .bake_layer("minecraft:player#main")
+            .and_then(|r| ArmPair::from_baked_root(&r))
+            .unwrap_or_else(|| ArmPair::procedural(false));
+        let slim = host
+            .bake_layer("minecraft:player_slim#main")
+            .and_then(|r| ArmPair::from_baked_root(&r))
+            .unwrap_or_else(|| ArmPair::procedural(true));
+        Self { wide, slim }
+    }
+
+    fn procedural_both() -> Self {
+        Self {
+            wide: ArmPair::procedural(false),
+            slim: ArmPair::procedural(true),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone Model Resolution & Client Sound Helper
+// ---------------------------------------------------------------------------
 
 fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
     let assets = host.render_assets();
@@ -544,20 +769,17 @@ fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
         hammer: assets.model(&Identifier::parse(MODEL_HAMMER_ID).ok()?).ok()?,
         trigger: assets.model(&Identifier::parse(MODEL_TRIGGER_ID).ok()?).ok()?,
         gate: assets.model(&Identifier::parse(MODEL_GATE_ID).ok()?).ok()?,
-        cartridge: assets.model(&Identifier::parse(MODEL_CARTRIDGE_ID).ok()?).ok()?,
+        cartridge: assets
+            .model(&Identifier::parse(MODEL_CARTRIDGE_ID).ok()?)
+            .ok()?,
     })
 }
 
 fn refresh_rifle_models(host: &dyn ClientHost) {
-    let resolved = resolve_rifle_models(host);
-    *RIFLE_MODELS.lock().unwrap() = resolved;
+    *RIFLE_MODELS.lock().unwrap() = resolve_rifle_models(host);
 }
 
-// ---------------------------------------------------------------------------
-// Local client sound helper (`sounds.json` CC0 `.ogg` pack)
-// ---------------------------------------------------------------------------
-
-fn play_gun_sound(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
+fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
     let Ok(identifier) = Identifier::parse(event_id) else {
         return;
     };
@@ -576,66 +798,16 @@ fn play_gun_sound(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32
 }
 
 // ---------------------------------------------------------------------------
-// Item Part — Winchester 1873
-// ---------------------------------------------------------------------------
-
-struct WinchesterItem;
-
-impl ItemPart for WinchesterItem {
-    /// Suppresses vanilla equip-bob when magazine damage changes on shot/reload.
-    fn should_cause_reequip_animation(&self, event: &ShouldCauseReequipAnimationEvent) -> bool {
-        event.old_stack.item() != event.new_stack.item()
-    }
-
-    fn use_duration(&self, _: &dyn Host, _: &UseDurationEvent<'_>) -> Option<i32> {
-        Some(72_000)
-    }
-
-    fn on_use_tick(&self, _: &mut dyn Host, _: &mut OnUseTickEvent<'_>) {}
-
-    fn release_using(&self, _: &mut dyn Host, _: &mut ReleaseUsingEvent<'_>) {}
-
-    fn bar_visible(&self, stack: &ItemStack) -> Option<bool> {
-        Some(rounds_in_stack(stack) < MAGAZINE_CAPACITY)
-    }
-
-    fn bar_width(&self, stack: &ItemStack) -> Option<i32> {
-        let rounds = rounds_in_stack(stack);
-        Some(((rounds * 13 + MAGAZINE_CAPACITY / 2) / MAGAZINE_CAPACITY).clamp(0, 13))
-    }
-
-    fn bar_color(&self, _: &ItemBarEvent<'_>) -> Option<u32> {
-        Some(0xD8_A6_48)
-    }
-}
-
-fn rounds_in_stack(stack: &ItemStack) -> i32 {
-    (MAGAZINE_CAPACITY - stack.damage()).clamp(0, MAGAZINE_CAPACITY)
-}
-
-fn set_rounds_in_stack(stack: &mut ItemStack, rounds: i32) {
-    let clamped = rounds.clamp(0, MAGAZINE_CAPACITY);
-    stack.set_damage((MAGAZINE_CAPACITY - clamped).max(0));
-}
-
-fn is_winchester(stack: &ItemStack) -> bool {
-    !stack.is_empty() && stack.item() == handles().winchester.id()
-}
-
-// ---------------------------------------------------------------------------
 // Entry Point & Hooks
 // ---------------------------------------------------------------------------
 
-pub struct Mod;
+#[derive(Default)]
+struct Mod;
 
-#[horizon_mod_api::mod_entry]
-pub fn init() -> Mod {
-    Mod
-}
-
+#[mod_api::horizon_mod]
 impl Hooks for Mod {
     fn standalone_models(&self, _: &RegistrationContext, event: &mut StandaloneModelsEvent<'_>) {
-        for model_id in [
+        for id in [
             MODEL_BODY_ID,
             MODEL_LEVER_ID,
             MODEL_HAMMER_ID,
@@ -643,70 +815,47 @@ impl Hooks for Mod {
             MODEL_GATE_ID,
             MODEL_CARTRIDGE_ID,
         ] {
-            if let Ok(id) = Identifier::parse(model_id) {
-                let _ = event.register(id, StandaloneModelForm::Block);
+            if let Ok(parsed) = Identifier::parse(id) {
+                event.models.push(parsed);
             }
         }
     }
 
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
-        let winchester = r
-            .items()
-            .expect("registries capability")
-            .register_Damageable(WINCHESTER_ID, MAGAZINE_CAPACITY)
-            .unwrap_or_else(|e| panic!("failed to register {WINCHESTER_ID}: {e}"));
+        let winchester = r.item_key(WINCHESTER);
+        let smoke = r.particle_key(SMOKE_PARTICLE);
+        let flame = r.particle_key(FLAME_PARTICLE);
+        r.item_part(winchester, Winchester);
+        let _ = RIFLE_KEY.set(winchester);
+        let _ = SMOKE_KEY.set(smoke);
+        let _ = FLAME_KEY.set(flame);
 
-        let ammo = r
-            .items()
-            .expect("registries capability")
-            .register_Simple(AMMO_ID)
-            .unwrap_or_else(|e| panic!("failed to register {AMMO_ID}: {e}"));
-
-        r.item(winchester, WinchesterItem);
-
-        r.key_mapping(
-            KeyRegistration::new(KEY_RELOAD, KEY_RELOAD_DEFAULT, KEY_CATEGORY)
-                .conflict_context(KeyConflictContext::InGame),
+        r.register_key_mapping(
+            KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
+                .label("key.blackpowder_legacy.reload")
+                .context(KeyConflictContext::InGame),
         );
-        r.key_mapping(
-            KeyRegistration::new(KEY_INSPECT, KEY_INSPECT_DEFAULT, KEY_CATEGORY)
-                .conflict_context(KeyConflictContext::InGame),
+        r.register_key_mapping(
+            KeyRegistration::new(INSPECT_MAPPING, "key.keyboard.i")
+                .label("key.blackpowder_legacy.inspect")
+                .context(KeyConflictContext::InGame),
         );
 
-        let smoke_particle = r.particle_type("minecraft:large_smoke").unwrap();
-        let crit_particle = r.particle_type("minecraft:crit").unwrap();
-        let flame_particle = r.particle_type("minecraft:flame").unwrap();
-
-        let mut net = r.registrar("1");
-        let input_channel = net
-            .play_to_server::<RifleInput>(
-                Identifier::parse("blackpowder_legacy:rifle_input").unwrap(),
-                handle_rifle_input,
-            )
-            .unwrap();
-        let sync_channel = net
-            .play_to_client::<RifleSync>(
-                Identifier::parse("blackpowder_legacy:rifle_sync").unwrap(),
-                handle_rifle_sync,
-            )
-            .unwrap();
-        let skin_channel = net
-            .play_to_client::<RifleSkinSync>(
-                Identifier::parse("blackpowder_legacy:rifle_skin").unwrap(),
-                handle_rifle_skin_sync,
-            )
-            .unwrap();
-
-        let _ = HANDLES.set(Handles {
-            winchester,
-            ammo,
-            input_channel,
-            sync_channel,
-            skin_channel,
-            smoke_particle,
-            crit_particle,
-            flame_particle,
-        });
+        let mut payloads = r.payload_handlers();
+        let mut view = payloads.registrar("1");
+        let input = view.play_to_server_typed::<RifleInput>(
+            PayloadId(INPUT_CHANNEL.into()),
+            on_rifle_input,
+        );
+        let sync =
+            view.play_to_client_typed::<RifleSync>(PayloadId(SYNC_CHANNEL.into()), on_rifle_sync);
+        let skin = view.play_to_client_typed::<RifleSkinSync>(
+            PayloadId(SKIN_CHANNEL.into()),
+            on_rifle_skin_sync,
+        );
+        let _ = RIFLE_INPUT.set(input);
+        let _ = RIFLE_SYNC.set(sync);
+        let _ = RIFLE_SKIN_SYNC.set(skin);
     }
 
     fn model_baking_completed(&self, host: &mut dyn ClientHost, _: &mut ModelBakingCompletedEvent) {
@@ -714,7 +863,7 @@ impl Hooks for Mod {
     }
 
     fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
-        let _ = PLAYER_ARMS.set(build_player_arms());
+        let _ = PLAYER_ARMS.set(PlayerArms::bake(host));
         refresh_rifle_models(host);
     }
 
@@ -726,599 +875,762 @@ impl Hooks for Mod {
         refresh_rifle_models(host);
     }
 
-    fn key_mapping_pre(&self, host: &mut dyn ClientHost, event: &mut KeyMappingPreEvent<'_>) -> Flow {
-        if event.name != VANILLA_KEY_ATTACK {
-            return Flow::Continue;
-        }
-        let Some(player) = host.local_player() else {
-            return Flow::Continue;
-        };
-        let stack = player.as_living().main_hand_item(host);
-        if !is_winchester(&stack) {
-            return Flow::Continue;
-        }
-
-        if event.pressed {
-            let can_request_fire = {
-                let mut st = CLIENT.lock().unwrap();
-                if st.mode == AnimMode::Draw
-                    || matches!(st.mode, AnimMode::FireCycle { .. })
-                    || matches!(
-                        st.mode,
-                        AnimMode::ReloadEndNorm | AnimMode::ReloadEndEmpty { .. }
-                    )
-                {
-                    false
-                } else {
-                    if st.mode == AnimMode::Inspect {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
+    /// Left click while holding or aiming the rifle fires a round (`Flow::Cancel` suppresses
+    /// vanilla mining and melee punches).
+    fn key_mapping_pre(
+        &self,
+        host: &mut dyn ClientHost,
+        event: &mut KeyMappingPreEvent<'_>,
+    ) -> Flow {
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        if event.mapping == ATTACK_MAPPING && holding && host.playing() {
+            if event.pressed {
+                let allow_fire = {
+                    let mut anim = client_anim().lock().unwrap();
+                    match anim.action {
+                        ActionAnim::Draw { .. }
+                        | ActionAnim::FireCycle { .. }
+                        | ActionAnim::ReloadEndNorm { .. }
+                        | ActionAnim::ReloadEndEmpty { .. } => false,
+                        ActionAnim::Inspect { .. } => {
+                            anim.action = ActionAnim::None;
+                            true
+                        }
+                        _ => true,
                     }
-                    true
+                };
+                if allow_fire {
+                    PENDING_FIRE.store(true, Ordering::Relaxed);
                 }
-            };
-            if can_request_fire {
-                let _ = host.send_to_server(
-                    handles().input_channel,
-                    &RifleInput {
-                        action: VarInt(ACTION_FIRE),
-                    },
-                );
             }
+            return Flow::Cancel;
         }
-        Flow::Cancel
+        Flow::Continue
     }
 
     fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
-        let Some(player) = host.local_player() else {
-            let mut st = CLIENT.lock().unwrap();
-            st.aim_down = false;
-            st.holding_rifle = false;
-            st.was_holding_rifle = false;
-            st.mode = AnimMode::None;
-            st.skin_requested_uuid = None;
+        let tick = CLIENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if AIMING.load(Ordering::Relaxed)
+            && tick.saturating_sub(AIM_LAST_TICK.load(Ordering::Relaxed)) > 2
+        {
+            AIMING.store(false, Ordering::Relaxed);
+        }
+
+        let Some(input) = RIFLE_INPUT.get() else {
             return;
         };
 
-        let uuid = player.as_entity().uuid(host);
-        let slot = player.selected_slot(host);
-        let stack = player.as_living().main_hand_item(host);
-        let holding = is_winchester(&stack);
-        let rounds = if holding { rounds_in_stack(&stack) } else { 0 };
-        let screen_open = host.has_open_screen();
-        let use_down = !screen_open && holding && host.is_key_down(VANILLA_KEY_USE);
-
-        let mut reload_clicks = 0u32;
-        while host.consume_key_click(KEY_RELOAD) {
-            reload_clicks += 1;
-        }
-        let mut inspect_clicks = 0u32;
-        while host.consume_key_click(KEY_INSPECT) {
-            inspect_clicks += 1;
+        if !host.playing() {
+            PENDING_FIRE.store(false, Ordering::Relaxed);
+            CLIENT_SPRINTING.store(false, Ordering::Relaxed);
+            CLIENT_SNEAKING.store(false, Ordering::Relaxed);
+            CLIENT_RELOADING.store(false, Ordering::Relaxed);
+            let mut anim = client_anim().lock().unwrap();
+            anim.was_holding = false;
+            anim.action = ActionAnim::None;
+            anim.skin_requested = false;
+            return;
         }
 
-        let sprinting = player.as_entity().sprinting(host).unwrap_or(false);
-        let vel = player
-            .as_entity()
-            .velocity(host)
-            .unwrap_or([0.0, 0.0, 0.0]);
-        let horiz_speed = ((vel[0] * vel[0] + vel[2] * vel[2]).sqrt() as f32).min(0.45);
-        let on_ground = player.as_entity().on_ground(host).unwrap_or(true);
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
 
-        let mut send_reload = false;
-        let mut send_cancel_reload = false;
-        let mut send_skin_req = false;
-        let mut play_sound: Option<(&'static str, f32, f32)> = None;
+        // Read horizontal velocity from camera entity (`Side: both`).
+        let mut horiz_speed = 0.0_f32;
+        let mut grounded_motion = true;
+        if let Some(cam) = host.camera_entity()
+            && let Some(vel) = cam.velocity(host)
+        {
+            horiz_speed = ((vel[0] * vel[0] + vel[2] * vel[2]).sqrt() as f32).min(0.45);
+            grounded_motion = vel[1].abs() < 0.14;
+        }
+
+        let mut want_skin_request = false;
+        let mut foley_to_play: Option<(&'static str, f32, f32)> = None;
 
         {
-            let mut st = CLIENT.lock().unwrap();
-            let newly_equipped = holding && (!st.was_holding_rifle || st.last_slot != slot);
-            st.was_holding_rifle = holding;
-            st.last_slot = slot;
-            st.holding_rifle = holding;
-            st.sprinting = sprinting;
-            st.known_rounds = rounds;
-
-            if holding && st.skin_requested_uuid != Some(uuid) {
-                st.skin_requested_uuid = Some(uuid);
-                send_skin_req = true;
+            let mut anim = client_anim().lock().unwrap();
+            if holding && !anim.skin_requested {
+                anim.skin_requested = true;
+                want_skin_request = true;
             }
 
-            if !holding {
-                if st.is_reloading() {
-                    send_cancel_reload = true;
-                }
-                st.aim_down = false;
-                st.mode = AnimMode::None;
-                st.mode_ticks = 0.0;
-            } else {
-                if newly_equipped {
-                    st.mode = AnimMode::Draw;
-                    st.mode_ticks = 0.0;
-                    st.hammer_uncocked = rounds == 0;
-                    play_sound = Some((SND_DRAW, 0.85, 1.0));
-                }
-
-                // Sprint cancels inspect or active reload cleanly.
-                if sprinting && !use_down {
-                    if st.is_reloading() {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                        send_cancel_reload = true;
-                    } else if st.mode == AnimMode::Inspect {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
-                }
-
-                // Aiming down sights cancels inspect immediately.
-                if use_down && st.mode == AnimMode::Inspect {
-                    st.mode = AnimMode::None;
-                    st.mode_ticks = 0.0;
-                }
-
-                st.aim_down = use_down && !st.blocks_ads() && !sprinting;
-
-                if !screen_open && reload_clicks > 0 && !st.is_reloading() && st.mode != AnimMode::Draw {
-                    send_reload = true;
-                } else if !screen_open
-                    && inspect_clicks > 0
-                    && st.mode == AnimMode::None
-                    && !st.aim_down
-                    && !sprinting
-                {
-                    st.mode = AnimMode::Inspect;
-                    st.mode_ticks = 0.0;
-                    play_sound = Some((SND_INSPECT, 0.90, 1.0));
-                }
+            if holding && !anim.was_holding {
+                anim.was_holding = true;
+                anim.action = ActionAnim::Draw { elapsed: 0.0 };
+                foley_to_play = Some((SND_DRAW, 0.85, 1.0));
+            } else if !holding && anim.was_holding {
+                anim.was_holding = false;
+                anim.action = ActionAnim::None;
             }
 
-            // Walk / idle bobbing phase update (20 Hz tick).
-            let target_walk = if holding && on_ground && horiz_speed > 0.015 {
+            // Smooth 20 Hz walk bobbing phase.
+            let target_walk = if holding && grounded_motion && horiz_speed > 0.015 {
                 (horiz_speed / 0.22).clamp(0.0, 1.45)
             } else {
                 0.0
             };
-            st.walk_speed += (target_walk - st.walk_speed) * 0.35;
-            st.walk_phase = (st.walk_phase
-                + st.walk_speed * if sprinting { 0.72 } else { 0.52 })
-                % core::f32::consts::TAU;
+            anim.walk_speed += (target_walk - anim.walk_speed) * 0.35;
+            let sprint_now = CLIENT_SPRINTING.load(Ordering::Relaxed);
+            anim.walk_phase =
+                (anim.walk_phase + anim.walk_speed * if sprint_now { 0.72 } else { 0.52 }) % TAU;
         }
 
-        if let Some((snd, vol, pitch)) = play_sound {
-            play_gun_sound(host, snd, vol, pitch);
+        if let Some((snd, vol, pitch)) = foley_to_play {
+            play_local_foley(host, snd, vol, pitch);
         }
-        if send_skin_req {
-            let _ = host.send_to_server(
-                handles().input_channel,
+        if want_skin_request {
+            let _ = input.send(
+                host,
                 &RifleInput {
                     action: VarInt(ACTION_SKIN_REQUEST),
                 },
             );
         }
-        if send_cancel_reload {
-            let _ = host.send_to_server(
-                handles().input_channel,
+
+        // Always drain custom key clicks even when not holding so clicks never queue up stale.
+        let mut want_reload = false;
+        while host.consume_click(MOD_ID, RELOAD_MAPPING) {
+            want_reload = true;
+        }
+        let mut want_inspect = false;
+        while host.consume_click(MOD_ID, INSPECT_MAPPING) {
+            want_inspect = true;
+        }
+
+        if !holding {
+            PENDING_FIRE.store(false, Ordering::Relaxed);
+            CLIENT_SPRINTING.store(false, Ordering::Relaxed);
+            CLIENT_SNEAKING.store(false, Ordering::Relaxed);
+            if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
+                let _ = input.send(
+                    host,
+                    &RifleInput {
+                        action: VarInt(ACTION_RELOAD_CANCEL),
+                    },
+                );
+            }
+            return;
+        }
+
+        let sneak_down = matches!(host.mapping("key.sneak"), Ok(Some(m)) if m.down);
+        let sprint_down = matches!(host.mapping("key.sprint"), Ok(Some(m)) if m.down);
+        let forward_down = matches!(host.mapping("key.forward"), Ok(Some(m)) if m.down);
+        let sprinting = sprint_down && forward_down && !sneak_down;
+        CLIENT_SNEAKING.store(sneak_down, Ordering::Relaxed);
+        CLIENT_SPRINTING.store(sprinting, Ordering::Relaxed);
+
+        if sprinting {
+            if AIMING.swap(false, Ordering::Relaxed) {
+                let _ = host.set_mapping_down("key.use", false);
+            }
+            if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
+                PENDING_RELOAD_CANCEL.store(true, Ordering::Relaxed);
+            }
+            let mut anim = client_anim().lock().unwrap();
+            if matches!(
+                anim.action,
+                ActionAnim::Inspect { .. }
+                    | ActionAnim::ReloadIntro { .. }
+                    | ActionAnim::ReloadInsert { .. }
+            ) {
+                anim.action = ActionAnim::None;
+            }
+        }
+
+        if AIMING.load(Ordering::Relaxed) {
+            let mut anim = client_anim().lock().unwrap();
+            if matches!(anim.action, ActionAnim::Inspect { .. }) {
+                anim.action = ActionAnim::None;
+            }
+        }
+
+        if CLIENT_RELOADING.load(Ordering::Relaxed) && AIMING.swap(false, Ordering::Relaxed) {
+            let _ = host.set_mapping_down("key.use", false);
+        }
+
+        if PENDING_RELOAD_CANCEL.swap(false, Ordering::Relaxed) {
+            let _ = input.send(
+                host,
                 &RifleInput {
                     action: VarInt(ACTION_RELOAD_CANCEL),
                 },
             );
         }
-        if send_reload {
-            let _ = host.send_to_server(
-                handles().input_channel,
+
+        if PENDING_FIRE.swap(false, Ordering::Relaxed) {
+            let _ = input.send(
+                host,
                 &RifleInput {
-                    action: VarInt(ACTION_RELOAD),
+                    action: VarInt(ACTION_FIRE),
                 },
             );
+        }
+
+        if want_reload && !CLIENT_RELOADING.load(Ordering::Relaxed) && !sprinting {
+            let busy_draw = matches!(
+                client_anim().lock().unwrap().action,
+                ActionAnim::Draw { .. }
+            );
+            if !busy_draw {
+                AIMING.store(false, Ordering::Relaxed);
+                let _ = host.set_mapping_down("key.use", false);
+                let _ = input.send(
+                    host,
+                    &RifleInput {
+                        action: VarInt(ACTION_RELOAD),
+                    },
+                );
+            }
+        } else if want_inspect && !CLIENT_RELOADING.load(Ordering::Relaxed) && !sprinting {
+            let start_inspect = {
+                let mut anim = client_anim().lock().unwrap();
+                if anim.action == ActionAnim::None && !AIMING.load(Ordering::Relaxed) {
+                    anim.action = ActionAnim::Inspect { elapsed: 0.0 };
+                    true
+                } else {
+                    false
+                }
+            };
+            if start_inspect {
+                play_local_foley(host, SND_INSPECT, 0.90, 1.0);
+            }
         }
     }
 
     fn server_tick(&self, _: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
-        if event.phase != ServerTickPhase::Post {
-            return;
+        if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
+            SERVER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
-        let mut srv = SERVER.lock().unwrap();
-        srv.tick = srv.tick.wrapping_add(1);
     }
 
     fn level_tick_post(&self, host: HostSide<'_>, _: &mut LevelTickPostEvent) {
         let HostSide::Server(host) = host else {
             return;
         };
-        if host.dimension() != "minecraft:overworld" {
+        let now = SERVER_TICKS.load(Ordering::Relaxed);
+        tick_reload_sessions(host, now);
+    }
+
+    /// Per-frame animation stepper (`event.elapsed`) + 240Hz camera recoil climb & partial recovery.
+    fn render_frame_pre(&self, host: &mut dyn ClientHost, event: &mut RenderFramePreEvent) {
+        FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+        if host.is_paused() {
+            return;
+        }
+        let dt = event.elapsed.as_secs_f32().clamp(0.0, 0.05);
+        if dt <= 0.0 {
             return;
         }
 
-        let (now, active_reloads) = {
-            let srv = SERVER.lock().unwrap();
-            let now = srv.tick;
-            let reloads: Vec<(u128, ReloadTracker)> =
-                srv.reloading.iter().map(|(&k, &v)| (k, v)).collect();
-            (now, reloads)
-        };
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        let sprinting = CLIENT_SPRINTING.load(Ordering::Relaxed);
 
-        for (uuid, tracker) in active_reloads {
-            step_player_reload(host, uuid, tracker, now);
-        }
-    }
+        let mut cam_delta_pitch = 0.0_f32;
+        let mut cam_delta_yaw = 0.0_f32;
+        let mut triggered_foley: Vec<(&'static str, f32, f32)> = Vec::new();
 
-    fn render_frame_pre(&self, host: &mut dyn ClientHost, event: &mut RenderFramePreEvent) {
-        let dt = event.frame_dt_seconds.clamp(0.0, 0.1);
-        let dt_ticks = dt * 20.0;
-
-        let mut triggered_sounds: Vec<(&'static str, f32, f32)> = Vec::new();
         {
-            let mut st = CLIENT.lock().unwrap();
-            let target_ads = if st.holding_rifle && st.aim_down && !st.blocks_ads() {
-                1.0
+            let mut anim = client_anim().lock().unwrap();
+            if !holding {
+                anim.aim_dyn.reset(0.0);
+                anim.recoil_dyn.reset(0.0);
+                anim.sprint_dyn.reset(0.0);
+                anim.recoil_target_timer = None;
+                anim.cam_recoil_timer = None;
+                anim.jolt_timer = 0.0;
+                ADS_BITS.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                return;
+            }
+
+            let aiming_want = AIMING.load(Ordering::Relaxed)
+                && !CLIENT_RELOADING.load(Ordering::Relaxed)
+                && !sprinting
+                && !anim.blocks_ads();
+
+            let aim_y = anim.aim_dyn.step(dt, if aiming_want { 1.0 } else { 0.0 });
+            ADS_BITS.store(aim_y.clamp(0.0, 1.2).to_bits(), Ordering::Relaxed);
+
+            let sprint_want = sprinting && !aiming_want && anim.action == ActionAnim::None;
+            let _ = anim.sprint_dyn.step(dt, if sprint_want { 1.0 } else { 0.0 });
+
+            anim.idle_time = (anim.idle_time + dt) % 600.0;
+
+            let kick_target = if let Some(cur) = anim.recoil_target_timer {
+                let next = cur + dt;
+                anim.recoil_target_timer = if next >= 0.22 { None } else { Some(next) };
+                recoil_envelope(cur)
             } else {
                 0.0
             };
-            let step = ADS_RATE_PER_SEC * dt;
-            if st.aim_progress < target_ads {
-                st.aim_progress = (st.aim_progress + step).min(target_ads);
-            } else if st.aim_progress > target_ads {
-                st.aim_progress = (st.aim_progress - step).max(target_ads);
+            let _ = anim.recoil_dyn.step(dt, kick_target);
+
+            if let Some(t0) = anim.cam_recoil_timer {
+                let t1 = t0 + dt;
+                let (cp0, cy0) = cam_recoil_curve(t0);
+                let (cp1, cy1) = cam_recoil_curve(t1);
+                cam_delta_pitch = (cp1 - cp0) * anim.cam_pitch_kick;
+                cam_delta_yaw = (cy1 - cy0) * anim.cam_yaw_kick;
+                anim.cam_recoil_timer = if t1 >= 0.385 { None } else { Some(t1) };
             }
 
-            st.idle_time = (st.idle_time + dt) % 600.0;
-            st.recoil = (st.recoil - dt * 5.2).max(0.0);
-            st.muzzle_flash = (st.muzzle_flash - dt * 16.0).max(0.0);
-            let cam_decay = (-dt * 12.0).exp();
-            st.camera_pitch_kick *= cam_decay;
-            st.camera_yaw_kick *= cam_decay;
+            if anim.jolt_timer > 0.0 {
+                anim.jolt_timer = (anim.jolt_timer - dt).max(0.0);
+            }
 
-            st.mode_ticks += dt_ticks;
-            match st.mode {
-                AnimMode::None => {}
-                AnimMode::Draw => {
-                    if st.mode_ticks >= DRAW_TICKS {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
+            // Advance TAC-style action animation state & trigger frame-exact stereo foley.
+            match anim.action {
+                ActionAnim::None => {}
+                ActionAnim::Draw { elapsed } => {
+                    let next = elapsed + dt;
+                    anim.action = if next >= DRAW_DURATION_SECS {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::Draw { elapsed: next }
+                    };
                 }
-                AnimMode::FireCycle {
-                    mut cock_sound_played,
-                    mut lever_sound_played,
+                ActionAnim::FireCycle {
+                    elapsed,
                     keep_uncocked,
-                } => {
-                    if keep_uncocked {
-                        // Last round fired: hammer stays down on empty chamber, no lever throw.
-                        st.hammer_uncocked = true;
-                        if st.mode_ticks >= 5.0 {
-                            st.mode = AnimMode::None;
-                            st.mode_ticks = 0.0;
-                        } else {
-                            st.mode = AnimMode::FireCycle {
-                                cock_sound_played: true,
-                                lever_sound_played: true,
-                                keep_uncocked: true,
-                            };
-                        }
-                    } else {
-                        let total = (LEVER_DELAY_TICKS + LEVER_DURATION_TICKS) as f32;
-                        if !lever_sound_played && st.mode_ticks >= LEVER_DELAY_TICKS as f32 {
-                            lever_sound_played = true;
-                            triggered_sounds.push((SND_LEVER, 0.85, 1.0));
-                        }
-                        if !cock_sound_played && st.mode_ticks >= (LEVER_DELAY_TICKS as f32 + 5.2) {
-                            cock_sound_played = true;
-                            triggered_sounds.push((SND_COCK, 0.72, 1.04));
-                        }
-                        if st.mode_ticks >= total {
-                            st.hammer_uncocked = false;
-                            st.mode = AnimMode::None;
-                            st.mode_ticks = 0.0;
-                        } else {
-                            st.mode = AnimMode::FireCycle {
-                                cock_sound_played,
-                                lever_sound_played,
-                                keep_uncocked,
-                            };
-                        }
-                    }
-                }
-                AnimMode::DryClick => {
-                    st.hammer_uncocked = true;
-                    if st.mode_ticks >= 5.0 {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
-                }
-                AnimMode::ReloadIntro { .. } | AnimMode::ReloadLoop { .. } => {
-                    // Safety timeout in case a server sync packet was dropped across level change.
-                    if st.mode_ticks > 40.0 {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
-                }
-                AnimMode::ReloadEndNorm => {
-                    if st.mode_ticks >= RELOAD_END_NORM_TICKS as f32 {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
-                }
-                AnimMode::ReloadEndEmpty {
                     mut lever_sound_played,
                     mut cock_sound_played,
                 } => {
-                    if !lever_sound_played && st.mode_ticks >= 3.0 {
-                        lever_sound_played = true;
-                        triggered_sounds.push((SND_LEVER, 0.90, 0.98));
-                    }
-                    if !cock_sound_played && st.mode_ticks >= 8.2 {
-                        cock_sound_played = true;
-                        st.hammer_uncocked = false;
-                        triggered_sounds.push((SND_COCK, 0.78, 1.0));
-                    }
-                    if st.mode_ticks >= RELOAD_END_EMPTY_TICKS as f32 {
-                        st.hammer_uncocked = false;
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
+                    let next = elapsed + dt;
+                    if keep_uncocked {
+                        anim.hammer_uncocked = true;
+                        anim.action = if next >= 0.24 {
+                            ActionAnim::None
+                        } else {
+                            ActionAnim::FireCycle {
+                                elapsed: next,
+                                keep_uncocked: true,
+                                lever_sound_played: true,
+                                cock_sound_played: true,
+                            }
+                        };
                     } else {
-                        st.mode = AnimMode::ReloadEndEmpty {
-                            lever_sound_played,
-                            cock_sound_played,
+                        if !lever_sound_played && next >= LEVER_DELAY_SECS {
+                            lever_sound_played = true;
+                            triggered_foley.push((SND_LEVER, 0.86, 1.0));
+                        }
+                        if !cock_sound_played && next >= LEVER_DELAY_SECS + 0.24 {
+                            cock_sound_played = true;
+                            anim.hammer_uncocked = false;
+                            triggered_foley.push((SND_COCK, 0.72, 1.04));
+                        }
+                        let total = LEVER_DELAY_SECS + LEVER_DURATION_SECS;
+                        anim.action = if next >= total {
+                            anim.hammer_uncocked = false;
+                            ActionAnim::None
+                        } else {
+                            ActionAnim::FireCycle {
+                                elapsed: next,
+                                keep_uncocked: false,
+                                lever_sound_played,
+                                cock_sound_played,
+                            }
                         };
                     }
                 }
-                AnimMode::Inspect => {
-                    if st.mode_ticks >= INSPECT_TICKS {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
+                ActionAnim::DryClick { elapsed } => {
+                    let next = elapsed + dt;
+                    anim.action = if next >= 0.22 {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::DryClick { elapsed: next }
+                    };
+                }
+                ActionAnim::ReloadIntro { elapsed } => {
+                    let next = elapsed + dt;
+                    anim.action = if next > 2.5 {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::ReloadIntro { elapsed: next }
+                    };
+                }
+                ActionAnim::ReloadInsert { elapsed } => {
+                    let next = elapsed + dt;
+                    anim.action = if next > 2.5 {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::ReloadInsert { elapsed: next }
+                    };
+                }
+                ActionAnim::ReloadEndNorm { elapsed } => {
+                    let next = elapsed + dt;
+                    let dur = (RELOAD_CLOSE_NORM_TICKS as f32) * 0.05;
+                    anim.action = if next >= dur {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::ReloadEndNorm { elapsed: next }
+                    };
+                }
+                ActionAnim::ReloadEndEmpty {
+                    elapsed,
+                    mut lever_sound_played,
+                    mut cock_sound_played,
+                } => {
+                    let next = elapsed + dt;
+                    let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
+                    if !lever_sound_played && next >= 0.15 {
+                        lever_sound_played = true;
+                        triggered_foley.push((SND_LEVER, 0.90, 0.98));
                     }
+                    if !cock_sound_played && next >= 0.40 {
+                        cock_sound_played = true;
+                        anim.hammer_uncocked = false;
+                        triggered_foley.push((SND_COCK, 0.78, 1.0));
+                    }
+                    anim.action = if next >= dur {
+                        anim.hammer_uncocked = false;
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::ReloadEndEmpty {
+                            elapsed: next,
+                            lever_sound_played,
+                            cock_sound_played,
+                        }
+                    };
+                }
+                ActionAnim::Inspect { elapsed } => {
+                    let next = elapsed + dt;
+                    anim.action = if next >= INSPECT_DURATION_SECS {
+                        ActionAnim::None
+                    } else {
+                        ActionAnim::Inspect { elapsed: next }
+                    };
                 }
             }
         }
 
-        for (snd, vol, pitch) in triggered_sounds {
-            play_gun_sound(host, snd, vol, pitch);
+        for (snd, vol, pitch) in triggered_foley {
+            play_local_foley(host, snd, vol, pitch);
+        }
+
+        if (cam_delta_pitch.abs() > 1e-5 || cam_delta_yaw.abs() > 1e-5)
+            && let Some(cam) = host.camera_entity()
+            && let Some([yaw, pitch]) = cam.rotation(host)
+        {
+            let new_pitch = (pitch - cam_delta_pitch).clamp(-89.9, 89.9);
+            let new_yaw = yaw + cam_delta_yaw;
+            let _ = host.set_local_rotation(new_yaw, new_pitch);
         }
     }
 
     fn compute_fov(&self, _: &dyn ClientHost, event: &mut ComputeFovEvent) {
-        let st = CLIENT.lock().unwrap();
-        let t = smoothstep(st.aim_progress);
-        if t <= 0.0001 {
-            return;
+        let aim = aim_progress().clamp(0.0, 1.15);
+        if aim > 0.001 {
+            let scale = 1.0 - (1.0 - AIM_FOV) * aim;
+            let scaled = (event.degrees * scale).clamp(1.0, 179.0);
+            if scaled.is_finite() {
+                event.degrees = scaled;
+            }
         }
-        let factor = 1.0 + (ADS_FOV_FACTOR - 1.0) * t;
-        event.fov *= factor;
     }
 
     fn calculate_player_turn(&self, _: &dyn ClientHost, event: &mut CalculatePlayerTurnEvent) {
-        let st = CLIENT.lock().unwrap();
-        let t = smoothstep(st.aim_progress) as f64;
-        if t <= 0.0001 {
-            return;
+        let aim = aim_progress().clamp(0.0, 1.0);
+        if aim > 0.001 {
+            let sens_scale = 1.0 - (1.0 - AIM_FOV) * aim * 0.85;
+            event.mouse_sensitivity *= f64::from(sens_scale);
         }
-        let mult = 1.0 + (ADS_TURN_SENSITIVITY - 1.0) * t;
-        event.y_rot *= mult;
-        event.x_rot *= mult;
     }
 
     fn camera_pose(&self, _: &dyn ClientHost, event: &mut CameraPoseEvent<'_>) {
-        let st = CLIENT.lock().unwrap();
-        if st.camera_pitch_kick.abs() > 0.001 || st.camera_yaw_kick.abs() > 0.001 {
-            event.angles.pitch -= st.camera_pitch_kick;
-            event.angles.yaw += st.camera_yaw_kick;
+        let (jolt, sign) = {
+            let anim = client_anim().lock().unwrap();
+            (anim.jolt_timer, anim.jolt_yaw_sign)
+        };
+        if jolt > 0.0 {
+            let u = (jolt / 0.065).clamp(0.0, 1.0);
+            let wave = (PI * (1.0 - u) * 2.0).sin() * u;
+            event.pitch -= 0.42 * wave;
+            event.yaw += 0.24 * wave * sign;
         }
     }
 
     fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> Flow {
+        let Some(rifle) = RIFLE_KEY.get().copied() else {
+            return Flow::Continue;
+        };
+
+        let hand = event.render.hand;
+        if hand == Hand::Off {
+            if holding_rifle_recently() {
+                // Two-handed lever-action rifle occupies both hands while equipped.
+                return Flow::Cancel;
+            }
+            return Flow::Continue;
+        }
+
+        let Some(loaded_on_stack) = event
+            .render
+            .stack
+            .filter(|s| s.item() == rifle)
+            .map(rounds)
+        else {
+            RIFLE_SEEN_FRAME.store(0, Ordering::Relaxed);
+            return Flow::Continue;
+        };
+
+        let equip_raw = event.render.equip;
+        RIFLE_SEEN_FRAME.store(FRAME_SEQ.load(Ordering::Relaxed), Ordering::Relaxed);
+
         let (
-            holding,
             aim,
-            recoil,
-            flash,
-            sprinting,
+            kick,
+            sprint_blend,
+            ads_factor,
+            crouch_factor,
+            roll_sign,
             walk_phase,
             walk_speed,
             idle_time,
             hammer_uncocked,
-            mode,
-            mode_ticks,
+            action,
             skin,
         ) = {
-            let mut st = CLIENT.lock().unwrap();
-            let uuid = event.render.player;
-            let skin = resolve_client_skin(&mut st, uuid);
+            let mut anim = client_anim().lock().unwrap();
+            anim.known_rounds = loaded_on_stack;
+            if loaded_on_stack == 0 && !matches!(anim.action, ActionAnim::ReloadEndEmpty { .. }) {
+                anim.hammer_uncocked = true;
+            }
             (
-                st.holding_rifle,
-                smoothstep(st.aim_progress),
-                st.recoil,
-                st.muzzle_flash,
-                st.sprinting,
-                st.walk_phase,
-                st.walk_speed,
-                st.idle_time,
-                st.hammer_uncocked,
-                st.mode,
-                st.mode_ticks,
-                skin,
+                anim.aim_dyn.y,
+                anim.recoil_dyn.y,
+                anim.sprint_dyn.y.clamp(0.0, 1.0),
+                anim.shot_ads_factor,
+                anim.shot_crouch_factor,
+                anim.shot_roll_sign,
+                anim.walk_phase,
+                anim.walk_speed,
+                anim.idle_time,
+                anim.hammer_uncocked,
+                anim.action,
+                anim.skin.clone(),
             )
         };
 
-        if !holding {
-            return Flow::Continue;
-        }
-        if event.hand == Hand::Off {
-            // Suppress off-hand item while wielding the two-handed lever-action rifle.
-            return Flow::Cancel;
-        }
-        if !is_winchester(&event.render.item) {
-            return Flow::Continue;
-        }
-
-        let Some(models) = *RIFLE_MODELS.lock().unwrap() else {
-            return Flow::Continue;
-        };
-
+        let equip = equip_raw.clamp(0.0, 1.0) * (1.0 - aim.clamp(0.0, 1.0));
         let pose = evaluate_weapon_pose(
             aim,
-            recoil,
-            flash,
-            sprinting,
+            equip,
+            kick,
+            sprint_blend,
+            ads_factor,
+            crouch_factor,
+            roll_sign,
             walk_phase,
             walk_speed,
             idle_time,
             hammer_uncocked,
-            mode,
-            mode_ticks,
+            action,
         );
 
-        let equip = event.render.equip_progress.clamp(0.0, 1.0) * (1.0 - aim);
-        let draw = &mut event.draw;
-        draw.push();
+        let arms = PLAYER_ARMS.get_or_init(PlayerArms::procedural_both);
+        let arm_pair = if skin.slim { &arms.slim } else { &arms.wide };
+        let models_opt = *RIFLE_MODELS.lock().unwrap();
 
-        // 1. Animated weapon root pose in camera view space.
+        if let Some(models) = models_opt {
+            let draw = &mut *event.draw;
+            draw.push();
+
+            // 1. Animated weapon root pose in camera view space.
+            draw.translate(pose.gun_trans);
+            draw.rotate_about([1.0, 0.0, 0.0], pose.gun_rot[0], [0.0; 3]);
+            draw.rotate_about([0.0, 1.0, 0.0], pose.gun_rot[1], [0.0; 3]);
+            draw.rotate_about([0.0, 0.0, 1.0], pose.gun_rot[2], [0.0; 3]);
+
+            // 2. Vanilla right-hand anchor (`HAND_BASE`) + `display.firstperson_righthand`
+            //    (`RIFLE_DISPLAY_TRANS`, `0.45` scale) + `[-0.5; 3]` unit-block centering.
+            draw.translate([HAND_BASE[0], HAND_BASE[1] - equip * 0.6, HAND_BASE[2]]);
+            draw.translate(RIFLE_DISPLAY_TRANS);
+            draw.scale([RIFLE_DISPLAY_SCALE; 3]);
+            draw.translate([-0.5, -0.5, -0.5]);
+
+            // 3. Receiver / barrel / walnut stock body (`winchester_body.json`).
+            if draw.model(models.body, 0xFF_FF_FF_FF).is_ok() {
+                // 4. Articulated lever (`winchester_lever.json`).
+                draw.push();
+                draw.rotate_about([1.0, 0.0, 0.0], pose.lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
+                let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
+                draw.pop();
+
+                // 5. Articulated hammer (`winchester_hammer.json`).
+                draw.push();
+                draw.rotate_about(
+                    [1.0, 0.0, 0.0],
+                    pose.hammer_deg,
+                    tex_to_unit(HAMMER_PIVOT_TEX),
+                );
+                let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+                draw.pop();
+
+                // 6. Articulated trigger (`winchester_trigger.json`).
+                draw.push();
+                draw.rotate_about(
+                    [1.0, 0.0, 0.0],
+                    pose.trigger_deg,
+                    tex_to_unit(TRIGGER_PIVOT_TEX),
+                );
+                let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
+                draw.pop();
+
+                // 7. Articulated King's loading gate (`winchester_gate.json`).
+                draw.push();
+                draw.rotate_about([0.0, 1.0, 0.0], pose.gate_deg, tex_to_unit(GATE_PIVOT_TEX));
+                let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
+                draw.pop();
+
+                // 8. Brass `.44-40` cartridge pushed through the loading gate during reload.
+                if pose.show_cartridge {
+                    draw.push();
+                    draw.translate(tex_to_unit(pose.cartridge_tex));
+                    draw.rotate_about([0.0, 1.0, 0.0], pose.cartridge_rot[1], [0.0; 3]);
+                    draw.rotate_about([1.0, 0.0, 0.0], pose.cartridge_rot[0], [0.0; 3]);
+                    draw.rotate_about([0.0, 0.0, 1.0], pose.cartridge_rot[2], [0.0; 3]);
+                    draw.translate([-0.5, -0.5, -0.5]);
+                    let _ = draw.model(models.cartridge, 0xFF_FF_FF_FF);
+                    draw.pop();
+                }
+
+                // 9. Both 1st-person player arms (`slim` 3px or `wide` 4px + outer sleeves)
+                //    drawn in the same `[0..1]` rifle frame with matching proportions.
+                draw_gun_space_arm(
+                    draw,
+                    &arm_pair.right,
+                    &skin,
+                    true,
+                    pose.right_hand_tex,
+                    pose.right_hand_rot,
+                );
+                draw_gun_space_arm(
+                    draw,
+                    &arm_pair.left,
+                    &skin,
+                    false,
+                    pose.left_hand_tex,
+                    pose.left_hand_rot,
+                );
+
+                draw.pop();
+                return Flow::Cancel;
+            }
+            draw.pop();
+        }
+
+        // Fallback if standalone models haven't finished baking yet: pose vanilla item + arms.
+        {
+            let render = &mut *event.render;
+            render.translation[0] += pose.gun_trans[0];
+            render.translation[1] += pose.gun_trans[1];
+            render.translation[2] += pose.gun_trans[2];
+            render.rotation[0] += pose.gun_rot[0];
+            render.rotation[1] += pose.gun_rot[1];
+            render.rotation[2] += pose.gun_rot[2];
+        }
+        let draw = &mut *event.draw;
+        draw.push();
         draw.translate(pose.gun_trans);
         draw.rotate_about([1.0, 0.0, 0.0], pose.gun_rot[0], [0.0; 3]);
         draw.rotate_about([0.0, 1.0, 0.0], pose.gun_rot[1], [0.0; 3]);
         draw.rotate_about([0.0, 0.0, 1.0], pose.gun_rot[2], [0.0; 3]);
-        draw.scale([pose.gun_scale; 3]);
-
-        // 2. Vanilla right-hand anchor (`first_person.rs` `item_pose` at `attack = 0`) +
-        //    `display.firstperson_righthand` (`[0, 0.3, -4.75] / 16`, `scale = 0.45`) +
-        //    `[-0.5, -0.5, -0.5]` unit-block centering so `[0..1]` equals `[0..16]` JSON texels.
         draw.translate([HAND_BASE[0], HAND_BASE[1] - equip * 0.6, HAND_BASE[2]]);
         draw.translate(RIFLE_DISPLAY_TRANS);
         draw.scale([RIFLE_DISPLAY_SCALE; 3]);
         draw.translate([-0.5, -0.5, -0.5]);
-
-        // 3. Draw receiver/barrel/stock body (`winchester_body.json`).
-        if draw.model(models.body, 0xFF_FF_FF_FF).is_err() {
-            draw.pop();
-            return Flow::Continue;
-        }
-
-        // 4. Draw articulated lever (`winchester_lever.json`).
-        draw.push();
-        draw.rotate_about([1.0, 0.0, 0.0], pose.lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
-        let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
-        draw.pop();
-
-        // 5. Draw articulated hammer (`winchester_hammer.json`).
-        draw.push();
-        draw.rotate_about(
-            [1.0, 0.0, 0.0],
-            pose.hammer_deg,
-            tex_to_unit(HAMMER_PIVOT_TEX),
+        draw_gun_space_arm(
+            draw,
+            &arm_pair.right,
+            &skin,
+            true,
+            pose.right_hand_tex,
+            pose.right_hand_rot,
         );
-        let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
-        draw.pop();
-
-        // 6. Draw articulated trigger (`winchester_trigger.json`).
-        draw.push();
-        draw.rotate_about(
-            [1.0, 0.0, 0.0],
-            pose.trigger_deg,
-            tex_to_unit(TRIGGER_PIVOT_TEX),
+        draw_gun_space_arm(
+            draw,
+            &arm_pair.left,
+            &skin,
+            false,
+            pose.left_hand_tex,
+            pose.left_hand_rot,
         );
-        let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
         draw.pop();
-
-        // 7. Draw King's side loading gate (`winchester_gate.json`).
-        draw.push();
-        draw.rotate_about([0.0, 1.0, 0.0], pose.gate_deg, tex_to_unit(GATE_PIVOT_TEX));
-        let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
-        draw.pop();
-
-        // 8. Draw `.44-40` brass cartridge during per-shell gate insertion.
-        if pose.show_cartridge {
-            draw.push();
-            draw.translate(tex_to_unit(pose.cartridge_tex));
-            draw.rotate_about([0.0, 1.0, 0.0], pose.cartridge_rot[1], [0.0; 3]);
-            draw.rotate_about([1.0, 0.0, 0.0], pose.cartridge_rot[0], [0.0; 3]);
-            draw.rotate_about([0.0, 0.0, 1.0], pose.cartridge_rot[2], [0.0; 3]);
-            draw.translate([-0.5, -0.5, -0.5]);
-            let _ = draw.model(models.cartridge, 0xFF_FF_FF_FF);
-            draw.pop();
-        }
-
-        // 9. Draw both 1st-person player arms (`wide` 4px or `slim` 3px + 3D sleeves)
-        //    directly inside the gun's `[0..1]` frame with identical proportions.
-        if let Some(arms) = PLAYER_ARMS.get() {
-            let (right_part, left_part) = if skin.slim {
-                (&arms.slim_right, &arms.slim_left)
-            } else {
-                (&arms.wide_right, &arms.wide_left)
-            };
-            draw_gun_space_arm(
-                draw,
-                right_part,
-                &skin,
-                true,
-                pose.right_hand_tex,
-                pose.right_hand_rot,
-            );
-            draw_gun_space_arm(
-                draw,
-                left_part,
-                &skin,
-                false,
-                pose.left_hand_tex,
-                pose.left_hand_rot,
-            );
-        }
-
-        draw.pop();
-        Flow::Cancel
+        Flow::Continue
     }
 
     fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-        let (holding, aim, reloading, rounds) = {
-            let st = CLIENT.lock().unwrap();
-            (
-                st.holding_rifle,
-                smoothstep(st.aim_progress),
-                st.is_reloading(),
-                st.known_rounds,
-            )
-        };
-        if !holding {
+        if event.gui_hidden || !holding_rifle_recently() {
             return;
         }
+        let aim = aim_progress().clamp(0.0, 1.0);
+        let [wf, hf] = event.batch.size();
+        let (w, h) = (wf as i32, hf as i32);
 
-        let w = event.width;
-        let h = event.height;
-        let cx = w / 2;
-        let cy = h / 2;
-
-        // Subtle focus vignette when aiming down iron sights (center stays crystal clear).
-        if aim > 0.01 {
-            draw_ads_vignette(&mut event.gui, w, h, aim);
+        if aim >= 0.02 {
+            let brightness =
+                ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0).clamp(0.0, 255.0) as u32;
+            let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
+            let _ = event.batch.gui_paint(&[GuiDraw::Blit {
+                texture: "misc/vignette".into(),
+                blend: mod_api::client::hud_layout::Blend::Vignette,
+                x: 0,
+                y: 0,
+                w,
+                h,
+                uv: [0.0, 0.0],
+                src: [w, h],
+                tex: [w, h],
+                color,
+            }]);
         }
 
-        // Dynamic hip-fire crosshair that fades cleanly out as iron sights align.
-        let hip_alpha = ((1.0 - aim * 1.45).clamp(0.0, 1.0) * 185.0) as u32;
-        if hip_alpha > 4 && !reloading {
-            let color = (hip_alpha << 24) | 0x00F4_EFE6;
-            let shadow = ((hip_alpha / 2) << 24) | 0x0012_100E;
-            let gap = 5;
-            let tick = 3;
-            event.gui.fill([cx - gap - tick, cy], [cx - gap, cy + 1], color);
-            event.gui.fill([cx + gap + 1, cy], [cx + gap + 1 + tick, cy + 1], color);
-            event.gui.fill([cx, cy - gap - tick], [cx + 1, cy - gap], color);
-            event.gui.fill([cx, cy + gap + 1], [cx + 1, cy + gap + 1 + tick], color);
-            event.gui.fill([cx - gap - tick, cy + 1], [cx - gap, cy + 2], shadow);
-            event.gui.fill([cx + gap + 1, cy + 1], [cx + gap + 1 + tick, cy + 2], shadow);
-        }
+        // Compact western brass ammo counter to the right of the hotbar (`8 / 8`).
+        let (rounds_now, reloading) = {
+            let anim = client_anim().lock().unwrap();
+            (
+                anim.known_rounds,
+                CLIENT_RELOADING.load(Ordering::Relaxed),
+            )
+        };
+        let box_w = 52.0_f32;
+        let box_h = 15.0_f32;
+        let x0 = (wf * 0.5 + 98.0).min(wf - box_w - 6.0);
+        let y0 = hf - 19.0;
+        let border = if reloading {
+            0xCC_E3_B3_4C
+        } else if rounds_now == 0 {
+            0xCC_C9_4A_38
+        } else {
+            0xAA_8C_6D_3F
+        };
+        event.batch.fill([x0, y0, box_w, box_h], 0x92_14_11_0E);
+        event.batch.fill([x0, y0, box_w, 1.0], border);
+        event.batch.fill([x0, y0 + box_h - 1.0, box_w, 1.0], border);
 
-        // Compact western brass ammo counter above right hotbar (`8 / 8`).
-        draw_ammo_hud(&mut event.gui, w, h, rounds, reloading);
+        let label = if reloading {
+            format!("{rounds_now}/{TUBE_CAPACITY}+")
+        } else {
+            format!("{rounds_now} / {TUBE_CAPACITY}")
+        };
+        let tw = event.batch.text_width(&label);
+        let text_color = if rounds_now == 0 && !reloading {
+            0xFF_FF_6E_59
+        } else {
+            0xFF_F5_E6_C8
+        };
+        event
+            .batch
+            .text(&label, [x0 + (box_w - tw) * 0.5, y0 + 4.0], text_color, true);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Keyframe Weapon & Dual-Arm Pose Evaluator
+// TAC-Style Keyframe Weapon & Dual-Arm Pose Evaluator
 // ---------------------------------------------------------------------------
 
 struct WeaponPose {
     gun_trans: [f32; 3],
     gun_rot: [f32; 3],
-    gun_scale: f32,
     lever_deg: f32,
     hammer_deg: f32,
     trigger_deg: f32,
@@ -1335,81 +1647,84 @@ struct WeaponPose {
 #[allow(clippy::too_many_arguments)]
 fn evaluate_weapon_pose(
     aim: f32,
-    recoil: f32,
-    flash: f32,
-    sprinting: bool,
+    equip: f32,
+    kick: f32,
+    sprint_blend: f32,
+    ads_factor: f32,
+    crouch_factor: f32,
+    roll_sign: f32,
     walk_phase: f32,
     walk_speed: f32,
     idle_time: f32,
     hammer_uncocked: bool,
-    mode: AnimMode,
-    mode_ticks: f32,
+    action: ActionAnim,
 ) -> WeaponPose {
-    let hip = 1.0 - aim;
+    let aim_clamped = aim.clamp(0.0, 1.0);
+    let hip = 1.0 - aim_clamped;
 
-    // Base root pose: smooth blend from Hip (`3.2°` natural cant) -> ADS (`ADS_OFFSET`).
+    // Shoulder-pocket parabolic arc dip while raising/lowering iron sights.
+    let arc_dip = -0.030 * (4.0 * aim_clamped * hip);
     let mut gun_trans = [
         ADS_OFFSET[0] * aim,
-        ADS_OFFSET[1] * aim,
+        ADS_OFFSET[1] * aim + arc_dip,
         ADS_OFFSET[2] * aim,
     ];
     let mut gun_rot = [0.0, 0.0, 3.2 * hip];
-    let gun_scale = 1.0 - 0.07 * aim;
 
-    // Subtle procedural breathing + walk Lissajous sway (attenuated 88% in ADS).
+    // Subtle idle breathing + walk Lissajous bobbing (damped 88% in ADS).
     let sway_scale = 0.12 + 0.88 * hip;
-    let breath_y = (idle_time * 1.75).sin() * 0.0028 * sway_scale;
-    let breath_rx = (idle_time * 1.75 + 0.6).cos() * 0.35 * sway_scale;
-    let bob_x = walk_phase.cos() * 0.014 * walk_speed * sway_scale;
-    let bob_y = -(walk_phase * 2.0).sin().abs() * 0.012 * walk_speed * sway_scale;
-    let bob_rz = walk_phase.sin() * 1.45 * walk_speed * sway_scale;
+    gun_trans[0] += walk_phase.cos() * 0.013 * walk_speed * sway_scale;
+    gun_trans[1] += (idle_time * 1.75).sin() * 0.0025 * sway_scale
+        - (walk_phase * 2.0).sin().abs() * 0.011 * walk_speed * sway_scale;
+    gun_rot[0] += (idle_time * 1.75 + 0.6).cos() * 0.32 * sway_scale;
+    gun_rot[2] += walk_phase.sin() * 1.35 * walk_speed * sway_scale;
 
-    gun_trans[0] += bob_x;
-    gun_trans[1] += breath_y + bob_y;
-    gun_rot[0] += breath_rx;
-    gun_rot[2] += bob_rz;
-
-    // Sprint low-ready carry across chest when not aiming or running an action animation.
-    if sprinting && aim < 0.05 && mode == AnimMode::None {
-        gun_trans[0] -= 0.11;
-        gun_trans[1] -= 0.075;
-        gun_trans[2] += 0.03;
-        gun_rot[0] -= 12.0;
-        gun_rot[1] += 26.0;
-        gun_rot[2] += 14.0;
+    // Smooth sprint low-ready carry across chest.
+    if sprint_blend > 1e-3 {
+        gun_trans[0] -= 0.105 * sprint_blend;
+        gun_trans[1] -= 0.072 * sprint_blend;
+        gun_trans[2] += 0.028 * sprint_blend;
+        gun_rot[0] -= 11.5 * sprint_blend;
+        gun_rot[1] += 25.0 * sprint_blend;
+        gun_rot[2] += 13.5 * sprint_blend;
     }
 
-    // Crisp backward/upward recoil kick (`+Z` toward shoulder, `+X` muzzle rise).
-    if recoil > 0.001 {
-        let kick_z = if aim > 0.5 { 0.075 } else { 0.095 };
-        let kick_pitch = if aim > 0.5 { 4.8 } else { 8.0 };
-        gun_trans[2] += recoil * kick_z;
-        gun_trans[1] += recoil * 0.016 + flash * 0.005;
-        gun_rot[0] += recoil * kick_pitch;
+    // Rear-stock-pivoted 2nd-order visual recoil kick.
+    if kick.abs() > 1e-4 {
+        let pitch_deg = 7.2 * kick * ads_factor * crouch_factor;
+        let pitch_rad = pitch_deg * (PI / 180.0);
+        let pivot = model_texel_to_hand(RECOIL_PIVOT_TEXELS);
+        let py = HAND_BASE[1] - equip * 0.6 + pivot[1];
+        let pz = HAND_BASE[2] + pivot[2];
+        let dy = py - (py * pitch_rad.cos() - pz * pitch_rad.sin());
+        let dz = pz - (py * pitch_rad.sin() + pz * pitch_rad.cos());
+
+        gun_trans[1] += dy + 0.008 * kick * ads_factor;
+        gun_trans[2] += dz + 0.095 * kick * ads_factor;
+        gun_rot[0] += pitch_deg;
+        gun_rot[1] += 0.85 * kick * ads_factor * roll_sign;
+        gun_rot[2] += 1.30 * kick * ads_factor * roll_sign;
     }
 
-    // Default articulated sub-part angles & hand anchors (in `[0..16]` JSON texels):
-    // - Right hand grips wrist behind trigger guard (`[8.20, 8.20, 17.50]`).
-    // - Left hand cradles walnut forestock (`guarda_mao_traseiro`, `[7.85, 9.55, 5.20]`).
-    let mut lever_deg = 0.0f32;
+    let mut lever_deg = 0.0_f32;
     let mut hammer_deg = if hammer_uncocked { -36.0 } else { 0.0 };
-    let mut trigger_deg = 0.0f32;
-    let mut gate_deg = 0.0f32;
+    let mut trigger_deg = 0.0_f32;
+    let mut gate_deg = 0.0_f32;
     let mut show_cartridge = false;
     let mut cartridge_tex = [11.2, 8.2, 11.2];
     let mut cartridge_rot = [0.0, 0.0, 0.0];
 
-    let base_right_tex = [8.20, 8.20, 17.50];
+    let base_right_tex = GRIP_WRIST_TEXELS;
     let base_right_rot = [
-        112.0 + 2.0 * aim,
-        12.0 - 2.0 * aim,
-        -8.0 + 2.0 * aim,
+        112.0 + 2.0 * aim_clamped,
+        12.0 - 2.0 * aim_clamped,
+        -8.0 + 2.0 * aim_clamped,
     ];
-    let base_left_tex = [7.85, 9.55, 5.20];
+    let base_left_tex = FORESTOCK_TEXELS;
     let base_left_rot = [
-        118.0 + 18.0 * aim,
-        -22.0 + 2.0 * aim,
-        16.0 - 2.0 * aim,
+        118.0 + 18.0 * aim_clamped,
+        -22.0 + 2.0 * aim_clamped,
+        16.0 - 2.0 * aim_clamped,
     ];
 
     let mut right_hand_tex = base_right_tex;
@@ -1417,48 +1732,47 @@ fn evaluate_weapon_pose(
     let mut left_hand_tex = base_left_tex;
     let mut left_hand_rot = base_left_rot;
 
-    match mode {
-        AnimMode::None => {}
-        AnimMode::Draw => {
-            // Smooth TAC draw: rises from low right hip with subtle wrist roll settle.
-            let p = smoothstep((mode_ticks / DRAW_TICKS).clamp(0.0, 1.0));
+    match action {
+        ActionAnim::None => {}
+        ActionAnim::Draw { elapsed } => {
+            let p = smoothstep((elapsed / DRAW_DURATION_SECS).clamp(0.0, 1.0));
             let inv = 1.0 - p;
-            gun_trans[0] += 0.08 * inv;
-            gun_trans[1] -= 0.28 * inv;
-            gun_trans[2] += 0.06 * inv;
-            gun_rot[0] -= 26.0 * inv;
-            gun_rot[1] -= 14.0 * inv;
-            gun_rot[2] += 18.0 * inv;
+            gun_trans[0] += 0.075 * inv;
+            gun_trans[1] -= 0.27 * inv;
+            gun_trans[2] += 0.055 * inv;
+            gun_rot[0] -= 24.0 * inv;
+            gun_rot[1] -= 13.0 * inv;
+            gun_rot[2] += 17.0 * inv;
         }
-        AnimMode::FireCycle { keep_uncocked, .. } => {
-            // Phase A (`0..3t`): trigger squeezed, hammer snaps forward (`0° -> -36°`) to strike firing pin.
-            let strike = (mode_ticks / 1.1).clamp(0.0, 1.0);
-            trigger_deg = -20.0 * (1.0 - ((mode_ticks - 1.2).max(0.0) / 3.0).clamp(0.0, 1.0));
+        ActionAnim::FireCycle {
+            elapsed,
+            keep_uncocked,
+            ..
+        } => {
+            // Trigger pull + hammer fall (`0° -> -36°` in `50 ms`).
+            let strike = (elapsed / 0.05).clamp(0.0, 1.0);
+            trigger_deg = -20.0 * (1.0 - ((elapsed - 0.06).max(0.0) / 0.14).clamp(0.0, 1.0));
             hammer_deg = -36.0 * strike;
 
-            if !keep_uncocked && mode_ticks >= LEVER_DELAY_TICKS as f32 {
-                // Phase B (`3..14t`): lever throws open (`+48°`), cocks hammer (`-36° -> +7° -> 0°`),
-                // right hand follows lever loop forward/down and snaps it shut.
-                let lt = ((mode_ticks - LEVER_DELAY_TICKS as f32) / LEVER_DURATION_TICKS as f32)
-                    .clamp(0.0, 1.0);
+            if !keep_uncocked && elapsed >= LEVER_DELAY_SECS {
+                let lt = ((elapsed - LEVER_DELAY_SECS) / LEVER_DURATION_SECS).clamp(0.0, 1.0);
                 let lever_curve = if lt < 0.45 {
                     smoothstep(lt / 0.45)
                 } else {
                     1.0 - smoothstep((lt - 0.45) / 0.55)
                 };
                 lever_deg = 48.0 * lever_curve;
-
-                // Hammer pushed back past full-cock notch as bolt carrier slides rearward, then locks at `0°`.
                 hammer_deg = if lt < 0.48 {
                     lerp(-36.0, 7.5, smoothstep(lt / 0.48))
                 } else {
                     lerp(7.5, 0.0, smoothstep((lt - 0.48) / 0.52))
                 };
 
-                // Subtle clockwise wrist roll while working the lever loop (even in ADS).
-                let roll_scale = 1.0 - 0.45 * aim;
-                gun_rot[2] += 6.5 * lever_curve * roll_scale;
-                gun_rot[0] -= 2.2 * lever_curve * roll_scale;
+                let damp = 1.0 - 0.40 * aim_clamped;
+                gun_trans[1] -= 0.028 * lever_curve * damp;
+                gun_trans[2] += 0.015 * lever_curve * damp;
+                gun_rot[0] -= 2.4 * lever_curve * damp;
+                gun_rot[2] += 7.5 * lever_curve * damp;
 
                 right_hand_tex = [
                     base_right_tex[0],
@@ -1468,27 +1782,23 @@ fn evaluate_weapon_pose(
                 right_hand_rot[0] = base_right_rot[0] + 24.0 * lever_curve;
             }
         }
-        AnimMode::DryClick => {
-            let p = 1.0 - (mode_ticks / 5.0).clamp(0.0, 1.0);
+        ActionAnim::DryClick { elapsed } => {
+            let p = 1.0 - (elapsed / 0.22).clamp(0.0, 1.0);
             trigger_deg = -20.0 * p;
-            hammer_deg = -36.0;
-            gun_rot[0] -= 1.4 * p;
+            gun_trans[2] += 0.009 * p;
+            gun_rot[0] -= 1.1 * p;
         }
-        AnimMode::ReloadIntro { .. } => {
-            // Rifle rolls `-20°` left to expose the right-side King's loading gate (`porta_B`),
-            // while left hand slides back from the forestock toward the receiver!
-            let p = smoothstep((mode_ticks / RELOAD_INTRO_TICKS as f32).clamp(0.0, 1.0));
+        ActionAnim::ReloadIntro { elapsed } => {
+            let open_secs = (RELOAD_OPEN_TICKS as f32) * 0.05;
+            let p = smoothstep((elapsed / open_secs).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
             left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], p);
             left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], p);
         }
-        AnimMode::ReloadLoop { .. } => {
-            // Single `.44-40` cartridge insertion cycle (`0..10t`):
-            //   0.00..0.32: left thumb brings brass cartridge up from belt to loading gate mouth
-            //   0.32..0.72: nose presses gate inward (`gate_deg = -22°`) & slides forward into tube
-            //   0.72..1.00: gate snaps shut with crisp receiver nudge, hand dips for next shell
+        ActionAnim::ReloadInsert { elapsed } => {
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, 1.0);
-            let u = (mode_ticks / RELOAD_SHELL_TICKS as f32).clamp(0.0, 1.0);
+            let shell_secs = (RELOAD_INSERT_TICKS as f32) * 0.05;
+            let u = (elapsed / shell_secs).clamp(0.0, 1.0);
 
             if u < 0.76 {
                 show_cartridge = true;
@@ -1503,7 +1813,6 @@ fn evaluate_weapon_pose(
                 }
             }
 
-            // Loading gate depresses inward (`-Y` rotation around `[8.936, 10.592, 10.432]`) as shell enters.
             gate_deg = if (0.24..0.78).contains(&u) {
                 let g = if u < 0.48 {
                     smoothstep((u - 0.24) / 0.24)
@@ -1515,7 +1824,6 @@ fn evaluate_weapon_pose(
                 0.0
             };
 
-            // Subtle physical nudge on receiver as rim clicks past the magazine stop (`u ≈ 0.62`).
             let seat_bump = (-((u - 0.62) * 7.5).powi(2)).exp();
             gun_trans[0] -= 0.010 * seat_bump;
             gun_trans[1] += 0.008 * seat_bump;
@@ -1538,25 +1846,22 @@ fn evaluate_weapon_pose(
             };
             left_hand_rot = [108.0, -12.0 + 6.0 * seat_bump, 26.0];
         }
-        AnimMode::ReloadEndNorm => {
-            let p = 1.0 - smoothstep((mode_ticks / RELOAD_END_NORM_TICKS as f32).clamp(0.0, 1.0));
+        ActionAnim::ReloadEndNorm { elapsed } => {
+            let dur = (RELOAD_CLOSE_NORM_TICKS as f32) * 0.05;
+            let p = 1.0 - smoothstep((elapsed / dur).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
             left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], p);
             left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], p);
         }
-        AnimMode::ReloadEndEmpty { .. } => {
-            // Empty-reload finale (`15t`):
-            //   0..4t:  left hand returns to forestock while rifle rotates upright
-            //   3..14t: right hand works the lever (`+50°`) to chamber the fresh `.44-40` round
-            //           and cock the hammer (`-36° -> +8° -> 0°`)!
-            let total = RELOAD_END_EMPTY_TICKS as f32;
-            let settle = 1.0 - smoothstep((mode_ticks / 5.5).clamp(0.0, 1.0));
+        ActionAnim::ReloadEndEmpty { elapsed, .. } => {
+            let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
+            let settle = 1.0 - smoothstep((elapsed / 0.28).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, settle);
             left_hand_tex = lerp3(base_left_tex, [10.45, 8.95, 11.40], settle);
             left_hand_rot = lerp3(base_left_rot, [108.0, -10.0, 26.0], settle);
 
-            if mode_ticks >= 3.0 {
-                let lt = ((mode_ticks - 3.0) / (total - 3.5)).clamp(0.0, 1.0);
+            if elapsed >= 0.15 {
+                let lt = ((elapsed - 0.15) / (dur - 0.17)).clamp(0.0, 1.0);
                 let lever_curve = if lt < 0.46 {
                     smoothstep(lt / 0.46)
                 } else {
@@ -1570,7 +1875,7 @@ fn evaluate_weapon_pose(
                 };
                 gun_rot[2] += 8.0 * lever_curve;
                 gun_rot[0] -= 3.0 * lever_curve;
-                gun_trans[2] += 0.025 * lever_curve;
+                gun_trans[2] += 0.024 * lever_curve;
                 right_hand_tex = [
                     base_right_tex[0],
                     base_right_tex[1] - 2.45 * lever_curve,
@@ -1579,12 +1884,8 @@ fn evaluate_weapon_pose(
                 right_hand_rot[0] = base_right_rot[0] + 25.0 * lever_curve;
             }
         }
-        AnimMode::Inspect => {
-            // TAC-style 3-stage showcase (`68t` = `3.4s`):
-            //   1. `0.00..0.42`: Tilt left to showcase engraved receiver & brass King's loading gate
-            //   2. `0.42..0.82`: Roll over to show left receiver plate, walnut stock & octagon barrel
-            //   3. `0.82..1.00`: Smoothly settle back into hip stance
-            let u = (mode_ticks / INSPECT_TICKS).clamp(0.0, 1.0);
+        ActionAnim::Inspect { elapsed } => {
+            let u = (elapsed / INSPECT_DURATION_SECS).clamp(0.0, 1.0);
             let (tx, ty, tz, rx, ry, rz, l_shift) = if u < 0.16 {
                 let k = smoothstep(u / 0.16);
                 (
@@ -1597,7 +1898,7 @@ fn evaluate_weapon_pose(
                     k,
                 )
             } else if u < 0.42 {
-                let drift = ((u - 0.16) / 0.26 * core::f32::consts::PI).sin();
+                let drift = ((u - 0.16) / 0.26 * PI).sin();
                 (
                     -0.14,
                     0.05 + 0.012 * drift,
@@ -1619,7 +1920,7 @@ fn evaluate_weapon_pose(
                     1.0 - 0.5 * k,
                 )
             } else if u < 0.82 {
-                let drift = ((u - 0.58) / 0.24 * core::f32::consts::PI).sin();
+                let drift = ((u - 0.58) / 0.24 * PI).sin();
                 (
                     -0.18,
                     0.03 + 0.010 * drift,
@@ -1656,7 +1957,6 @@ fn evaluate_weapon_pose(
     WeaponPose {
         gun_trans,
         gun_rot,
-        gun_scale,
         lever_deg,
         hammer_deg,
         trigger_deg,
@@ -1672,52 +1972,22 @@ fn evaluate_weapon_pose(
 }
 
 fn apply_reload_cradle(gun_trans: &mut [f32; 3], gun_rot: &mut [f32; 3], weight: f32) {
-    gun_trans[0] -= 0.075 * weight;
-    gun_trans[1] -= 0.045 * weight;
-    gun_trans[2] += 0.045 * weight;
-    gun_rot[0] += 7.0 * weight;
-    gun_rot[1] += 12.0 * weight;
-    gun_rot[2] -= 21.0 * weight;
-}
-
-// ---------------------------------------------------------------------------
-// 1st-Person Arm Drawing & Skin Fallback
-// ---------------------------------------------------------------------------
-
-fn resolve_client_skin(st: &mut ClientState, uuid: u128) -> ResolvedSkin {
-    if let Some((srv_uuid, ref resolved)) = st.server_skin
-        && srv_uuid == uuid
-    {
-        return resolved.clone();
-    }
-    if let Some((def_uuid, ref resolved)) = st.cached_default_uuid
-        && def_uuid == uuid
-    {
-        return resolved.clone();
-    }
-    let (def_path, slim) = default_skin_for_uuid(uuid);
-    let fallback = Identifier::parse(def_path)
-        .unwrap_or_else(|_| Identifier::parse("entity/player/wide/steve").unwrap());
-    let resolved = ResolvedSkin {
-        primary: fallback.clone(),
-        fallback,
-        slim,
-    };
-    st.cached_default_uuid = Some((uuid, resolved.clone()));
-    resolved
+    gun_trans[0] -= 0.072 * weight;
+    gun_trans[1] -= 0.044 * weight;
+    gun_trans[2] += 0.044 * weight;
+    gun_rot[0] += 6.8 * weight;
+    gun_rot[1] += 11.5 * weight;
+    gun_rot[2] -= 20.5 * weight;
 }
 
 fn draw_gun_space_arm(
-    draw: &mut BlockEntityDrawContext<'_>,
-    arm_part: &ModelPart,
+    draw: &mut dyn BlockEntityDrawContext,
+    limb: &LimbModel,
     skin: &ResolvedSkin,
     is_right_arm: bool,
     fist_tex: [f32; 3],
     rot_deg: [f32; 3],
 ) {
-    // Center the rotation pivot on the arm's geometric center (`[-1, 9.5, 0]` wide or
-    // `[-0.5, 9.5, 0]` slim for right arm; mirrored `+X` for left arm) so rotations never
-    // skew between 3px slim and 4px wide skins.
     let shaft_center_x = match (is_right_arm, skin.slim) {
         (true, false) => -1.0 / 16.0,
         (true, true) => -0.5 / 16.0,
@@ -1734,702 +2004,18 @@ fn draw_gun_space_arm(
     draw.rotate_about([0.0, 0.0, 1.0], rot_deg[2], [0.0; 3]);
     draw.translate([-sx * shaft_center_x, sy * (9.5 / 16.0), 0.0]);
     draw.scale([sx, -sy, -sx]);
-
-    // Draw custom online skin (`skins/<sha1>`); if Horizon is still fetching the PNG over HTTP,
-    // seamlessly draw the player's deterministic `default_skin(uuid)` until baking finishes.
-    if draw.model_part(arm_part, &skin.primary, 0xFF_FF_FF_FF).is_err()
-        && skin.primary != skin.fallback
-    {
-        let _ = draw.model_part(arm_part, &skin.fallback, 0xFF_FF_FF_FF);
-    }
+    limb.draw(draw, skin);
     draw.pop();
 }
 
-// ---------------------------------------------------------------------------
-// HUD Helpers
-// ---------------------------------------------------------------------------
-
-fn draw_ads_vignette(gui: &mut GuiDraw<'_>, w: i32, h: i32, aim: f32) {
-    let band_h = ((h as f32 * 0.14 * aim) as i32).max(1);
-    let band_w = ((w as f32 * 0.10 * aim) as i32).max(1);
-    let edge_alpha = ((aim * 84.0) as u32).min(115);
-    let outer = edge_alpha << 24;
-
-    gui.fill_gradient([0, 0], [w, band_h], outer, 0x0000_0000);
-    gui.fill_gradient([0, h - band_h], [w, h], 0x0000_0000, outer);
-
-    let mid_alpha = ((aim * 34.0) as u32) << 24;
-    gui.fill([0, band_h], [band_w, h - band_h], mid_alpha);
-    gui.fill([w - band_w, band_h], [w, h - band_h], mid_alpha);
-}
-
-fn draw_ammo_hud(gui: &mut GuiDraw<'_>, w: i32, h: i32, rounds: i32, reloading: bool) {
-    let box_w = 54;
-    let box_h = 16;
-    let x0 = (w / 2 + 98).min(w - box_w - 6);
-    let y0 = h - 20;
-
-    gui.fill([x0, y0], [x0 + box_w, y0 + box_h], 0x94_14_11_0E);
-    let border = if reloading {
-        0xCC_E3_B3_4C
-    } else if rounds == 0 {
-        0xCC_C9_4A_38
-    } else {
-        0xAA_8C_6D_3F
-    };
-    gui.fill([x0, y0], [x0 + box_w, y0 + 1], border);
-    gui.fill([x0, y0 + box_h - 1], [x0 + box_w, y0 + box_h], border);
-
-    let label = if reloading {
-        format!("{rounds}/{MAGAZINE_CAPACITY}+")
-    } else {
-        format!("{rounds} / {MAGAZINE_CAPACITY}")
-    };
-    let text_color = if rounds == 0 && !reloading {
-        0xFF_FF_6E_59
-    } else {
-        0xFF_F5_E6_C8
-    };
-    gui.centered_text(
-        &Text::literal(label),
-        [x0 + box_w / 2, y0 + 4],
-        text_color,
-        true,
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Network Payload Handlers
-// ---------------------------------------------------------------------------
-
-fn handle_rifle_input(msg: RifleInput, ctx: &mut dyn IPayloadContext) {
-    let action = msg.action.0;
-    ctx.enqueue_work(Box::new(move |host| {
-        let HostSide::Server(host) = host else {
-            return;
-        };
-        let Some(player) = host.players().acting_player() else {
-            return;
-        };
-        match action {
-            ACTION_FIRE => server_fire(host, player),
-            ACTION_RELOAD => server_start_reload(host, player),
-            ACTION_RELOAD_CANCEL => server_cancel_reload(host, player),
-            ACTION_SKIN_REQUEST => server_sync_player_skin(host, player),
-            _ => {}
-        }
-    }));
-}
-
-fn handle_rifle_sync(msg: RifleSync, ctx: &mut dyn IPayloadContext) {
-    let kind = msg.kind.0;
-    let rounds = msg.rounds.0.clamp(0, MAGAZINE_CAPACITY);
-
-    ctx.enqueue_work(Box::new(move |host| {
-        let HostSide::Client(host) = host else {
-            return;
-        };
-
-        let mut sound_to_play: Option<(&'static str, f32, f32)> = None;
-        {
-            let mut st = CLIENT.lock().unwrap();
-            st.known_rounds = rounds;
-            match kind {
-                SYNC_SHOT => {
-                    let keep_uncocked = rounds == 0;
-                    st.recoil = 1.0;
-                    st.muzzle_flash = 1.0;
-                    let pitch_kick = if st.aim_progress > 0.5 { 1.45 } else { 2.35 };
-                    let yaw_sign = if (st.idle_time * 37.0).sin() >= 0.0 {
-                        1.0
-                    } else {
-                        -1.0
-                    };
-                    st.camera_pitch_kick = (st.camera_pitch_kick + pitch_kick).min(4.8);
-                    st.camera_yaw_kick += 0.32 * yaw_sign;
-                    st.mode = AnimMode::FireCycle {
-                        cock_sound_played: false,
-                        lever_sound_played: false,
-                        keep_uncocked,
-                    };
-                    st.mode_ticks = 0.0;
-                }
-                SYNC_DRY_CLICK => {
-                    st.hammer_uncocked = true;
-                    st.mode = AnimMode::DryClick;
-                    st.mode_ticks = 0.0;
-                    sound_to_play = Some((SND_COCK, 0.70, 1.32));
-                }
-                SYNC_RELOAD_START => {
-                    let from_empty = rounds == 0;
-                    st.aim_down = false;
-                    st.mode = AnimMode::ReloadIntro { from_empty };
-                    st.mode_ticks = 0.0;
-                    sound_to_play = Some((SND_RELOAD_INTRO, 0.90, 1.0));
-                }
-                SYNC_SHELL_INSERTED => {
-                    let from_empty = match st.mode {
-                        AnimMode::ReloadIntro { from_empty }
-                        | AnimMode::ReloadLoop { from_empty } => from_empty,
-                        _ => false,
-                    };
-                    st.mode = AnimMode::ReloadLoop { from_empty };
-                    st.mode_ticks = 0.0;
-                    sound_to_play = Some((SND_RELOAD_INSERT, 0.92, 1.0));
-                }
-                SYNC_RELOAD_END_NORM => {
-                    st.mode = AnimMode::ReloadEndNorm;
-                    st.mode_ticks = 0.0;
-                    sound_to_play = Some((SND_RELOAD_END, 0.88, 1.0));
-                }
-                SYNC_RELOAD_END_EMPTY => {
-                    st.mode = AnimMode::ReloadEndEmpty {
-                        lever_sound_played: false,
-                        cock_sound_played: false,
-                    };
-                    st.mode_ticks = 0.0;
-                    sound_to_play = Some((SND_RELOAD_END, 0.85, 1.0));
-                }
-                SYNC_RELOAD_ABORTED => {
-                    if st.is_reloading() {
-                        st.mode = AnimMode::None;
-                        st.mode_ticks = 0.0;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if let Some((snd, vol, pitch)) = sound_to_play {
-            play_gun_sound(host, snd, vol, pitch);
-        }
-    }));
-}
-fn handle_rifle_skin_sync(msg: RifleSkinSync, ctx: &mut dyn IPayloadContext) {
-    ctx.enqueue_work(Box::new(move |host| {
-        let HostSide::Client(host) = host else {
-            return;
-        };
-        let Some(player) = host.local_player() else {
-            return;
-        };
-        let uuid = player.as_entity().uuid(host);
-        let Ok(primary) = Identifier::parse(&msg.sprite) else {
-            return;
-        };
-        let fallback = Identifier::parse(&msg.fallback).unwrap_or_else(|_| primary.clone());
-        let slim = msg.slim.0 != 0;
-        let mut st = CLIENT.lock().unwrap();
-        st.server_skin = Some((
-            uuid,
-            ResolvedSkin {
-                primary,
-                fallback,
-                slim,
-            },
-        ));
-    }));
-}
-
-// ---------------------------------------------------------------------------
-// Server-Authoritative Ballistics, Per-Round Reload & Skin Lookup
-// ---------------------------------------------------------------------------
-
-fn send_rifle_sync(host: &mut dyn ServerHost, player: horizon_mod_api::PlayerRef, kind: i32, rounds: i32) {
-    let _ = host.send_to_player(
-        player,
-        handles().sync_channel,
-        &RifleSync {
-            kind: VarInt(kind),
-            rounds: VarInt(rounds),
-        },
-    );
-}
-
-fn server_sync_player_skin(host: &mut dyn ServerHost, player: horizon_mod_api::PlayerRef) {
-    let uuid = player.as_entity().uuid(host);
-    let (default_sprite, default_slim) = default_skin_for_uuid(uuid);
-
-    let profile = host
-        .profile_by_uuid(uuid)
-        .or_else(|| player.profile(host));
-
-    let (sprite, slim) = profile
-        .as_ref()
-        .and_then(|prof| {
-            prof.properties
-                .iter()
-                .find(|prop| prop.name == "textures")
-                .and_then(|prop| parse_mojang_skin_property(&prop.value))
-        })
-        .unwrap_or_else(|| (default_sprite.to_string(), default_slim));
-
-    let _ = host.send_to_player(
-        player,
-        handles().skin_channel,
-        &RifleSkinSync {
-            sprite,
-            fallback: default_sprite.to_string(),
-            slim: VarInt(i32::from(slim)),
-        },
-    );
-}
-
-fn server_cancel_reload(host: &mut dyn ServerHost, player: horizon_mod_api::PlayerRef) {
-    let uuid = player.as_entity().uuid(host);
-    let removed = SERVER.lock().unwrap().reloading.remove(&uuid).is_some();
-    if removed {
-        let stack = player.as_living().main_hand_item(host);
-        let rounds = if is_winchester(&stack) {
-            rounds_in_stack(&stack)
-        } else {
-            0
-        };
-        send_rifle_sync(host, player, SYNC_RELOAD_ABORTED, rounds);
-    }
-}
-
-fn server_fire(host: &mut dyn ServerHost, shooter: horizon_mod_api::PlayerRef) {
-    let living = shooter.as_living();
-    let mut stack = living.main_hand_item(host);
-    if !is_winchester(&stack) {
-        return;
-    }
-
-    let uuid = shooter.as_entity().uuid(host);
-    let creative = shooter.abilities(host).is_some_and(|a| a.instabuild);
-
-    // Firing mid-reload interrupts the reload immediately so the shooter can fire loaded rounds!
-    let (now, on_cooldown, was_reloading) = {
-        let mut srv = SERVER.lock().unwrap();
-        let now = srv.tick;
-        let was_reloading = srv.reloading.remove(&uuid).is_some();
-        let ready = srv.next_fire_tick.get(&uuid).copied().unwrap_or(0);
-        if now < ready {
-            (now, true, was_reloading)
-        } else {
-            (now, false, was_reloading)
-        }
-    };
-    if on_cooldown {
-        if was_reloading {
-            send_rifle_sync(host, shooter, SYNC_RELOAD_ABORTED, rounds_in_stack(&stack));
-        }
-        return;
-    }
-
-    let rounds = rounds_in_stack(&stack);
-    if rounds <= 0 && !creative {
-        SERVER
-            .lock()
-            .unwrap()
-            .next_fire_tick
-            .insert(uuid, now + 6);
-        send_rifle_sync(host, shooter, SYNC_DRY_CLICK, 0);
-        return;
-    }
-
-    let remaining = if creative {
-        rounds.max(1)
-    } else {
-        let next_rounds = rounds - 1;
-        set_rounds_in_stack(&mut stack, next_rounds);
-        let _ = living.set_main_hand_item(host, stack);
-        next_rounds
-    };
-
-    let Some(level) = shooter.level(host) else {
-        return;
-    };
-    let entity = shooter.as_entity();
-    let Some(eye) = entity.eye_position(host) else {
-        return;
-    };
-    let Some(look) = entity.look_angle(host) else {
-        return;
-    };
-
-    let sprinting = entity.sprinting(host).unwrap_or(false);
-    let on_ground = entity.on_ground(host).unwrap_or(true);
-    let spread = if sprinting || !on_ground {
-        HIP_SPREAD_RAD
-    } else {
-        0.0
-    };
-    let dir = apply_spread(look, spread, now ^ (uuid as u64));
-
-    let muzzle = [
-        eye[0] + dir[0] * 0.85,
-        eye[1] - 0.10 + dir[1] * 0.85,
-        eye[2] + dir[2] * 0.85,
-    ];
-    // World-audible `.44-40` gunshot + lever cycle for nearby players in multiplayer.
-    let _ = host.play_sound(muzzle, SND_FIRE, SoundSource::Players, 2.4, 1.0);
-    let _ = host.play_sound(muzzle, SND_THUMP, SoundSource::Players, 1.2, 1.0);
-    let _ = level.spawn_particles(
-        host,
-        &ParticleOptions::simple(handles().smoke_particle),
-        muzzle,
-        8,
-        [0.06, 0.06, 0.06],
-        0.015,
-    );
-    let _ = level.spawn_particles(
-        host,
-        &ParticleOptions::simple(handles().flame_particle),
-        muzzle,
-        3,
-        [0.02, 0.02, 0.02],
-        0.01,
-    );
-
-    {
-        let mut srv = SERVER.lock().unwrap();
-        srv.next_fire_tick.insert(uuid, now + FIRE_COOLDOWN_TICKS);
-    }
-
-    send_rifle_sync(host, shooter, SYNC_SHOT, remaining);
-
-    // Hitscan: solid-block terrain trace vs inflated LivingRef AABB trace.
-    let block_dist = trace_blocks(host, level, eye, dir, RANGE_BLOCKS);
-    let max_dist = block_dist.unwrap_or(RANGE_BLOCKS);
-
-    if let Some((target, hit_pos)) = trace_entities(host, level, uuid, eye, dir, max_dist) {
-        let _ = target.hurt_from_player(host, SHOT_DAMAGE, shooter);
-        let _ = level.spawn_particles(
-            host,
-            &ParticleOptions::simple(handles().crit_particle),
-            hit_pos,
-            10,
-            [0.12, 0.12, 0.12],
-            0.08,
-        );
-    } else if let Some(d) = block_dist {
-        let impact = [
-            eye[0] + dir[0] * (d - 0.05),
-            eye[1] + dir[1] * (d - 0.05),
-            eye[2] + dir[2] * (d - 0.05),
-        ];
-        let _ = level.spawn_particles(
-            host,
-            &ParticleOptions::simple(handles().smoke_particle),
-            impact,
-            4,
-            [0.04, 0.04, 0.04],
-            0.01,
-        );
-    }
-}
-
-fn server_start_reload(host: &mut dyn ServerHost, player: horizon_mod_api::PlayerRef) {
-    let living = player.as_living();
-    let stack = living.main_hand_item(host);
-    if !is_winchester(&stack) {
-        return;
-    }
-
-    let current = rounds_in_stack(&stack);
-    if current >= MAGAZINE_CAPACITY {
-        return;
-    }
-
-    let creative = player.abilities(host).is_some_and(|a| a.instabuild);
-    if !creative && find_ammo_slot(host, player).is_none() {
-        send_rifle_sync(host, player, SYNC_DRY_CLICK, current);
-        return;
-    }
-
-    let uuid = player.as_entity().uuid(host);
-    let slot = player.selected_slot(host);
-    let started = {
-        let mut srv = SERVER.lock().unwrap();
-        if srv.reloading.contains_key(&uuid) {
-            false
-        } else {
-            let now = srv.tick;
-            srv.reloading.insert(
-                uuid,
-                ReloadTracker {
-                    slot,
-                    next_insert_tick: now + RELOAD_INTRO_TICKS,
-                    from_empty: current == 0,
-                    inserted_any: false,
-                    finishing_until: None,
-                },
-            );
-            true
-        }
-    };
-
-    if started {
-        send_rifle_sync(host, player, SYNC_RELOAD_START, current);
-    }
-}
-
-fn step_player_reload(
-    host: &mut dyn ServerHost,
-    uuid: u128,
-    mut tracker: ReloadTracker,
-    now: u64,
-) {
-    let Some(player) = host.players().by_uuid(EntityUuid::from_u128(uuid)) else {
-        SERVER.lock().unwrap().reloading.remove(&uuid);
-        return;
-    };
-
-    // Cancel if the player swapped hotbar slots or dropped the Winchester.
-    let stack = player.as_living().main_hand_item(host);
-    if player.selected_slot(host) != tracker.slot || !is_winchester(&stack) {
-        SERVER.lock().unwrap().reloading.remove(&uuid);
-        send_rifle_sync(host, player, SYNC_RELOAD_ABORTED, 0);
-        return;
-    }
-
-    if let Some((end_tick, empty_chamber)) = tracker.finishing_until {
-        if now >= end_tick {
-            let mut srv = SERVER.lock().unwrap();
-            srv.reloading.remove(&uuid);
-            if empty_chamber {
-                srv.next_fire_tick.insert(uuid, now + 2);
-            }
-        }
-        return;
-    }
-
-    if now < tracker.next_insert_tick {
-        return;
-    }
-
-    let mut stack = stack;
-    let current = rounds_in_stack(&stack);
-    let creative = player.abilities(host).is_some_and(|a| a.instabuild);
-
-    if current >= MAGAZINE_CAPACITY || (!creative && !consume_one_cartridge(host, player)) {
-        finish_reload_sequence(host, player, uuid, tracker, current, now);
-        return;
-    }
-
-    let updated = (current + 1).min(MAGAZINE_CAPACITY);
-    set_rounds_in_stack(&mut stack, updated);
-    let _ = player.as_living().set_main_hand_item(host, stack);
-    tracker.inserted_any = true;
-
-    send_rifle_sync(host, player, SYNC_SHELL_INSERTED, updated);
-
-    tracker.next_insert_tick = now + RELOAD_SHELL_TICKS;
-    SERVER.lock().unwrap().reloading.insert(uuid, tracker);
-}
-
-fn finish_reload_sequence(
-    host: &mut dyn ServerHost,
-    player: horizon_mod_api::PlayerRef,
-    uuid: u128,
-    mut tracker: ReloadTracker,
-    rounds: i32,
-    now: u64,
-) {
-    if tracker.from_empty && tracker.inserted_any && rounds > 0 {
-        let end_tick = now + RELOAD_END_EMPTY_TICKS;
-        tracker.finishing_until = Some((end_tick, true));
-        {
-            let mut srv = SERVER.lock().unwrap();
-            srv.reloading.insert(uuid, tracker);
-            srv.next_fire_tick.insert(uuid, end_tick);
-        }
-        send_rifle_sync(host, player, SYNC_RELOAD_END_EMPTY, rounds);
-    } else {
-        let end_tick = now + RELOAD_END_NORM_TICKS;
-        tracker.finishing_until = Some((end_tick, false));
-        {
-            let mut srv = SERVER.lock().unwrap();
-            srv.reloading.insert(uuid, tracker);
-            srv.next_fire_tick.insert(uuid, now + 4);
-        }
-        send_rifle_sync(host, player, SYNC_RELOAD_END_NORM, rounds);
-    }
-}
-
-fn find_ammo_slot(host: &dyn ServerHost, player: horizon_mod_api::PlayerRef) -> Option<usize> {
-    let ammo_id = handles().ammo.id();
-    let size = player.inventory_size(host);
-    (0..size).find(|&slot| {
-        let s = player.inventory_item(host, slot);
-        !s.is_empty() && s.item() == ammo_id
-    })
-}
-
-fn consume_one_cartridge(host: &mut dyn ServerHost, player: horizon_mod_api::PlayerRef) -> bool {
-    let Some(slot) = find_ammo_slot(host, player) else {
-        return false;
-    };
-    let mut ammo_stack = player.inventory_item(host, slot);
-    let count = ammo_stack.count();
-    if count <= 0 {
-        return false;
-    }
-    if count == 1 {
-        let _ = player.set_inventory_item(host, slot, ItemStack::EMPTY);
-    } else {
-        ammo_stack.set_count(count - 1);
-        let _ = player.set_inventory_item(host, slot, ammo_stack);
-    }
-    true
-}
-
-// ---------------------------------------------------------------------------
-// Raycasting & Math Helpers
-// ---------------------------------------------------------------------------
-
-fn trace_blocks(
-    host: &dyn ServerHost,
-    level: horizon_mod_api::LevelRef,
-    origin: [f64; 3],
-    dir: [f64; 3],
-    max_range: f64,
-) -> Option<f64> {
-    let mut t = 0.0;
-    let mut last_block = [i32::MIN, i32::MIN, i32::MIN];
-    while t <= max_range {
-        let p = [
-            origin[0] + dir[0] * t,
-            origin[1] + dir[1] * t,
-            origin[2] + dir[2] * t,
-        ];
-        let bp = [
-            p[0].floor() as i32,
-            p[1].floor() as i32,
-            p[2].floor() as i32,
-        ];
-        if bp != last_block {
-            last_block = bp;
-            let state = level.block_state(host, bp);
-            if !state.is_air(host) && state.has_collision(host, level, bp) {
-                return Some(t);
-            }
-        }
-        t += BLOCK_RAY_STEP;
-    }
-    None
-}
-
-fn trace_entities(
-    host: &dyn ServerHost,
-    level: horizon_mod_api::LevelRef,
-    shooter_uuid: u128,
-    origin: [f64; 3],
-    dir: [f64; 3],
-    max_dist: f64,
-) -> Option<(LivingRef, [f64; 3])> {
-    let end = [
-        origin[0] + dir[0] * max_dist,
-        origin[1] + dir[1] * max_dist,
-        origin[2] + dir[2] * max_dist,
-    ];
-    let min = [
-        origin[0].min(end[0]) - 1.0,
-        origin[1].min(end[1]) - 1.0,
-        origin[2].min(end[2]) - 1.0,
-    ];
-    let max = [
-        origin[0].max(end[0]) + 1.0,
-        origin[1].max(end[1]) + 1.0,
-        origin[2].max(end[2]) + 1.0,
-    ];
-
-    let candidates = level.living_entities_in_aabb(host, min, max);
-    let mut closest: Option<(f64, LivingRef)> = None;
-
-    for living in candidates {
-        let ent = living.as_entity();
-        if ent.uuid(host) == shooter_uuid || !living.alive(host) {
-            continue;
-        }
-        let Some((bmin, bmax)) = ent.bounding_box(host) else {
-            continue;
-        };
-        let inflated_min = [
-            bmin[0] - ENTITY_HIT_INFLATE,
-            bmin[1] - ENTITY_HIT_INFLATE,
-            bmin[2] - ENTITY_HIT_INFLATE,
-        ];
-        let inflated_max = [
-            bmax[0] + ENTITY_HIT_INFLATE,
-            bmax[1] + ENTITY_HIT_INFLATE,
-            bmax[2] + ENTITY_HIT_INFLATE,
-        ];
-        if let Some(hit_t) = ray_aabb(origin, dir, inflated_min, inflated_max)
-            && hit_t <= max_dist
-            && closest.is_none_or(|(best, _)| hit_t < best)
-        {
-            closest = Some((hit_t, living));
-        }
-    }
-
-    closest.map(|(t, living)| {
-        let hit = [
-            origin[0] + dir[0] * t,
-            origin[1] + dir[1] * t,
-            origin[2] + dir[2] * t,
-        ];
-        (living, hit)
-    })
-}
-
-fn ray_aabb(origin: [f64; 3], dir: [f64; 3], min: [f64; 3], max: [f64; 3]) -> Option<f64> {
-    let mut tmin = 0.0_f64;
-    let mut tmax = f64::INFINITY;
-    for i in 0..3 {
-        if dir[i].abs() < 1e-9 {
-            if origin[i] < min[i] || origin[i] > max[i] {
-                return None;
-            }
-        } else {
-            let inv = 1.0 / dir[i];
-            let mut t1 = (min[i] - origin[i]) * inv;
-            let mut t2 = (max[i] - origin[i]) * inv;
-            if t1 > t2 {
-                core::mem::swap(&mut t1, &mut t2);
-            }
-            tmin = tmin.max(t1);
-            tmax = tmax.min(t2);
-            if tmin > tmax {
-                return None;
-            }
-        }
-    }
-    Some(tmin)
-}
-
-fn apply_spread(look: [f64; 3], spread_rad: f64, seed: u64) -> [f64; 3] {
-    if spread_rad <= 0.0 {
-        return normalize(look);
-    }
-    let h1 = splitmix64(seed);
-    let h2 = splitmix64(h1);
-    let u1 = ((h1 >> 11) as f64) * (1.0 / ((1u64 << 53) as f64)) * 2.0 - 1.0;
-    let u2 = ((h2 >> 11) as f64) * (1.0 / ((1u64 << 53) as f64)) * 2.0 - 1.0;
-    let perturbed = [
-        look[0] + u1 * spread_rad,
-        look[1] + u2 * spread_rad,
-        look[2] + (u1 - u2) * 0.5 * spread_rad,
-    ];
-    normalize(perturbed)
-}
-
-fn normalize(v: [f64; 3]) -> [f64; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len < 1e-9 {
-        [0.0, 0.0, 1.0]
-    } else {
-        [v[0] / len, v[1] / len, v[2] / len]
-    }
-}
-
-const fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
+/// Converts `[0..16]` JSON texels into right-hand view space after `RIFLE_DISPLAY`.
+fn model_texel_to_hand(tex: [f32; 3]) -> [f32; 3] {
+    let k = RIFLE_DISPLAY_SCALE / 16.0;
+    [
+        RIFLE_DISPLAY_TRANS[0] + (tex[0] - 8.0) * k,
+        RIFLE_DISPLAY_TRANS[1] + (tex[1] - 8.0) * k,
+        RIFLE_DISPLAY_TRANS[2] + (tex[2] - 8.0) * k,
+    ]
 }
 
 const fn tex_to_unit(p: [f32; 3]) -> [f32; 3] {
@@ -2451,4 +2037,610 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 fn smoothstep(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+fn cam_recoil_curve(t: f32) -> (f32, f32) {
+    const CLIMB_END: f32 = 0.095;
+    const HOLD_END: f32 = 0.185;
+    const REC_END: f32 = 0.380;
+    const RECOVERY_FRAC: f32 = 1.0 / 1.75;
+
+    if t <= 0.0 {
+        (0.0, 0.0)
+    } else if t < CLIMB_END {
+        let u = (t / CLIMB_END).clamp(0.0, 1.0);
+        let c = 0.5 * (1.0 - (PI * u).cos());
+        (c, c)
+    } else if t < HOLD_END {
+        (1.0, 1.0)
+    } else if t < REC_END {
+        let u = ((t - HOLD_END) / (REC_END - HOLD_END)).clamp(0.0, 1.0);
+        let ease = 0.5 * (1.0 - (PI * u).cos());
+        (1.0 - RECOVERY_FRAC * ease, 1.0 - 0.5 * ease)
+    } else {
+        (1.0 - RECOVERY_FRAC, 0.5)
+    }
+}
+
+fn recoil_envelope(t: f32) -> f32 {
+    if !(0.0..0.20).contains(&t) {
+        return 0.0;
+    }
+    if t < 0.035 {
+        t / 0.035
+    } else {
+        let u = (t - 0.035) / (0.20 - 0.035);
+        (1.0 - u) * (1.0 - u)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Network Payload Handlers
+// ---------------------------------------------------------------------------
+
+fn on_rifle_input(value: RifleInput, cx: &mut dyn IPayloadContext) -> Result<(), String> {
+    let player = cx.player().map_err(|e| format!("{e:?}"))?;
+    let host = cx.server_host().map_err(|e| format!("{e:?}"))?;
+    match value.action.0 {
+        ACTION_FIRE => {
+            if let Some(smoke) = SMOKE_KEY.get().copied() {
+                fire_rifle(host, player, smoke);
+            }
+        }
+        ACTION_RELOAD => start_reload(host, player),
+        ACTION_RELOAD_CANCEL => {
+            let _ = cancel_reload_session(host, player);
+        }
+        ACTION_SKIN_REQUEST => sync_player_skin(host, player),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
+    let rounds_now = (value.rounds.0.max(0) as u32).min(TUBE_CAPACITY);
+    let mut foley: Option<(&'static str, f32, f32)> = None;
+
+    {
+        let mut anim = client_anim().lock().unwrap();
+        anim.known_rounds = rounds_now;
+        match value.kind.0 {
+            SYNC_SHOT => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                anim.on_shot(rounds_now);
+            }
+            SYNC_DRY_CLICK => {
+                anim.on_dry_click(rounds_now);
+                foley = Some((SND_COCK, 0.72, 1.32));
+            }
+            SYNC_RELOAD_START => {
+                CLIENT_RELOADING.store(true, Ordering::Relaxed);
+                AIMING.store(false, Ordering::Relaxed);
+                anim.action = ActionAnim::ReloadIntro { elapsed: 0.0 };
+                foley = Some((SND_RELOAD_INTRO, 0.90, 1.0));
+            }
+            SYNC_SHELL_INSERTED => {
+                CLIENT_RELOADING.store(true, Ordering::Relaxed);
+                anim.action = ActionAnim::ReloadInsert { elapsed: 0.0 };
+                foley = Some((SND_RELOAD_INSERT, 0.92, 1.0));
+            }
+            SYNC_RELOAD_END_NORM => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                anim.action = ActionAnim::ReloadEndNorm { elapsed: 0.0 };
+                foley = Some((SND_RELOAD_END, 0.88, 1.0));
+            }
+            SYNC_RELOAD_END_EMPTY => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                anim.action = ActionAnim::ReloadEndEmpty {
+                    elapsed: 0.0,
+                    lever_sound_played: false,
+                    cock_sound_played: false,
+                };
+                foley = Some((SND_RELOAD_END, 0.85, 1.0));
+            }
+            SYNC_RELOAD_ABORTED => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                if matches!(
+                    anim.action,
+                    ActionAnim::ReloadIntro { .. }
+                        | ActionAnim::ReloadInsert { .. }
+                        | ActionAnim::ReloadEndNorm { .. }
+                        | ActionAnim::ReloadEndEmpty { .. }
+                ) {
+                    anim.action = ActionAnim::None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((snd, vol, pitch)) = foley
+        && let Ok(host) = cx.client_host()
+    {
+        play_local_foley(host, snd, vol, pitch);
+    }
+    Ok(())
+}
+
+fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Result<(), String> {
+    let mut anim = client_anim().lock().unwrap();
+    anim.skin = ResolvedSkin {
+        primary: value.sprite,
+        fallback: value.fallback,
+        slim: value.slim.0 != 0,
+    };
+    Ok(())
+}
+
+fn send_sync(host: &mut dyn ServerHost, player: mod_api::PlayerRef, kind: i32, rounds_now: u32) {
+    if let Some(sync) = RIFLE_SYNC.get() {
+        let _ = sync.send(
+            host,
+            player,
+            &RifleSync {
+                kind: VarInt(kind),
+                rounds: VarInt(rounds_now as i32),
+            },
+        );
+    }
+}
+
+fn sync_player_skin(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
+    let Some(skin_chan) = RIFLE_SKIN_SYNC.get() else {
+        return;
+    };
+    let uuid = player.uuid();
+    let (default_sprite, default_slim) = default_skin_for_uuid(uuid);
+
+    let profile = host
+        .profile_by_uuid(uuid)
+        .or_else(|| player.profile(host));
+
+    let (sprite, slim) = profile
+        .as_ref()
+        .and_then(|prof| {
+            prof.properties
+                .iter()
+                .find(|prop| prop.name == "textures")
+                .and_then(|prop| parse_mojang_skin_property(&prop.value))
+        })
+        .unwrap_or_else(|| (default_sprite.to_string(), default_slim));
+
+    let _ = skin_chan.send(
+        host,
+        player,
+        &RifleSkinSync {
+            sprite,
+            fallback: default_sprite.to_string(),
+            slim: VarInt(i32::from(slim)),
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Server-Authoritative Weapon Logic & ItemPart
+// ---------------------------------------------------------------------------
+
+struct Winchester;
+
+fn rounds(stack: &ItemStack) -> u32 {
+    stack.damage().min(TUBE_CAPACITY)
+}
+
+fn shooter(host: &dyn ServerHost) -> Option<mod_api::PlayerRef> {
+    host.players().acting_player()
+}
+
+fn is_player_reloading(uuid: u128) -> bool {
+    RELOAD_SESSIONS.lock().unwrap().contains_key(&uuid)
+}
+
+fn cancel_reload_session(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
+    let removed = RELOAD_SESSIONS.lock().unwrap().remove(&player.uuid()).is_some();
+    if removed {
+        let cur = held_rifle(host, player).map_or(0, |(_, r)| rounds(&r));
+        send_sync(host, player, SYNC_RELOAD_ABORTED, cur);
+    }
+    removed
+}
+
+fn play_world_sound(
+    host: &mut dyn ServerHost,
+    player: mod_api::PlayerRef,
+    sound: &str,
+    volume: f32,
+    pitch: f32,
+) {
+    let entity = player.entity();
+    let Some(level) = entity.level(host) else {
+        return;
+    };
+    let Some(at) = entity.position(host) else {
+        return;
+    };
+    level.play_sound(host, sound, at, SoundSource::Players, volume, pitch);
+}
+
+fn muzzle_effects(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+    let entity = player.entity();
+    let Some(level) = entity.level(host) else {
+        return;
+    };
+    let Some(eye) = entity.eye_position(host) else {
+        return;
+    };
+    let Some(view) = entity.view_vector(host) else {
+        return;
+    };
+    let muzzle = [
+        eye[0] + view[0] * 0.78,
+        eye[1] + view[1] * 0.78 - 0.10,
+        eye[2] + view[2] * 0.78,
+    ];
+    let smoke_opts = ParticleOptions::simple(smoke);
+    level.send_particles(host, &smoke_opts, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
+    if let Some(flame) = FLAME_KEY.get().copied() {
+        let flame_opts = ParticleOptions::simple(flame);
+        level.send_particles(
+            host,
+            &flame_opts,
+            None,
+            muzzle,
+            [0.02, 0.02, 0.02],
+            0.01,
+            3,
+        );
+    }
+}
+
+/// Reads the Winchester strictly from the player's currently selected hotbar slot (`0..9`).
+fn held_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> Option<(u32, ItemStack)> {
+    let sel = player.selected_slot(host)? as u32;
+    let slots = player.inventory_slots(host)?;
+    for (slot, stack) in slots {
+        if slot == sel && stack.item().id(host).to_string() == WINCHESTER {
+            return Some((slot, stack));
+        }
+    }
+    None
+}
+
+fn has_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
+    let Some(slots) = player.inventory_slots(host) else {
+        return false;
+    };
+    slots
+        .into_iter()
+        .any(|(_, stack)| stack.item().id(host).to_string() == CARTRIDGE && stack.count() > 0)
+}
+
+fn take_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
+    let Some(slots) = player.inventory_slots(host) else {
+        return false;
+    };
+    for (slot, stack) in slots {
+        if stack.item().id(host).to_string() != CARTRIDGE {
+            continue;
+        }
+        let count = stack.count();
+        let write = if count > 1 {
+            let mut rest = stack;
+            if rest.set_count(count - 1).is_err() {
+                return false;
+            }
+            Some(rest)
+        } else {
+            None
+        };
+        return player.set_inventory_slot(host, slot, write).is_ok();
+    }
+    false
+}
+
+fn compute_spread(host: &dyn ServerHost, player: mod_api::PlayerRef, now: u64) -> f32 {
+    let entity = player.entity();
+    let crouching = entity.is_crouching(host).unwrap_or(false);
+    let sprinting = entity.is_sprinting(host).unwrap_or(false);
+    let on_ground = entity.on_ground(host).unwrap_or(true);
+    let horiz_speed_sq = entity
+        .velocity(host)
+        .map_or(0.0, |[vx, _, vz]| vx * vx + vz * vz);
+    let moving = sprinting || !on_ground || horiz_speed_sq > 0.012;
+
+    let hip = if moving {
+        SPREAD_HIP_MOVING
+    } else if crouching {
+        SPREAD_HIP_CROUCH
+    } else {
+        SPREAD_HIP_STAND
+    };
+
+    let (held, last_seen) = AIM_TICKS
+        .lock()
+        .unwrap()
+        .get(&player.uuid())
+        .copied()
+        .unwrap_or((0, 0));
+    if held <= 0 || now.saturating_sub(last_seen) > 2 {
+        return hip;
+    }
+
+    let ads = if moving {
+        SPREAD_ADS_MOVING
+    } else if crouching {
+        SPREAD_ADS_CROUCH
+    } else {
+        SPREAD_ADS_STAND
+    };
+
+    if held >= ADS_SETTLE_TICKS {
+        ads
+    } else {
+        let frac = (held as f32) / (ADS_SETTLE_TICKS as f32);
+        hip + (ads - hip) * frac
+    }
+}
+
+fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+    let Some((slot, rifle)) = held_rifle(host, player) else {
+        return;
+    };
+    let uuid = player.uuid();
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    let loaded = rounds(&rifle);
+
+    // Firing mid-reload interrupts the reload immediately if >= 1 round is in the tube.
+    if is_player_reloading(uuid) {
+        let _ = cancel_reload_session(host, player);
+        if loaded == 0 {
+            send_sync(host, player, SYNC_DRY_CLICK, 0);
+            return;
+        }
+    }
+
+    let lever_ready = LEVER_READY.lock().unwrap().get(&uuid).copied().unwrap_or(0);
+    if lever_ready > now {
+        return;
+    }
+
+    if loaded == 0 {
+        LEVER_READY.lock().unwrap().insert(uuid, now + 5);
+        send_sync(host, player, SYNC_DRY_CLICK, 0);
+        return;
+    }
+
+    let Ok(bullet) = Identifier::parse(BULLET) else {
+        return;
+    };
+    let Some(item) = host.item_key(&bullet) else {
+        return;
+    };
+    let Some(carried) = ItemStack::new(item, 1) else {
+        return;
+    };
+    let owner = LivingRef::new(player.entity());
+    let spread = compute_spread(host, player, now);
+    let shot =
+        host.spawn_projectile_from_rotation(owner, &bullet, &carried, 0.0, BULLET_SPEED, spread);
+    if shot.is_none() {
+        return;
+    }
+
+    let remaining = loaded - 1;
+    let mut rifle = rifle;
+    rifle.set_damage(remaining);
+    let _ = player.set_inventory_slot(host, slot, Some(rifle));
+
+    let next_ready = if remaining > 0 {
+        now + LEVER_TICKS
+    } else {
+        now + 6
+    };
+    LEVER_READY.lock().unwrap().insert(uuid, next_ready);
+
+    // Mono 48kHz gunshot blast + breech thump broadcast in 3D world space for all nearby players.
+    play_world_sound(host, player, SND_FIRE, 2.5, 1.0);
+    play_world_sound(host, player, SND_THUMP, 1.15, 1.0);
+    muzzle_effects(host, player, smoke);
+    send_sync(host, player, SYNC_SHOT, remaining);
+}
+
+fn start_reload(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
+    let Some((slot, rifle)) = held_rifle(host, player) else {
+        return;
+    };
+    let uuid = player.uuid();
+    if is_player_reloading(uuid) {
+        return;
+    }
+    if player.entity().is_sprinting(host).unwrap_or(false) {
+        return;
+    }
+
+    let loaded = rounds(&rifle);
+    if loaded >= TUBE_CAPACITY {
+        return;
+    }
+
+    let infinite = player.has_infinite_materials(host).unwrap_or(false);
+    if !infinite && !has_cartridge(host, player) {
+        send_sync(host, player, SYNC_DRY_CLICK, loaded);
+        return;
+    }
+
+    AIM_TICKS.lock().unwrap().remove(&uuid);
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    RELOAD_SESSIONS.lock().unwrap().insert(
+        uuid,
+        ReloadSession {
+            slot,
+            from_empty: loaded == 0,
+            inserted_any: false,
+            phase: ReloadPhase::Opening {
+                until: now + RELOAD_OPEN_TICKS,
+            },
+        },
+    );
+    send_sync(host, player, SYNC_RELOAD_START, loaded);
+}
+
+fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
+    let uuids: Vec<u128> = RELOAD_SESSIONS.lock().unwrap().keys().copied().collect();
+    for uuid in uuids {
+        let Some(entity) = host.entity_by_uuid(EntityUuid(uuid)) else {
+            continue;
+        };
+        let Some(player) = host.player(uuid) else {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            continue;
+        };
+        let Some(mut session) = RELOAD_SESSIONS.lock().unwrap().get(&uuid).copied() else {
+            continue;
+        };
+
+        let sprinting = entity.is_sprinting(host).unwrap_or(false);
+        let valid_rifle = held_rifle(host, player).filter(|(sel, _)| *sel == session.slot);
+
+        let Some((slot, rifle)) = valid_rifle else {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            send_sync(host, player, SYNC_RELOAD_ABORTED, 0);
+            continue;
+        };
+        let loaded = rounds(&rifle);
+        if sprinting {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            send_sync(host, player, SYNC_RELOAD_ABORTED, loaded);
+            continue;
+        }
+
+        let mut remove_session = false;
+        match session.phase {
+            ReloadPhase::Opening { until } => {
+                if now >= until {
+                    session.phase = ReloadPhase::Inserting { next_tick: now };
+                }
+            }
+            ReloadPhase::Inserting { next_tick } => {
+                if now >= next_tick {
+                    let infinite = player.has_infinite_materials(host).unwrap_or(false);
+                    if loaded >= TUBE_CAPACITY || (!infinite && !take_cartridge(host, player)) {
+                        let empty_chamber = session.from_empty && session.inserted_any && loaded > 0;
+                        let close_ticks = if empty_chamber {
+                            RELOAD_CLOSE_EMPTY_TICKS
+                        } else {
+                            RELOAD_CLOSE_NORM_TICKS
+                        };
+                        session.phase = ReloadPhase::Closing {
+                            until: now + close_ticks,
+                            empty_chamber,
+                        };
+                        send_sync(
+                            host,
+                            player,
+                            if empty_chamber {
+                                SYNC_RELOAD_END_EMPTY
+                            } else {
+                                SYNC_RELOAD_END_NORM
+                            },
+                            loaded,
+                        );
+                    } else {
+                        let next_loaded = loaded + 1;
+                        let mut rifle = rifle;
+                        rifle.set_damage(next_loaded);
+                        if player.set_inventory_slot(host, slot, Some(rifle)).is_err() {
+                            remove_session = true;
+                            send_sync(host, player, SYNC_RELOAD_ABORTED, loaded);
+                        } else {
+                            session.inserted_any = true;
+                            send_sync(host, player, SYNC_SHELL_INSERTED, next_loaded);
+                            // Wait `RELOAD_INSERT_TICKS` so the shell-insertion animation completes
+                            // before transitioning to either the next shell or `ReloadPhase::Closing`.
+                            session.phase = ReloadPhase::Inserting {
+                                next_tick: now + RELOAD_INSERT_TICKS,
+                            };
+                        }
+                    }
+                }
+            }
+            ReloadPhase::Closing {
+                until,
+                empty_chamber,
+            } => {
+                if now >= until {
+                    remove_session = true;
+                    LEVER_READY.lock().unwrap().insert(
+                        uuid,
+                        now + if empty_chamber { 2 } else { 1 },
+                    );
+                }
+            }
+        }
+
+        if remove_session {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+        } else {
+            RELOAD_SESSIONS.lock().unwrap().insert(uuid, session);
+        }
+    }
+}
+
+#[mod_api::horizon_part]
+impl ItemPart for Winchester {
+    fn use_duration(&self, _: &dyn Host, event: &mut UseDurationEvent<'_>) {
+        event.duration = USE_DURATION;
+    }
+
+    fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
+        let loaded = rounds(&event.stack);
+        let width = (loaded * 13 / TUBE_CAPACITY) as i32;
+        *event.bar = Some((width, AMMO_BAR_RGB));
+    }
+
+    /// Suppress vanilla's equip dip whenever ammo count (`damage`) updates in the same slot.
+    fn should_cause_reequip_animation(
+        &self,
+        _: &dyn ClientHost,
+        event: &mut ShouldCauseReequipAnimationEvent<'_>,
+    ) {
+        event.reequip = event.slot_changed;
+    }
+
+    fn on_use_tick(&self, host: HostSide<'_>, event: &mut OnUseTickEvent<'_>) {
+        match host {
+            HostSide::Client(_) => {
+                if !CLIENT_RELOADING.load(Ordering::Relaxed)
+                    && !CLIENT_SPRINTING.load(Ordering::Relaxed)
+                {
+                    AIMING.store(true, Ordering::Relaxed);
+                    AIM_LAST_TICK.store(CLIENT_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
+            }
+            HostSide::Server(host) => {
+                let Some(player) = shooter(host) else {
+                    return;
+                };
+                let uuid = player.uuid();
+                if is_player_reloading(uuid) {
+                    AIM_TICKS.lock().unwrap().remove(&uuid);
+                    return;
+                }
+                let held = USE_DURATION - event.remaining;
+                let now = SERVER_TICKS.load(Ordering::Relaxed);
+                AIM_TICKS.lock().unwrap().insert(uuid, (held, now));
+            }
+        }
+    }
+
+    fn release_using(&self, host: HostSide<'_>, event: &mut ReleaseUsingEvent<'_>) {
+        event.used = true;
+        match host {
+            HostSide::Client(_) => AIMING.store(false, Ordering::Relaxed),
+            HostSide::Server(host) => {
+                if let Some(player) = shooter(host) {
+                    AIM_TICKS.lock().unwrap().remove(&player.uuid());
+                }
+            }
+        }
+    }
 }
