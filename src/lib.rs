@@ -33,13 +33,13 @@ use mod_api::{
     ArmPose, BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
     ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent,
     CubeDeformation, CubeListBuilder, EntityUuid, EquipmentSlot, Flow, GetArmPoseEvent, GuiDraw,
-    GuiRenderPostEvent, Hand, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
-    InteractionResult, ItemBarEvent, ItemKey, ItemPart, ItemStack, KeyConflictContext,
-    KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent, LivingRef,
-    MeshDefinition, ModelBakingCompletedEvent, ModelPart, ModelRef, OnUseTickEvent, PartPose,
-    ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
-    RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent,
-    ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource,
+    GuiLayerPreEvent, GuiRenderPostEvent, Hand, Hooks, Host, HostSide, HumanoidPart,
+    IPayloadContext, Identifier, InteractionResult, ItemBarEvent, ItemKey, ItemPart, ItemStack,
+    KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent,
+    LivingRef, MeshDefinition, ModelBakingCompletedEvent, ModelPart, ModelRef, OnUseTickEvent,
+    PartPose, ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext,
+    ReleaseUsingEvent, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
+    ServerTickEvent, ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource,
     StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
 };
 use std::collections::BTreeMap;
@@ -1699,6 +1699,18 @@ impl Hooks for Mod {
             pose.left_hand_rot,
         );
         draw.pop();
+        Flow::Continue
+    }
+
+    /// Hide the vanilla HUD crosshair (`+` and crosshair attack indicator) while aiming down sights
+    /// so the Winchester 1873 iron sights (`massa_lamina` + `alca_entalhe_base`) remain unobstructed.
+    fn gui_layer_pre(&self, _: &dyn ClientHost, event: &mut GuiLayerPreEvent<'_>) -> Flow {
+        if (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
+            && (AIMING.load(Ordering::Relaxed)
+                || (holding_rifle_recently() && aim_progress() > 0.08))
+        {
+            return Flow::Cancel;
+        }
         Flow::Continue
     }
 
