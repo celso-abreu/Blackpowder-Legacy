@@ -1,9 +1,9 @@
-# Plano de Atualizações — Blackpowder Legacy (`v0.8.1`)
+# Plano de Atualizações — Blackpowder Legacy (`v0.8.0` → `v0.9.0`)
 
-Documento visual para revisão e aprovação do escopo da **v0.8.0 / v0.8.1**, baseado na
-análise do **TAC 0.3.10.1** cruzada com o código do **Horizon SDK** (`0a875da9`).
+Documento histórico de revisão da **v0.8.0 / v0.8.1** e evolução para a **v0.9.0**, baseado na
+análise do **TAC 0.3.10.1** cruzada com o código do **Horizon SDK** (`2b77287`).
 
-> **Status:** Implementado na **v0.8.0** + hotfix **v0.8.1** (**Opção B** validada em jogo com cão engatilhado no `.bbmodel`/`.json`; na `v0.8.1` corrigida a chave do sprite no atlas do Horizon de `"minecraft:entity/player/wide/steve"` para `"entity/player/wide/steve"` + fallback procedural `LayerDefinition` e enquadramento fino dos antebraços em `1080p`).
+> **Status:** Implementado na **v0.8.0 / v0.8.1** e expandido na **v0.9.0** (SDK `2b77287`, 6 sub-modelos articulados em `models/special/`, skin real `slim`/`wide` com mangas 3D, inspeção na tecla `I`, 9 sons CC0 `.ogg` com legendas completas, texturas `32×32` de munição/projétil, escala 1:1 no chão, bandoleira diagonal nas costas na off-hand `F` e ocultação da mira central em ADS). Ver detalhes técnicos da `v0.9.0` em `NEXT.md` e `README.md`.
 
 ---
 

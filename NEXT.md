@@ -280,7 +280,25 @@ Principais discrepâncias da v0.7.1 reveladas pela tabela:
      `porta_B` deprimida em `-23°`), `ReloadEndNorm`, `ReloadEndEmpty` (ciclo
      completo da alavanca ao recarregar seco) e `Inspect` (tecla `I`).
    - 9 sons CC0 `.ogg` empacotados em `assets/blackpowder_legacy/sounds/` +
-     `sounds.json` (ver `SOUND-CREDITS.md`).
+     `sounds.json` com legendas completas em `pt_br.json` e `en_us.json`
+     (ver `SOUND-CREDITS.md`).
+4. **Refinamentos visuais e de imersão da `v0.9.0`:**
+   - **Escala 1:1 no mundo e braços calibrados (`edf7d93`):** `"ground"` e
+     3ª pessoa em escala `0.45` (`1.34` blocos) e antebraços de 1ª pessoa
+     calibrados sem cruzar o near plane (`-0.05`).
+   - **Sprites `32×32` px (`792a3b0`):** `cartridge_44.png` e `bullet.png`
+     redesenhados em `32×32` px (gerador determinístico sem dependências
+     externas em `tools/make_textures.py`).
+   - **Bandoleira diagonal nas costas (`98d4121`):** ao passar a Winchester para
+     a off-hand (`F`), esconde o modelo na mão secundária, relaxa o braço
+     (`ArmPose::Empty`), bloqueia ADS acidental pela off-hand e renderiza o
+     rifle a `44°` preso ao `Body` em 3ª pessoa (ajustando profundidade com
+     peitoral/élitro e espelhando para canhotos).
+   - **Mira limpa em ADS (`53ede1d`):** `Hooks::gui_layer_pre` oculta a camada
+     `minecraft:crosshair` enquanto o jogador mira pelas miras de ferro.
+   - **Ferramental e CI sincronizados:** `tools/bbmodel_convert.py` regenera
+     tanto `models/item/winchester_1873.json` quanto os 6 sub-modelos em
+     `models/special/`, e `.github/workflows/release.yml` usa `set -o pipefail`.
 
 ## Licença — leia antes de copiar
 

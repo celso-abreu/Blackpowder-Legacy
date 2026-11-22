@@ -1,23 +1,25 @@
 # Blackpowder Legacy
 
-Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), as one WebAssembly `.hmod`.
+Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), packaged as one self-contained WebAssembly `.hmod`.
 
-**v0.8.1 — two-handed first-person rig (`entity/player/wide/steve` atlas fix + procedural fallback), cocked-hammer sight alignment, 2-layer recoil & continuous reload.**
+**v0.9.0 — multi-part animated Winchester 1873 (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`), real player skin (`slim` / `wide` + 3D sleeves), clean ADS iron sights (HUD crosshair hidden), per-round side-gate reload, weapon inspect (`I`), diagonal 3rd-person back-sling (`F`), `32×32` `.44-40` art, and 9 CC0 custom `.ogg` firearm sounds.**
 
 ## How it plays
 
-- Craft the rifle (iron, oak, a stick and a tripwire hook) and .44-40 cartridges (gunpowder + copper + iron nugget, 6 at a time).
-- The tube magazine holds **8 rounds**; a brass bar under the icon tracks them, and the counter shows on the action bar.
-- **Hold right click** to shoulder and aim: the cocked hammer clears the sight line and the iron sights slide dead-center onto the screen via FPS-independent second-order dynamics, the world FOV zooms (`0.67`), mouse sensitivity scales proportionally, and a subtle vignette frames the view. Both of the player's arms (`right_arm` on the grip, `left_arm` under the wooden forestock) move with the rifle. Aiming is suppressed while sprinting or reloading.
-- **Left click** (aimed or hipfire while holding the rifle) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs `1.50` hipfire / `2.20` moving). Each live shot applies **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick) followed by the `10`-tick lever cycle (`120 RPM`). Clicking fire mid-reload immediately interrupts the reload when `>= 1` round is already in the tube.
-- **R** (a real Controls keybind, remappable in **Options > Controls**) starts a **continuous per-cartridge reload loop** on a single press (`8t` open + `10t`/round + `6t` close) until `8 / 8` or interrupted by firing, sprinting, or switching slots. The left hand slides back to push each shell into the side loading gate (`porta_B`), without triggering vanilla's item re-equip bob.
+- Craft the **Winchester 1873** (iron ingots, oak planks, a stick, and a tripwire hook) and **.44-40 Cartridges** (gunpowder + copper ingot + iron nugget, 6 at a time).
+- The tubular magazine holds **8 rounds**; a brass bar under the item icon and a dedicated bottom-right HUD counter track loaded vs. reserve `.44-40` rounds.
+- **Hold right click** to shoulder and aim down sights: the vanilla HUD crosshair (`minecraft:crosshair`) disappears automatically, the cocked hammer clears the sight line, and the rear notch + front blade (`alca_entalhe_base` + `massa_lamina`) slide dead-center onto the screen via FPS-independent second-order dynamics while FOV zooms (`0.67`), mouse turn sensitivity scales proportionally, and a subtle vignette frames the view. Aiming is suppressed while sprinting or reloading.
+- **Left click** (aimed or hipfire while holding the rifle in the main hand) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs. `1.50` hipfire / `2.20` moving). Each live shot drives **articulated sub-model animations** (trigger pull, hammer strike, `+48°` lever throw, and hammer re-cocking), **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick), muzzle smoke/flame particles, and layered CC0 gunshot + mechanical lever audio (`120 RPM`). Dry-firing on an empty chamber drops the hammer and keeps it uncocked until reloaded.
+- **R** (remappable in **Options > Controls**) starts a **continuous per-cartridge reload loop** on a single press: tilts the receiver to expose `porta_B`, depresses the side loading gate (`-23°`) as each 3D `.44-40` brass/copper cartridge slides in with the left hand, and runs a full lever rack (`ReloadEndEmpty`) when reloading from `0/8` to chamber the first round and re-cock the hammer. Clicking fire mid-reload immediately interrupts the reload when `>= 1` round is already in the tube.
+- **I** (remappable in **Options > Controls**) plays a 3.4-second **weapon inspection** sequence showing both sides of the receiver, walnut stock, and brass carrier when idle in hipfire.
+- **F** (swap to off-hand) **slings the rifle diagonally across the player's back** in 3rd-person (`44°` barrel-up / stock-down, locked to the `Body` torso pose through walking, sneaking, and armor), relaxes the off-hand arm (`ArmPose::Empty`), and prevents accidental off-hand ADS right-clicks.
 
 ## Build and test
 
-You need Rust 1.95+, the Horizon launcher and `cargo-horizon-mod`:
+You need Rust 1.95+, the Horizon launcher, and `cargo-horizon-mod`:
 
 ```sh
-cargo install --locked --git https://github.com/horizon-rust/horizon cargo-horizon-mod
+cargo install --locked --git https://github.com/horizon-rust/horizon --rev 2b77287de099c9316278ba7ac4d83590fdb7ef30 cargo-horizon-mod
 cargo horizon-mod build --wasm          # fetches the pinned SDK into .horizon/, writes mod.wasm, packs target/horizon-mod/blackpowder_legacy.hmod
 cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod
 cargo horizon-mod run                   # builds and starts the game with the mod on
@@ -25,73 +27,64 @@ cargo horizon-mod run                   # builds and starts the game with the mo
 
 Or copy the `.hmod` into the game folder's `horizon-mods/` and add `mod.blackpowder_legacy:true` to `horizon-mods.txt`.
 
-The build this mod is made for is pinned in `Cargo.toml` (`[package.metadata.horizon] sdk`, Nightly 2026-11-20, `0a875da`). `cargo horizon-mod update` moves the pin.
+The Horizon build this mod targets is pinned in `Cargo.toml` (`[package.metadata.horizon] sdk`, Nightly 2026-11-22, `2b77287`). `cargo horizon-mod update` moves the pin.
 
 ## Installing
 
 This is a **wasm** mod: install the packaged `.hmod`, no build needed.
 
-1. Download `blackpowder_legacy.hmod` from the [latest
-   release](https://github.com/celso-abreu/Blackpowder-Legacy/releases/latest).
-2. Drop it into the instance's **`horizon-mods/`** folder (from the launcher:
-   open the instance and use **Open the instance folder**; create
-   `horizon-mods` if missing).
+1. Download `blackpowder_legacy.hmod` from the [latest release](https://github.com/celso-abreu/Blackpowder-Legacy/releases/latest).
+2. Drop it into the instance's **`horizon-mods/`** folder (from the launcher: open the instance and use **Open the instance folder**; create `horizon-mods` if missing).
 3. Play — wasm mods need no native-code consent.
 
-Note: the launcher's *Add a native mod from GitHub* dialog is for **native**
-mods only; it refuses wasm packages (`not a native package`). Tagged releases
-(`v*`, matching `version` in `horizon-mod.toml`) are built, checked and
-published by `.github/workflows/release.yml`.
+Note: the launcher's *Add a native mod from GitHub* dialog is for **native** mods only; it refuses wasm packages (`not a native package`). Tagged releases (`v*`, matching `version` in `horizon-mod.toml`) are built, checked, and published by `.github/workflows/release.yml`.
 
 ## CI
 
-Every push builds and checks the mod on GitHub Actions
-(`.github/workflows/build-mod.yml`): `cargo horizon-mod build --wasm` then
-`cargo horizon-mod check`, with the tool binary, the pinned SDK, the wasm
-toolchain and the Cargo caches reused between runs. The checked
-`blackpowder_legacy.hmod` is downloadable from the run's artifacts.
+Every push builds and checks the mod on GitHub Actions (`.github/workflows/build-mod.yml`): `cargo horizon-mod build --wasm` then `cargo horizon-mod check`, with the tool binary, the pinned SDK, the wasm toolchain, and the Cargo caches reused between runs. The checked `blackpowder_legacy.hmod` is downloadable from the run's artifacts.
 
-Both build steps run under `set -o pipefail`, so a failed compile fails the
-job instead of being swallowed by `tee`.
+Both `build-mod.yml` and `release.yml` run build/check steps under `set -o pipefail`, so a failed compile or registry check never passes silently through `tee`.
 
 ## Layout
 
 ```text
-horizon-mod.toml            # manifest: id, version, api 0.2, capabilities
-Cargo.toml                  # wasm code crate + SDK pin
-src/lib.rs                  # the mod: hooks, the typed fire/reload channel, the
-                            #   Winchester's ItemPart and the first-person arm
+horizon-mod.toml            # manifest: id, version 0.9.0, api 0.2, capabilities
+Cargo.toml                  # wasm code crate + pinned Horizon SDK (2b77287)
+SOUND-CREDITS.md            # CC0 / Public Domain attribution for all 9 .ogg audio files
+src/lib.rs                  # WASM mod: articulated sub-model rig, TAC state machine,
+                            #   player skin resolver, 2-layer recoil, ADS crosshair hide,
+                            #   3rd-person diagonal back-sling & server-authoritative ammo
 data/blackpowder_legacy/
   horizon/item/             # winchester_1873, cartridge_44, bullet (item declarations)
   horizon/entity_type/      # bullet: thrown projectile (snowball template, 12 damage)
   horizon/creative_tab/     # the mod's creative tab
   recipe/                   # rifle + cartridge recipes
 assets/blackpowder_legacy/
-  items/                    # 26.3 item definitions (name -> model)
-  models/item/              # item models; the rifle's is a 336-element 3D model
-  textures/item/            # 16x16 pixel art + the rifle's 1024px sheet
-  lang/                     # en_us, pt_br
+  items/                    # 26.3 item definitions (selects empty model in player off-hand)
+  models/item/              # full 336-element item model (GUI, ground 1:1 scale, 3rd-person)
+  models/special/           # 6 standalone sub-models: body, lever, hammer, trigger, gate, cartridge
+  textures/item/            # 32x32 cartridge & bullet pixel art + 1024x1024 rifle sheet
+  sounds/ + sounds.json     # 9 CC0 custom .ogg firearm & Foley sound events + subtitles
+  lang/                     # en_us, pt_br (items, keybinds, full audio subtitles)
 models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
 tools/
-  make_textures.py          # regenerates the 16x16 item textures (python3 + Pillow)
-  bbmodel_convert.py        # converts the .bbmodel into a Horizon item model + texture
-  decompile/                # study tools for reference mods, not part of the build
+  make_textures.py          # deterministic pure-Python generator for the 32x32 item PNGs
+  bbmodel_convert.py        # converts the .bbmodel into item/winchester_1873.json,
+                            #   models/special/winchester_*.json, and rifle_texture.png
+  decompile/                # local study scripts for reference mods, not packaged
 ```
 
-`tools/decompile/` holds the Windows scripts used to read other mods' code for
-design reference — see its own [README](tools/decompile/DECOMPILAR.md). Nothing
-there is packaged into the `.hmod`.
+`tools/decompile/` holds local helper scripts used to study reference mods' mechanics — see [DECOMPILAR.md](tools/decompile/DECOMPILAR.md). Nothing under `models/` or `tools/` is packaged into the `.hmod`.
 
 ## Design notes
 
-- **Magazine storage:** the tube count lives in the stack's vanilla `damage` component (0–8). `max_damage = 100` keeps every write valid and the rifle unstackable; nothing ever breaks. The `item_bar` hook replaces the (misleading) vanilla damage bar with a brass ammo gauge.
-- **Controls & Networking:** aiming is the item's use-over-time (`use_duration` > 0 on right click); `render_frame_pre` steps second-order springs per frame (`event.elapsed`), driving world FOV zoom (`compute_fov`), mouse turn scaling (`calculate_player_turn`), the vignette (`gui_render_post`), sight alignment (`render_hand`), and smooth camera recoil (`set_local_rotation`). Firing and reloading use bidirectional typed payloads (`RifleInput` client→server and `RifleSync` server→client) so recoil/lever animations only trigger on authoritative live shots, dry clicks give a subtle flinch, and `should_cause_reequip_animation` suppresses equip dips on ammo updates.
-- **First-person arms:** `client_setup` bakes `minecraft:player#main` once and extracts `right_arm` (+ `right_sleeve`) and `left_arm` (+ `left_sleeve`) with zeroed local poses; `draw_arms` replicates `render_hand`'s exact pose matrix + `HAND_BASE` on `event.draw` with `[sxz, -sy, -sxz]` scaling so both hands follow ADS, recoil, lever action, and loading-gate shell insertion in lockstep.
-- **Projectile:** `blackpowder_legacy:bullet` is a content-declared thrown type (snowball template) launched server-side with `host.spawn_projectile_from_rotation` at 6× throw power and tight spread. Bullet drop and damage falloff are future material.
-- **Sounds:** vanilla events broadcast through `LevelRef::play_sound` (`firework_rocket.blast` for the shot, crossbow clicks for the lever and the last cartridge) — no chat spam. Custom `.ogg` gunshots replace them in a later version.
-- **3D model:** `models/winchester_1873.bbmodel` (Blockbench "free" project, 336 elements, one 1024×1024 sheet) is converted by `tools/bbmodel_convert.py` into `assets/blackpowder_legacy/models/item/winchester_1873.json`. The converter scales the model ×0.48 into Horizon's [-16, 32] element bounds, divides the pixel UVs into the 0–16 space and keeps Blockbench's Euler-XYZ element rotations, which Horizon's model parser accepts natively. Run it again (`python3 tools/bbmodel_convert.py`) after editing the model in Blockbench.
+- **Articulated multi-part rig (`models/special/`):** `Hooks::standalone_models` registers 6 standalone sub-models (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`) baked into `ModelRef` handles in `model_baking_completed`. In 1st person (`render_hand`) and when slung on the back (`render_player_post`), `draw_rifle_assembly` renders each mechanical sub-group around its exact Blockbench pivot (`LEVER_PIVOT_TEX`, `HAMMER_PIVOT_TEX`, `TRIGGER_PIVOT_TEX`, `GATE_PIVOT_TEX`) while keeping the monolithic `models/item/winchester_1873.json` (`0.45` = `1.34` blocks world length) for GUI, ground drops, and 3rd-person main-hand holds.
+- **Real player skin & slim/wide arms:** `ServerHost::profile_by_uuid` decodes Mojang's Base64 `textures` property into Horizon's `"skins/" + sha1_utf16le(url_hash)` sprite key + `slim` (`3×12×4`) / `wide` (`4×12×4`) arm geometry (synced via `RifleSkinSync`), with deterministic frame-0 fallback to Horizon's 18 modern default skins (`default_skin_for_uuid`) and 3D outer sleeve layers (`CubeDeformation(0.25)`).
+- **Controls, HUD & Networking:** aiming uses `use_duration` on main-hand right click (`ItemPart::use_item` rejects off-hand ADS), `Hooks::gui_layer_pre` hides `minecraft:crosshair` while aiming, and `render_frame_pre` steps FPS-independent second-order springs driving FOV (`compute_fov`), mouse turn scaling (`calculate_player_turn`), vignette + ammo HUD (`gui_render_post`), and smooth camera recoil (`set_local_rotation`). Firing, reloading, and inspecting communicate over typed channels (`RifleInput`, `RifleSync`, `RifleSkinSync`) with `should_cause_reequip_animation` suppressing equip dips on magazine updates.
+- **3rd-person diagonal back-sling:** `assets/blackpowder_legacy/items/winchester_1873.json` uses a `minecraft:select` `display_context` switch to suppress vanilla's held off-hand model on players while `Hooks::get_arm_pose` relaxes the off-hand arm and `Hooks::render_player_post` mounts the rifle at `44°` across the player's `HumanoidPart::Body` matrix (adapting depth automatically when chest armor/elytra is worn and mirroring cleanly for left-handed players).
+- **Custom CC0 audio:** 9 `.ogg` sound assets (`winchester_fire`, `winchester_thump`, `winchester_lever`, `winchester_cock`, `winchester_reload_intro`, `winchester_reload_insert`, `winchester_reload_end`, `winchester_draw`, `winchester_inspect`) with localized `pt_br` and `en_us` accessibility subtitles (see [SOUND-CREDITS.md](SOUND-CREDITS.md)).
 
 ## Roadmap
 
-- v0.8: read the TAC (Timeless and Classics) decompiled source as design reference — recoil curve, ADS transition, reload state machine — and apply what fits.
-- Later: Colt SAA revolver and blunderbuss (spread shot), misfires, per-part durability, a settings screen (zoom strength, vignette, keybinds).
+- **Polish & ballistics:** spent `.44-40` brass casing ejection, richer blackpowder muzzle smoke, dynamic 3rd-person hip/aim arm poses, headshot multiplier & long-range falloff, chest loot tables & advancements.
+- **Arsenal expansion (`v0.10+`):** Colt Single Action Army M1873 revolver (sharing `.44-40` cartridges, 6-shot cylinder, hip holster on `F`), blunderbuss / coach gun (buckshot spread), misfires, and a mod settings screen.

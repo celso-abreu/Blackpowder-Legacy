@@ -11,6 +11,7 @@
     ]
   },
   "item.winchester_thump": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_fire",
     "sounds": [
       {
         "name": "blackpowder_legacy:winchester_thump",
@@ -65,6 +66,7 @@
     ]
   },
   "animation.winchester_reload_end": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_reload_end",
     "sounds": [
       {
         "name": "blackpowder_legacy:winchester_reload_end",
@@ -75,6 +77,7 @@
     ]
   },
   "animation.winchester_draw": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_draw",
     "sounds": [
       {
         "name": "blackpowder_legacy:winchester_draw",
@@ -84,6 +87,7 @@
     ]
   },
   "animation.winchester_inspect": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_inspect",
     "sounds": [
       {
         "name": "blackpowder_legacy:winchester_inspect",

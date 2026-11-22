@@ -10,5 +10,8 @@
   "subtitles.blackpowder_legacy.winchester_lever": "Winchester lever cycles",
   "subtitles.blackpowder_legacy.winchester_cock": "Rifle dry-clicks",
   "subtitles.blackpowder_legacy.winchester_reload": "Winchester reloading",
-  "subtitles.blackpowder_legacy.winchester_reload_insert": ".44-40 cartridge loaded"
+  "subtitles.blackpowder_legacy.winchester_reload_insert": ".44-40 cartridge loaded",
+  "subtitles.blackpowder_legacy.winchester_reload_end": "Winchester ready",
+  "subtitles.blackpowder_legacy.winchester_draw": "Winchester drawn",
+  "subtitles.blackpowder_legacy.winchester_inspect": "Winchester inspected"
 }

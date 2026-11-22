@@ -91,10 +91,12 @@ jobs:
           cargo-horizon-mod
 
       - name: Build mod.wasm and pack the .hmod
-        run: cargo horizon-mod build --wasm 2>&1 | tee build-log.txt
+        shell: bash
+        run: set -o pipefail; cargo horizon-mod build --wasm 2>&1 | tee build-log.txt
 
       - name: Registry check
-        run: cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
+        shell: bash
+        run: set -o pipefail; cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
 
       # Publish the checked .hmod. A rerun of the same tag replaces the asset
       # instead of failing, so a flaky first attempt stays recoverable.
