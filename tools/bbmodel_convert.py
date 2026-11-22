@@ -158,23 +158,23 @@ def main() -> None:
         "display": {
             "thirdperson_righthand": {
                 "rotation": [5.73, -17.19, 0],
-                "translation": [1.4, 0.75, -4.49],
-                "scale": [0.45, 0.45, 0.45],
+                "translation": [1.7, 0.92, -5.49],
+                "scale": [0.55, 0.55, 0.55],
             },
             "thirdperson_lefthand": {
                 "rotation": [5.73, 17.19, 0],
-                "translation": [-1.4, 0.75, -4.49],
-                "scale": [0.45, 0.45, 0.45],
+                "translation": [-1.7, 0.92, -5.49],
+                "scale": [0.55, 0.55, 0.55],
             },
             "firstperson_righthand": {
                 "rotation": [0, 0, 0],
-                "translation": [0, 0.3, -4.75],
-                "scale": [0.45, 0.45, 0.45],
+                "translation": [-0.6, 0.8, -6.4],
+                "scale": [0.6, 0.6, 0.6],
             },
             "ground": {
                 "rotation": [0, 0, 0],
-                "translation": [0, 3, 0],
-                "scale": [0.45, 0.45, 0.45],
+                "translation": [0, 3.3, 0],
+                "scale": [0.52, 0.52, 0.52],
             },
             "gui": {
                 "rotation": [30, 225, 0],

@@ -81,8 +81,9 @@ const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
 const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
 const SKIN_CHANNEL: &str = "blackpowder_legacy:rifle_skin";
 
-const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
-const FLAME_PARTICLE: &str = "minecraft:flame";
+const SMOKE_PARTICLE: &str = "minecraft:smoke";
+const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
+const FLAME_PARTICLE: &str = "minecraft:small_flame";
 const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 const DEFAULT_STEVE_WIDE: &str = "entity/player/wide/steve";
 
@@ -133,12 +134,18 @@ const AIM_VIGNETTE: f32 = 0.68;
 const HAND_BASE: [f32; 3] = [0.56, -0.52, -0.72];
 
 /// First-person right-hand offset placing the cocked Winchester 1873 iron sights
-/// (`massa_lamina` over `alca_entalhe_base` at baked `X = 8.139`) dead-center on screen.
-const ADS_OFFSET: [f32; 3] = [-0.5639, 0.3695, 0.05];
+/// (`massa_lamina` over `alca_entalhe_base` at baked `X = 8.139`, `Y = 12.684`) dead-center on screen
+/// at `RIFLE_DISPLAY_SCALE = 0.60`.
+const ADS_OFFSET: [f32; 3] = [-0.5277, 0.2944, 0.04];
 
-/// Mirror of `display.firstperson_righthand` in `models/item/winchester_1873.json`.
-const RIFLE_DISPLAY_TRANS: [f32; 3] = [0.0, 0.3 / 16.0, -4.75 / 16.0];
-const RIFLE_DISPLAY_SCALE: f32 = 0.45;
+/// Mirror of `display.firstperson_righthand` in `models/item/winchester_1873.json` (`+33.3%`
+/// larger than `0.45` so the receiver, barrel, and walnut stock feel substantial in the hands
+/// while keeping buttstock `Z <= -0.194` well clear of the `-0.05` near plane).
+const RIFLE_DISPLAY_TRANS: [f32; 3] = [-0.6 / 16.0, 0.8 / 16.0, -6.4 / 16.0];
+const RIFLE_DISPLAY_SCALE: f32 = 0.60;
+
+/// Muzzle crown (`boca_cano` center) in `[0..16]` JSON texel coordinates.
+const MUZZLE_TEXELS: [f32; 3] = [8.139, 11.68, -16.0];
 
 /// Sub-model pivots in `[0..16]` JSON texel coordinates (`BB -> JM`: `8 + x`, `y`, `8 + z`).
 const LEVER_PIVOT_TEX: [f32; 3] = [8.139, 8.912, 13.376];
@@ -152,28 +159,28 @@ const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
 const GRIP_WRIST_TEXELS: [f32; 3] = [9.55, 5.45, 16.50];
 const FORESTOCK_TEXELS: [f32; 3] = [7.65, 5.15, 4.60];
 
-/// First-person player arm scale compensated for `RIFLE_DISPLAY_SCALE` (`0.45`):
-/// - Cross-section `1.92 * 0.45 = 0.864` world blocks (`~202–208 px` on `1280x720`, matching
-///   the vanilla empty hand's visual size so switching slots keeps hand proportions consistent).
-/// - Forearm reach `2.12 * 0.45 = 0.954` world blocks (near-1:1 skin texel aspect ratio while
-///   extending both shoulders cleanly past the bottom edge of the viewport).
+/// First-person player arm scale compensated for `RIFLE_DISPLAY_SCALE` (`0.60`):
+/// - Cross-section `1.36 * 0.60 = 0.816` world blocks and forearm reach `1.54 * 0.60 = 0.924`
+///   world blocks so the player's hands stay naturally sized while the rifle sits `+33%` larger
+///   inside them (and both elbows remain `<= -0.23` behind the `-0.05` near plane).
 /// - Both right and left arms share identical world thickness and `3x12x4` (`slim`) / `4x12x4`
 ///   (`wide`) geometry with `+0.25` 3D outer sleeves.
-const ARM_GUN_SPACE_WIDTH: f32 = 1.92;
-const ARM_GUN_SPACE_LENGTH: f32 = 2.12;
+const ARM_GUN_SPACE_WIDTH: f32 = 1.36;
+const ARM_GUN_SPACE_LENGTH: f32 = 1.54;
 
 /// Third-person diagonal back-sling constants (`Hooks::render_player_post` on `HumanoidPart::Body`):
 /// - `AVATAR_RENDER_SCALE` (`15/16 = 0.9375`) and `AVATAR_MODEL_OFFSET_Y` (`-1.501`) match
 ///   `AvatarRenderer::scale` / `base_transform` so the slung rifle stays welded to the player's
 ///   spine across standing, walking, torso twist, and sneaking (`Body` `x_rot = 0.5 rad`).
-/// - `BACK_SLING_MODEL_SCALE = 0.45 / 0.9375 = 0.48` preserves exact `0.45` (`1.34`-block)
-///   1:1 world proportions.
+/// - `THIRDPERSON_RIFLE_SCALE` (`0.55`) matches `thirdperson_righthand` / `thirdperson_lefthand`
+///   so swapping with `F` preserves exact 3rd-person scale.
 /// - `BACK_SLING_DIAG_DEG = -44.0` angles the barrel upward over the main-hand shoulder while
 ///   the walnut buttstock rests down near the off-hand hip, with the flat steel receiver side
 ///   flush against the back and the King's loading gate facing outward.
 const AVATAR_RENDER_SCALE: f32 = 0.9375;
 const AVATAR_MODEL_OFFSET_Y: f32 = -1.501;
-const BACK_SLING_MODEL_SCALE: f32 = RIFLE_DISPLAY_SCALE / AVATAR_RENDER_SCALE;
+const THIRDPERSON_RIFLE_SCALE: f32 = 0.55;
+const BACK_SLING_MODEL_SCALE: f32 = THIRDPERSON_RIFLE_SCALE / AVATAR_RENDER_SCALE;
 const BACK_SLING_DIAG_DEG: f32 = -44.0;
 const BACK_SLING_CENTER_TEX: [f32; 3] = [8.139, 8.50, 8.20];
 const BACK_SLING_OFFSET_Y_TEX: f32 = -5.80;
@@ -223,6 +230,22 @@ const SYNC_RELOAD_ABORTED: i32 = 7;
 #[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleInput {
     action: VarInt,
+    muzzle_right_mm: VarInt,
+    muzzle_up_mm: VarInt,
+    muzzle_fwd_mm: VarInt,
+    aim_pct: VarInt,
+}
+
+impl RifleInput {
+    const fn simple(action: i32) -> Self {
+        Self {
+            action: VarInt(action),
+            muzzle_right_mm: VarInt(0),
+            muzzle_up_mm: VarInt(0),
+            muzzle_fwd_mm: VarInt(0),
+            aim_pct: VarInt(0),
+        }
+    }
 }
 
 #[derive(horizon_mod_api_macros::PayloadCodec)]
@@ -254,6 +277,10 @@ static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
+static LAST_WORLD_FOV_BITS: AtomicU32 = AtomicU32::new(0x428C_0000); // 70.0_f32.to_bits()
+static LAST_MUZZLE_VIEW_X: AtomicU32 = AtomicU32::new(0x3F07_1A9F); // 0.52775_f32
+static LAST_MUZZLE_VIEW_Y: AtomicU32 = AtomicU32::new(0xBEAA_0000); // -0.33203_f32
+static LAST_MUZZLE_VIEW_Z: AtomicU32 = AtomicU32::new(0xC001_47AE); // -2.02000_f32
 
 static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
@@ -265,6 +292,7 @@ static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
 static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
@@ -857,10 +885,12 @@ impl Hooks for Mod {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let winchester = r.item_key(WINCHESTER);
         let smoke = r.particle_key(SMOKE_PARTICLE);
+        let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(smoke);
+        let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
 
         r.register_key_mapping(
@@ -1025,12 +1055,7 @@ impl Hooks for Mod {
             play_local_foley(host, snd, vol, pitch);
         }
         if want_skin_request {
-            let _ = input.send(
-                host,
-                &RifleInput {
-                    action: VarInt(ACTION_SKIN_REQUEST),
-                },
-            );
+            let _ = input.send(host, &RifleInput::simple(ACTION_SKIN_REQUEST));
         }
 
         // Always drain custom key clicks even when not holding so clicks never queue up stale.
@@ -1048,12 +1073,7 @@ impl Hooks for Mod {
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
-                let _ = input.send(
-                    host,
-                    &RifleInput {
-                        action: VarInt(ACTION_RELOAD_CANCEL),
-                    },
-                );
+                let _ = input.send(host, &RifleInput::simple(ACTION_RELOAD_CANCEL));
             }
             return;
         }
@@ -1095,21 +1115,11 @@ impl Hooks for Mod {
         }
 
         if PENDING_RELOAD_CANCEL.swap(false, Ordering::Relaxed) {
-            let _ = input.send(
-                host,
-                &RifleInput {
-                    action: VarInt(ACTION_RELOAD_CANCEL),
-                },
-            );
+            let _ = input.send(host, &RifleInput::simple(ACTION_RELOAD_CANCEL));
         }
 
         if PENDING_FIRE.swap(false, Ordering::Relaxed) {
-            let _ = input.send(
-                host,
-                &RifleInput {
-                    action: VarInt(ACTION_FIRE),
-                },
-            );
+            let _ = input.send(host, &build_fire_input());
         }
 
         if want_reload && !CLIENT_RELOADING.load(Ordering::Relaxed) && !sprinting {
@@ -1120,12 +1130,7 @@ impl Hooks for Mod {
             if !busy_draw {
                 AIMING.store(false, Ordering::Relaxed);
                 let _ = host.set_mapping_down("key.use", false);
-                let _ = input.send(
-                    host,
-                    &RifleInput {
-                        action: VarInt(ACTION_RELOAD),
-                    },
-                );
+                let _ = input.send(host, &RifleInput::simple(ACTION_RELOAD));
             }
         } else if want_inspect && !CLIENT_RELOADING.load(Ordering::Relaxed) && !sprinting {
             let start_inspect = {
@@ -1371,6 +1376,9 @@ impl Hooks for Mod {
                 event.degrees = scaled;
             }
         }
+        if event.degrees.is_finite() {
+            LAST_WORLD_FOV_BITS.store(event.degrees.to_bits(), Ordering::Relaxed);
+        }
     }
 
     fn calculate_player_turn(&self, _: &dyn ClientHost, event: &mut CalculatePlayerTurnEvent) {
@@ -1594,6 +1602,10 @@ impl Hooks for Mod {
             hammer_uncocked,
             action,
         );
+        let muzzle_view = compute_muzzle_view_pos(&pose, equip);
+        LAST_MUZZLE_VIEW_X.store(muzzle_view[0].to_bits(), Ordering::Relaxed);
+        LAST_MUZZLE_VIEW_Y.store(muzzle_view[1].to_bits(), Ordering::Relaxed);
+        LAST_MUZZLE_VIEW_Z.store(muzzle_view[2].to_bits(), Ordering::Relaxed);
 
         let arms = PLAYER_ARMS.get_or_init(PlayerArms::procedural_both);
         let arm_pair = if skin.slim { &arms.slim } else { &arms.wide };
@@ -2234,6 +2246,64 @@ fn model_texel_to_hand(tex: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Evaluates `boca_cano` (`MUZZLE_TEXELS`) through the exact `render_hand` transform stack
+/// (`RIFLE_DISPLAY` -> `HAND_BASE` -> `gun_rot` -> `gun_trans`) in 1st-person hand camera space.
+fn compute_muzzle_view_pos(pose: &WeaponPose, equip: f32) -> [f32; 3] {
+    let local = model_texel_to_hand(MUZZLE_TEXELS);
+    let mut x = HAND_BASE[0] + local[0];
+    let mut y = HAND_BASE[1] - equip * 0.6 + local[1];
+    let mut z = HAND_BASE[2] + local[2];
+
+    let (sz, cz) = pose.gun_rot[2].to_radians().sin_cos();
+    (x, y) = (x * cz - y * sz, x * sz + y * cz);
+    let (sy, cy) = pose.gun_rot[1].to_radians().sin_cos();
+    (x, z) = (x * cy + z * sy, -x * sy + z * cy);
+    let (sx, cx) = pose.gun_rot[0].to_radians().sin_cos();
+    (y, z) = (y * cx - z * sx, y * sx + z * cx);
+
+    [
+        x + pose.gun_trans[0],
+        y + pose.gun_trans[1],
+        z + pose.gun_trans[2],
+    ]
+}
+
+/// Builds `ACTION_FIRE` with the exact screen-ray-matched world muzzle offset (`mm`) so muzzle
+/// smoke & flash appear right on `boca_cano` in hipfire, mid-ADS, full ADS, and `F5` 3rd person
+/// across any Minecraft FOV setting.
+fn build_fire_input() -> RifleInput {
+    let aim_pct = (aim_progress().clamp(0.0, 1.0) * 100.0).round() as i32;
+    let (right_m, up_m, fwd_m) = if holding_rifle_recently() {
+        let mx = f32::from_bits(LAST_MUZZLE_VIEW_X.load(Ordering::Relaxed));
+        let my = f32::from_bits(LAST_MUZZLE_VIEW_Y.load(Ordering::Relaxed));
+        let mz = f32::from_bits(LAST_MUZZLE_VIEW_Z.load(Ordering::Relaxed));
+        let fwd_1p = (-mz).clamp(0.5, 3.0);
+        let world_fov = f32::from_bits(LAST_WORLD_FOV_BITS.load(Ordering::Relaxed)).clamp(20.0, 150.0);
+        // Horizon's 1st-person hand pass uses a 70° vertical FOV (`tan(35°)`), while world
+        // particles project under `world_fov`. Scaling `(mx, my)` by `fov_ratio * (1.35 / fwd_1p)`
+        // keeps exact 0-pixel ray alignment with `boca_cano` on screen at `1.35` blocks barrel reach.
+        let fov_ratio = (world_fov.to_radians() * 0.5).tan() / (35.0_f32.to_radians()).tan();
+        let target_fwd = 1.35_f32;
+        let ray_scale = target_fwd / fwd_1p;
+        (
+            (mx * fov_ratio * ray_scale).clamp(-1.1, 1.1),
+            (my * fov_ratio * ray_scale).clamp(-1.1, 1.1),
+            target_fwd,
+        )
+    } else {
+        // 3rd-person (`F5`) held barrel tip offset relative to eye basis.
+        (0.28_f32, -0.14_f32, 1.35_f32)
+    };
+
+    RifleInput {
+        action: VarInt(ACTION_FIRE),
+        muzzle_right_mm: VarInt((right_m * 1000.0).round() as i32),
+        muzzle_up_mm: VarInt((up_m * 1000.0).round() as i32),
+        muzzle_fwd_mm: VarInt((fwd_m * 1000.0).round() as i32),
+        aim_pct: VarInt(aim_pct),
+    }
+}
+
 const fn tex_to_unit(p: [f32; 3]) -> [f32; 3] {
     [p[0] / 16.0, p[1] / 16.0, p[2] / 16.0]
 }
@@ -2300,7 +2370,17 @@ fn on_rifle_input(value: RifleInput, cx: &mut dyn IPayloadContext) -> Result<(),
     match value.action.0 {
         ACTION_FIRE => {
             if let Some(smoke) = SMOKE_KEY.get().copied() {
-                fire_rifle(host, player, smoke);
+                fire_rifle(
+                    host,
+                    player,
+                    smoke,
+                    [
+                        value.muzzle_right_mm.0,
+                        value.muzzle_up_mm.0,
+                        value.muzzle_fwd_mm.0,
+                    ],
+                    value.aim_pct.0,
+                );
             }
         }
         ACTION_RELOAD => start_reload(host, player),
@@ -2477,7 +2557,13 @@ fn play_world_sound(
     level.play_sound(host, sound, at, SoundSource::Players, volume, pitch);
 }
 
-fn muzzle_effects(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+fn muzzle_effects(
+    host: &mut dyn ServerHost,
+    player: mod_api::PlayerRef,
+    smoke: ParticleKey,
+    muzzle_mm: [i32; 3],
+    aim_pct: i32,
+) {
     let entity = player.entity();
     let Some(level) = entity.level(host) else {
         return;
@@ -2485,16 +2571,42 @@ fn muzzle_effects(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: 
     let Some(eye) = entity.eye_position(host) else {
         return;
     };
-    let Some(view) = entity.view_vector(host) else {
+    let Some(forward) = entity.view_vector(host) else {
         return;
     };
-    let muzzle = [
-        eye[0] + view[0] * 0.78,
-        eye[1] + view[1] * 0.78 - 0.10,
-        eye[2] + view[2] * 0.78,
+    let up = entity.up_vector(host).unwrap_or([0.0, 1.0, 0.0]);
+    // Exact camera-right unit vector (`forward × up`), singularity-free at every pitch/yaw.
+    let right = [
+        forward[1] * up[2] - forward[2] * up[1],
+        forward[2] * up[0] - forward[0] * up[2],
+        forward[0] * up[1] - forward[1] * up[0],
     ];
-    let smoke_opts = ParticleOptions::simple(smoke);
-    level.send_particles(host, &smoke_opts, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
+
+    let has_client_offset = muzzle_mm[2] > 0;
+    let right_m = if has_client_offset {
+        (f64::from(muzzle_mm[0]) / 1000.0).clamp(-1.20, 1.20)
+    } else {
+        0.34
+    };
+    let up_m = if has_client_offset {
+        (f64::from(muzzle_mm[1]) / 1000.0).clamp(-1.20, 1.20)
+    } else {
+        -0.22
+    };
+    let fwd_m = if has_client_offset {
+        (f64::from(muzzle_mm[2]) / 1000.0).clamp(0.80, 2.20)
+    } else {
+        1.35
+    };
+    let aimed = aim_pct >= 65;
+
+    let muzzle = [
+        eye[0] + right[0] * right_m + up[0] * up_m + forward[0] * fwd_m,
+        eye[1] + right[1] * right_m + up[1] * up_m + forward[1] * fwd_m,
+        eye[2] + right[2] * right_m + up[2] * up_m + forward[2] * fwd_m,
+    ];
+
+    // 1. Tight muzzle flash spark right on the barrel crown (`boca_cano`).
     if let Some(flame) = FLAME_KEY.get().copied() {
         let flame_opts = ParticleOptions::simple(flame);
         level.send_particles(
@@ -2502,11 +2614,57 @@ fn muzzle_effects(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: 
             &flame_opts,
             None,
             muzzle,
-            [0.02, 0.02, 0.02],
-            0.01,
-            3,
+            [0.012, 0.012, 0.012],
+            0.006,
+            if aimed { 1 } else { 2 },
         );
     }
+
+    // 2. Directional pale-grey blackpowder smoke (`white_smoke`) jetting forward along the bore
+    //    (`count = 0` sends one directional particle moving along `spread * speed`).
+    if let Some(white_smoke) = WHITE_SMOKE_KEY.get().copied() {
+        let ws_opts = ParticleOptions::simple(white_smoke);
+        let speeds: &[f64] = if aimed {
+            &[0.14, 0.22]
+        } else {
+            &[0.08, 0.14, 0.20, 0.26]
+        };
+        let origin = if aimed {
+            [
+                muzzle[0] - up[0] * 0.025 + forward[0] * 0.06,
+                muzzle[1] - up[1] * 0.025 + forward[1] * 0.06,
+                muzzle[2] - up[2] * 0.025 + forward[2] * 0.06,
+            ]
+        } else {
+            muzzle
+        };
+        for (idx, &spd) in speeds.iter().enumerate() {
+            let side_jitter = ((idx as f64) - 1.5) * 0.035;
+            let dir = [
+                forward[0] + right[0] * side_jitter + up[0] * 0.06,
+                forward[1] + right[1] * side_jitter + up[1] * 0.06,
+                forward[2] + right[2] * side_jitter + up[2] * 0.06,
+            ];
+            level.send_particles(host, &ws_opts, None, origin, dir, spd, 0);
+        }
+    }
+
+    // 3. Subtle lingering powder wisp just past the crown.
+    let wisp_pos = [
+        muzzle[0] + forward[0] * 0.14,
+        muzzle[1] + forward[1] * 0.14,
+        muzzle[2] + forward[2] * 0.14,
+    ];
+    let smoke_opts = ParticleOptions::simple(smoke);
+    level.send_particles(
+        host,
+        &smoke_opts,
+        None,
+        wisp_pos,
+        [0.022, 0.022, 0.022],
+        0.008,
+        if aimed { 1 } else { 3 },
+    );
 }
 
 /// Reads the Winchester strictly from the player's currently selected hotbar slot (`0..9`).
@@ -2597,7 +2755,13 @@ fn compute_spread(host: &dyn ServerHost, player: mod_api::PlayerRef, now: u64) -
     }
 }
 
-fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+fn fire_rifle(
+    host: &mut dyn ServerHost,
+    player: mod_api::PlayerRef,
+    smoke: ParticleKey,
+    muzzle_mm: [i32; 3],
+    aim_pct: i32,
+) {
     let Some((slot, rifle)) = held_rifle(host, player) else {
         return;
     };
@@ -2657,7 +2821,7 @@ fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: Part
     // Mono 48kHz gunshot blast + breech thump broadcast in 3D world space for all nearby players.
     play_world_sound(host, player, SND_FIRE, 2.5, 1.0);
     play_world_sound(host, player, SND_THUMP, 1.15, 1.0);
-    muzzle_effects(host, player, smoke);
+    muzzle_effects(host, player, smoke, muzzle_mm, aim_pct);
     send_sync(host, player, SYNC_SHOT, remaining);
 }
 
