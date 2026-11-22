@@ -167,7 +167,7 @@ fn draw_forearm(event: &mut RenderHandEvent<'_, '_>) {
     let Some(arm) = PLAYER_ARM.get_or_init(|| None).as_ref() else {
         return;
     };
-    let (translate, rotation, scale) = RIFLE_DISPLAY;
+    let (translate, _rotation, scale) = RIFLE_DISPLAY;
     // Where the fist goes, in the hand's view space: the grip put through the
     // same display transform the gun's model is drawn under.
     let grip = [
@@ -201,12 +201,11 @@ fn draw_forearm(event: &mut RenderHandEvent<'_, '_>) {
     draw.rotate_about([1.0, 0.0, 0.0], -90.0, [0.0; 3]);
     draw.rotate_about([0.0, 1.0, 0.0], -28.0, [0.0; 3]);
     draw.rotate_about([0.0, 0.0, 1.0], 12.0, [0.0; 3]);
-    let _ = rotation;
     let _ = draw.model_part(arm, "minecraft:entity/player/wide/steve", 0xFF_FFFF);
     draw.pop();
 }
 
-/// One rifle input from the owning client/// One rifle input from the owning client/// One rifle input from the owning client/// One rifle input from the owning client: fire (1) or reload one round (2).
+/// One rifle input from the owning client: fire (1) or reload one round (2).
 #[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleInput {
     action: VarInt,
