@@ -26,7 +26,7 @@
 //! chat). A shot also puffs black-powder smoke past the muzzle.
 
 use mod_api::{
-    Blend, ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
+    ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
     Hand, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemKey, ItemPart,
     ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, OnUseTickEvent,
     ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
@@ -258,7 +258,7 @@ impl Hooks for Mod {
     /// gun. `render`'s transform is view-space (+x right, +y up, -z into the
     /// screen), applied before the hand's own pose, so the offsets compose
     /// with the item's display transform directly.
-    fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_>) -> mod_api::Flow {
+    fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> mod_api::Flow {
         let render = &mut *event.render;
         if render.hand != Hand::Main {
             return mod_api::Flow::Continue;
@@ -323,7 +323,7 @@ impl Hooks for Mod {
         let (w, h) = (w as i32, h as i32);
         let _ = event.batch.gui_paint(&[GuiDraw::Blit {
             texture: "misc/vignette".into(),
-            blend: Blend::Vignette,
+            blend: mod_api::Blend::Vignette,
             x: 0,
             y: 0,
             w,
