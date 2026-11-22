@@ -30,19 +30,22 @@
 //!   1st/3rd person, and blocks accidental off-hand ADS right-clicks (`ItemPart::use_item`).
 
 use mod_api::{
-    ArmPose, BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
-    ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent,
-    CubeDeformation, CubeListBuilder, EntityUuid, EquipmentSlot, Flow, GetArmPoseEvent, GuiDraw,
-    GuiLayerPreEvent, GuiRenderPostEvent, Hand, Hooks, Host, HostSide, HumanoidPart,
-    IPayloadContext, Identifier, InteractionResult, ItemBarEvent, ItemKey, ItemPart, ItemStack,
-    KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent,
-    LivingRef, MeshDefinition, ModelBakingCompletedEvent, ModelPart, ModelRef, OnUseTickEvent,
-    PartPose, ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext,
-    ReleaseUsingEvent, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
-    ServerTickEvent, ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource,
-    StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
+    ArmPose, BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, CameraType,
+    ClientHost, ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent,
+    ComputeFovEvent, CubeDeformation, CubeListBuilder, EntityUuid, EquipmentSlot, Flow,
+    GetArmPoseEvent, GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand,
+    HearsProjectileImpactsEvent, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
+    InteractionResult, ItemBarEvent, ItemKey, ItemPart, ItemStack, KeyConflictContext,
+    KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent, LightCoords,
+    LightLayer, LivingRef, MeshDefinition, ModelBakingCompletedEvent, ModelInstance, ModelPart,
+    ModelRef, OnUseTickEvent, Overlay, PartPose, ParticleKey, ParticleOptions, PayloadId,
+    ProjectileImpactEvent, Registrar, RegistrationContext, ReleaseUsingEvent, RenderFramePreEvent,
+    RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase,
+    ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource, StandaloneModelsEvent,
+    SubmitCustomGeometryEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
+    WorldDrawContext,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::{PI, TAU};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -62,6 +65,8 @@ const MODEL_HAMMER_ID: &str = "blackpowder_legacy:special/winchester_hammer";
 const MODEL_TRIGGER_ID: &str = "blackpowder_legacy:special/winchester_trigger";
 const MODEL_GATE_ID: &str = "blackpowder_legacy:special/winchester_gate";
 const MODEL_CARTRIDGE_ID: &str = "blackpowder_legacy:special/winchester_cartridge";
+const MODEL_CASING_ID: &str = "blackpowder_legacy:special/winchester_casing";
+const MODEL_BULLET_HOLE_ID: &str = "blackpowder_legacy:special/bullet_hole";
 
 const SND_FIRE: &str = "blackpowder_legacy:item.winchester_fire";
 const SND_THUMP: &str = "blackpowder_legacy:item.winchester_thump";
@@ -72,6 +77,8 @@ const SND_RELOAD_INSERT: &str = "blackpowder_legacy:animation.winchester_reload_
 const SND_RELOAD_END: &str = "blackpowder_legacy:animation.winchester_reload_end";
 const SND_DRAW: &str = "blackpowder_legacy:animation.winchester_draw";
 const SND_INSPECT: &str = "blackpowder_legacy:animation.winchester_inspect";
+const SND_SHELL_DROP: &str = "blackpowder_legacy:item.winchester_shell_drop";
+const SND_IMPACT_HIT: &str = "minecraft:block.stone.hit";
 
 const RELOAD_MAPPING: &str = "reload";
 const INSPECT_MAPPING: &str = "inspect";
@@ -80,10 +87,20 @@ const ATTACK_MAPPING: &str = "key.attack";
 const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
 const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
 const SKIN_CHANNEL: &str = "blackpowder_legacy:rifle_skin";
+const IMPACT_CHANNEL: &str = "blackpowder_legacy:bullet_impact";
 
 const SMOKE_PARTICLE: &str = "minecraft:smoke";
 const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
 const FLAME_PARTICLE: &str = "minecraft:small_flame";
+const POOF_PARTICLE: &str = "minecraft:poof";
+const DEFAULT_DIMENSION: &str = "minecraft:overworld";
+const MAX_BULLET_HOLES: usize = 96;
+const BULLET_HOLE_LIFETIME_SECS: f32 = 35.0;
+const BULLET_HOLE_BASE_SCALE: f32 = 0.44;
+const MAX_SPENT_CASINGS: usize = 48;
+const CASING_LIFETIME_SECS: f32 = 20.0;
+const CASING_BASE_SCALE: f32 = 0.95;
+const CASING_REST_RADIUS: f64 = 0.017;
 const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 const DEFAULT_STEVE_WIDE: &str = "entity/player/wide/steve";
 
@@ -261,6 +278,20 @@ struct RifleSkinSync {
     slim: VarInt,
 }
 
+#[derive(horizon_mod_api_macros::PayloadCodec)]
+struct BulletImpactSync {
+    dimension: String,
+    block_x: VarInt,
+    block_y: VarInt,
+    block_z: VarInt,
+    face_x: VarInt,
+    face_y: VarInt,
+    face_z: VarInt,
+    rel_x_dm: VarInt,
+    rel_y_dm: VarInt,
+    rel_z_dm: VarInt,
+}
+
 // ---------------------------------------------------------------------------
 // Static State & Spring-Damper Dynamics
 // ---------------------------------------------------------------------------
@@ -286,17 +317,21 @@ static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
 static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
 static RELOAD_SESSIONS: Mutex<BTreeMap<u128, ReloadSession>> = Mutex::new(BTreeMap::new());
+static ONLINE_PLAYERS: Mutex<BTreeSet<u128>> = Mutex::new(BTreeSet::new());
 
 static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
 static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
+static BULLET_IMPACT_SYNC: OnceLock<ToClient<BulletImpactSync>> = OnceLock::new();
 static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static POOF_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
+static WORLD_EFFECTS: OnceLock<Mutex<WorldEffectsState>> = OnceLock::new();
 static SLUNG_RIFLES: Mutex<BTreeMap<u32, SlungRifleState>> = Mutex::new(BTreeMap::new());
 
 #[derive(Clone, Copy)]
@@ -314,6 +349,8 @@ struct RifleModels {
     trigger: ModelRef,
     gate: ModelRef,
     cartridge: ModelRef,
+    casing: ModelRef,
+    bullet_hole: ModelRef,
 }
 
 #[derive(Clone)]
@@ -359,6 +396,7 @@ enum ActionAnim {
         keep_uncocked: bool,
         lever_sound_played: bool,
         cock_sound_played: bool,
+        casing_ejected: bool,
     },
     DryClick {
         elapsed: f32,
@@ -536,6 +574,7 @@ impl ClientAnimState {
             keep_uncocked,
             lever_sound_played: false,
             cock_sound_played: false,
+            casing_ejected: false,
         };
     }
 
@@ -847,6 +886,10 @@ fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
         cartridge: assets
             .model(&Identifier::parse(MODEL_CARTRIDGE_ID).ok()?)
             .ok()?,
+        casing: assets.model(&Identifier::parse(MODEL_CASING_ID).ok()?).ok()?,
+        bullet_hole: assets
+            .model(&Identifier::parse(MODEL_BULLET_HOLE_ID).ok()?)
+            .ok()?,
     })
 }
 
@@ -877,6 +920,8 @@ impl Hooks for Mod {
             MODEL_TRIGGER_ID,
             MODEL_GATE_ID,
             MODEL_CARTRIDGE_ID,
+            MODEL_CASING_ID,
+            MODEL_BULLET_HOLE_ID,
         ] {
             event.models.push(id.into());
         }
@@ -887,11 +932,13 @@ impl Hooks for Mod {
         let smoke = r.particle_key(SMOKE_PARTICLE);
         let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
+        let poof = r.particle_key(POOF_PARTICLE);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(smoke);
         let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
+        let _ = POOF_KEY.set(poof);
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
@@ -916,9 +963,29 @@ impl Hooks for Mod {
             PayloadId(SKIN_CHANNEL.into()),
             on_rifle_skin_sync,
         );
+        let impact = view.play_to_client_typed::<BulletImpactSync>(
+            PayloadId(IMPACT_CHANNEL.into()),
+            on_bullet_impact_sync,
+        );
         let _ = RIFLE_INPUT.set(input);
         let _ = RIFLE_SYNC.set(sync);
         let _ = RIFLE_SKIN_SYNC.set(skin);
+        let _ = BULLET_IMPACT_SYNC.set(impact);
+    }
+
+    fn hears_projectile_impacts(&self, _: &dyn Host, event: &mut HearsProjectileImpactsEvent) {
+        event.hears = true;
+    }
+
+    fn projectile_impact(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut ProjectileImpactEvent<'_>,
+    ) -> Flow {
+        if event.kind == BULLET && event.entity.is_none() {
+            handle_bullet_terrain_impact(host, event);
+        }
+        Flow::Continue
     }
 
     fn model_baking_completed(&self, host: &mut dyn ClientHost, _: &mut ModelBakingCompletedEvent) {
@@ -1173,12 +1240,17 @@ impl Hooks for Mod {
             return;
         }
 
+        // Step world decals & tumbling/bouncing .44-40 brass casings even when the player switches
+        // away from the rifle so airborne shells finish landing and clinking naturally.
+        step_world_effects(host, dt);
+
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
         let sprinting = CLIENT_SPRINTING.load(Ordering::Relaxed);
 
         let mut cam_delta_pitch = 0.0_f32;
         let mut cam_delta_yaw = 0.0_f32;
         let mut triggered_foley: Vec<(&'static str, f32, f32)> = Vec::new();
+        let mut eject_casing_aim: Option<f32> = None;
 
         {
             let mut anim = client_anim().lock().unwrap();
@@ -1244,10 +1316,15 @@ impl Hooks for Mod {
                     keep_uncocked,
                     mut lever_sound_played,
                     mut cock_sound_played,
+                    mut casing_ejected,
                 } => {
                     let next = elapsed + dt;
                     if keep_uncocked {
                         anim.hammer_uncocked = true;
+                        if !casing_ejected && next >= 0.11 {
+                            casing_ejected = true;
+                            eject_casing_aim = Some(aim_y.clamp(0.0, 1.0));
+                        }
                         anim.action = if next >= 0.24 {
                             ActionAnim::None
                         } else {
@@ -1256,12 +1333,17 @@ impl Hooks for Mod {
                                 keep_uncocked: true,
                                 lever_sound_played: true,
                                 cock_sound_played: true,
+                                casing_ejected,
                             }
                         };
                     } else {
                         if !lever_sound_played && next >= LEVER_DELAY_SECS {
                             lever_sound_played = true;
                             triggered_foley.push((SND_LEVER, 0.86, 1.0));
+                        }
+                        if !casing_ejected && next >= LEVER_DELAY_SECS + 0.06 {
+                            casing_ejected = true;
+                            eject_casing_aim = Some(aim_y.clamp(0.0, 1.0));
                         }
                         if !cock_sound_played && next >= LEVER_DELAY_SECS + 0.24 {
                             cock_sound_played = true;
@@ -1278,6 +1360,7 @@ impl Hooks for Mod {
                                 keep_uncocked: false,
                                 lever_sound_played,
                                 cock_sound_played,
+                                casing_ejected,
                             }
                         };
                     }
@@ -1353,6 +1436,10 @@ impl Hooks for Mod {
             }
         }
 
+        if let Some(aim) = eject_casing_aim {
+            spawn_spent_casing_from_camera(host, aim);
+        }
+
         for (snd, vol, pitch) in triggered_foley {
             play_local_foley(host, snd, vol, pitch);
         }
@@ -1365,6 +1452,10 @@ impl Hooks for Mod {
             let new_yaw = yaw + cam_delta_yaw;
             let _ = host.set_local_rotation(new_yaw, new_pitch);
         }
+    }
+
+    fn submit_custom_geometry(&self, _: &dyn ClientHost, event: &mut SubmitCustomGeometryEvent<'_>) {
+        submit_world_effects(event.draw);
     }
 
     fn compute_fov(&self, _: &dyn ClientHost, event: &mut ComputeFovEvent) {
@@ -2367,6 +2458,7 @@ fn recoil_envelope(t: f32) -> f32 {
 fn on_rifle_input(value: RifleInput, cx: &mut dyn IPayloadContext) -> Result<(), String> {
     let player = cx.player().map_err(|e| format!("{e:?}"))?;
     let host = cx.server_host().map_err(|e| format!("{e:?}"))?;
+    ONLINE_PLAYERS.lock().unwrap().insert(player.uuid());
     match value.action.0 {
         ACTION_FIRE => {
             if let Some(smoke) = SMOKE_KEY.get().copied() {
@@ -3033,6 +3125,694 @@ impl ItemPart for Winchester {
                     AIM_TICKS.lock().unwrap().remove(&player.uuid());
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// World Bullet-Impact Decals & 3D Ejected .44-40 Brass Casings
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct BulletHoleDecal {
+    dimension: String,
+    block: [i32; 3],
+    face: [i32; 3],
+    at: [f64; 3],
+    roll_quarter: u8,
+    slot_bias: u8,
+    age: f32,
+    light: LightCoords,
+}
+
+#[derive(Clone)]
+struct SpentCasing {
+    dimension: String,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    yaw_deg: f32,
+    pitch_deg: f32,
+    roll_deg: f32,
+    yaw_vel: f32,
+    pitch_vel: f32,
+    roll_vel: f32,
+    bounces: u8,
+    settled: bool,
+    age: f32,
+    light: LightCoords,
+}
+
+struct WorldEffectsState {
+    active_dimension: String,
+    holes: Vec<BulletHoleDecal>,
+    casings: Vec<SpentCasing>,
+    next_slot_bias: u8,
+    prune_timer: f32,
+    rng: u32,
+}
+
+impl WorldEffectsState {
+    fn new() -> Self {
+        Self {
+            active_dimension: DEFAULT_DIMENSION.into(),
+            holes: Vec::with_capacity(MAX_BULLET_HOLES),
+            casings: Vec::with_capacity(MAX_SPENT_CASINGS),
+            next_slot_bias: 0,
+            prune_timer: 0.0,
+            rng: 0xA341_316C,
+        }
+    }
+
+    fn next_unit_f32(&mut self) -> f32 {
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((self.rng >> 8) as f32) * (1.0 / 16_777_216.0)
+    }
+}
+
+fn world_effects() -> &'static Mutex<WorldEffectsState> {
+    WORLD_EFFECTS.get_or_init(|| Mutex::new(WorldEffectsState::new()))
+}
+
+fn normalize_cardinal_face(face: [i32; 3]) -> [i32; 3] {
+    let ax = face[0].abs();
+    let ay = face[1].abs();
+    let az = face[2].abs();
+    if ax >= ay && ax >= az && ax > 0 {
+        [face[0].signum(), 0, 0]
+    } else if ay >= ax && ay >= az && ay > 0 {
+        [0, face[1].signum(), 0]
+    } else if az > 0 {
+        [0, 0, face[2].signum()]
+    } else {
+        [0, 1, 0]
+    }
+}
+
+fn sample_world_light(host: &dyn ClientHost, dimension: &str, pos: [i32; 3]) -> LightCoords {
+    let Some(level) = host.level(dimension) else {
+        return LightCoords::new(0, 15);
+    };
+    let block = level
+        .brightness(host, LightLayer::Block, pos)
+        .unwrap_or(0)
+        .clamp(0, 15) as u8;
+    let sky = level
+        .brightness(host, LightLayer::Sky, pos)
+        .unwrap_or(15)
+        .clamp(0, 15) as u8;
+    LightCoords::new(block, sky)
+}
+
+fn handle_bullet_terrain_impact(host: &mut dyn ServerHost, event: &ProjectileImpactEvent<'_>) {
+    let face = normalize_cardinal_face(event.face);
+    let impact_fx_pos = [
+        event.at[0] + f64::from(face[0]) * 0.055,
+        event.at[1] + f64::from(face[1]) * 0.055,
+        event.at[2] + f64::from(face[2]) * 0.055,
+    ];
+
+    if let Some(level) = host.level(event.dimension) {
+        level.play_sound(
+            host,
+            SND_IMPACT_HIT,
+            event.at,
+            SoundSource::Players,
+            0.78,
+            1.18,
+        );
+        if let Some(poof) = POOF_KEY.get().copied() {
+            let _ = level.spawn_particles(
+                host,
+                ParticleOptions::simple(poof),
+                impact_fx_pos,
+                [0.035, 0.035, 0.035],
+                0.024,
+                4,
+            );
+        }
+        if let Some(smoke) = SMOKE_KEY.get().copied() {
+            let _ = level.spawn_particles(
+                host,
+                ParticleOptions::simple(smoke),
+                impact_fx_pos,
+                [0.045, 0.045, 0.045],
+                0.012,
+                5,
+            );
+        }
+    }
+
+    let Some(chan) = BULLET_IMPACT_SYNC.get() else {
+        return;
+    };
+    let to_dm = |world: f64, block: i32| -> VarInt {
+        let rel = ((world - f64::from(block)) * 10_000.0)
+            .round()
+            .clamp(-20_000.0, 30_000.0) as i32;
+        VarInt(rel)
+    };
+    let payload = BulletImpactSync {
+        dimension: event.dimension.to_owned(),
+        block_x: VarInt(event.block[0]),
+        block_y: VarInt(event.block[1]),
+        block_z: VarInt(event.block[2]),
+        face_x: VarInt(face[0]),
+        face_y: VarInt(face[1]),
+        face_z: VarInt(face[2]),
+        rel_x_dm: to_dm(event.at[0], event.block[0]),
+        rel_y_dm: to_dm(event.at[1], event.block[1]),
+        rel_z_dm: to_dm(event.at[2], event.block[2]),
+    };
+
+    let uuids: Vec<u128> = ONLINE_PLAYERS.lock().unwrap().iter().copied().collect();
+    let mut disconnected = Vec::new();
+    for uuid in uuids {
+        let Some(player) = host.player(uuid) else {
+            disconnected.push(uuid);
+            continue;
+        };
+        let near = player.entity().position(host).is_some_and(|p| {
+            let dx = p[0] - event.at[0];
+            let dy = p[1] - event.at[1];
+            let dz = p[2] - event.at[2];
+            dx * dx + dy * dy + dz * dz <= 80.0 * 80.0
+        });
+        if near {
+            let _ = chan.send(host, player, &payload);
+        }
+    }
+    if !disconnected.is_empty() {
+        let mut online = ONLINE_PLAYERS.lock().unwrap();
+        for uuid in disconnected {
+            online.remove(&uuid);
+        }
+    }
+}
+
+fn on_bullet_impact_sync(value: BulletImpactSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
+    let block = [value.block_x.0, value.block_y.0, value.block_z.0];
+    let face = normalize_cardinal_face([value.face_x.0, value.face_y.0, value.face_z.0]);
+    let at = [
+        f64::from(block[0]) + f64::from(value.rel_x_dm.0) * 1e-4,
+        f64::from(block[1]) + f64::from(value.rel_y_dm.0) * 1e-4,
+        f64::from(block[2]) + f64::from(value.rel_z_dm.0) * 1e-4,
+    ];
+
+    let light_pos = [block[0] + face[0], block[1] + face[1], block[2] + face[2]];
+    let mut light = LightCoords::new(0, 15);
+    if let Ok(host) = cx.client_host() {
+        if host.block_collision(block).is_empty() {
+            return Ok(());
+        }
+        light = sample_world_light(host, &value.dimension, light_pos);
+    }
+
+    let mut fx = world_effects().lock().unwrap();
+    if !value.dimension.is_empty() && fx.active_dimension != value.dimension {
+        fx.active_dimension = value.dimension.clone();
+        fx.holes.clear();
+        fx.casings.clear();
+    }
+    if fx.holes.len() >= MAX_BULLET_HOLES {
+        fx.holes.remove(0);
+    }
+    let roll_quarter = ((fx.next_unit_f32() * 4.0) as u8) & 3;
+    let slot_bias = fx.next_slot_bias & 7;
+    fx.next_slot_bias = fx.next_slot_bias.wrapping_add(1);
+
+    fx.holes.push(BulletHoleDecal {
+        dimension: if value.dimension.is_empty() {
+            fx.active_dimension.clone()
+        } else {
+            value.dimension
+        },
+        block,
+        face,
+        at,
+        roll_quarter,
+        slot_bias,
+        age: 0.0,
+        light,
+    });
+    Ok(())
+}
+
+fn spawn_spent_casing_from_camera(host: &dyn ClientHost, aim: f32) {
+    let Some(cam) = host.camera_entity() else {
+        return;
+    };
+    let Some(eye) = cam.eye_position(host) else {
+        return;
+    };
+    let Some([yaw_deg, pitch_deg]) = cam.rotation(host) else {
+        return;
+    };
+
+    let yaw_rad = f64::from(yaw_deg).to_radians();
+    let pitch_rad = f64::from(pitch_deg).to_radians();
+    let (sin_y, cos_y) = yaw_rad.sin_cos();
+    let (sin_p, cos_p) = pitch_rad.sin_cos();
+
+    let forward = [-sin_y * cos_p, -sin_p, cos_y * cos_p];
+    let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
+    let right = [-cos_y, 0.0, -sin_y];
+
+    let aim64 = f64::from(aim.clamp(0.0, 1.0));
+    let first_person = host.camera_type() == CameraType::FirstPerson;
+    let (port_right, port_up, port_fwd) = if first_person {
+        (
+            0.25 * (1.0 - aim64) + 0.02 * aim64,
+            -0.16 * (1.0 - aim64) - 0.05 * aim64,
+            0.58 * (1.0 - aim64) + 0.52 * aim64,
+        )
+    } else {
+        (0.26, -0.28, 0.52)
+    };
+
+    let origin = [
+        eye[0] + right[0] * port_right + up[0] * port_up + forward[0] * port_fwd,
+        eye[1] + right[1] * port_right + up[1] * port_up + forward[1] * port_fwd,
+        eye[2] + right[2] * port_right + up[2] * port_up + forward[2] * port_fwd,
+    ];
+
+    let mut fx = world_effects().lock().unwrap();
+    let r0 = f64::from(fx.next_unit_f32());
+    let r1 = f64::from(fx.next_unit_f32());
+    let r2 = f64::from(fx.next_unit_f32());
+    let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
+
+    // Authentic Winchester 1873 top-carrier ejection: upward and slightly right/rearward arc.
+    let v_right = 1.35 + 0.55 * r0;
+    let v_up = 2.05 + 0.55 * r1;
+    let v_fwd = -0.30 + 0.42 * r2;
+    let vel = [
+        right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
+        right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
+        right[2] * v_right + up[2] * v_up + forward[2] * v_fwd,
+    ];
+
+    let dim = fx.active_dimension.clone();
+    let block_pos = [
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+    ];
+    let light = sample_world_light(host, &dim, block_pos);
+
+    if fx.casings.len() >= MAX_SPENT_CASINGS {
+        fx.casings.remove(0);
+    }
+    let init_yaw = yaw_deg + 80.0 + (fx.next_unit_f32() * 20.0 - 10.0);
+    let pitch_vel = (520.0 + 280.0 * fx.next_unit_f32()) * spin_sign;
+    let yaw_vel = (240.0 + 180.0 * fx.next_unit_f32()) * spin_sign;
+    let roll_vel = 640.0 + 260.0 * fx.next_unit_f32();
+
+    fx.casings.push(SpentCasing {
+        dimension: dim,
+        pos: origin,
+        vel,
+        yaw_deg: init_yaw,
+        pitch_deg: -pitch_deg * 0.5,
+        roll_deg: 0.0,
+        yaw_vel,
+        pitch_vel,
+        roll_vel,
+        bounces: 0,
+        settled: false,
+        age: 0.0,
+        light,
+    });
+}
+
+fn floor_top_at(host: &dyn ClientHost, x: f64, y: f64, z: f64) -> Option<f64> {
+    let bx = x.floor() as i32;
+    let bz = z.floor() as i32;
+    let base_y = y.floor() as i32;
+    let lx = x - f64::from(bx);
+    let lz = z - f64::from(bz);
+    let pad = 0.025;
+
+    let mut highest: Option<f64> = None;
+    for by in [base_y - 1, base_y] {
+        for b in host.block_collision([bx, by, bz]) {
+            if lx >= b[0] - pad && lx <= b[3] + pad && lz >= b[2] - pad && lz <= b[5] + pad {
+                let top = f64::from(by) + b[4];
+                if top <= y + 0.22 {
+                    highest = Some(highest.map_or(top, |cur| cur.max(top)));
+                }
+            }
+        }
+    }
+    highest
+}
+
+fn hits_solid_wall(host: &dyn ClientHost, x: f64, y: f64, z: f64) -> bool {
+    let bx = x.floor() as i32;
+    let by = y.floor() as i32;
+    let bz = z.floor() as i32;
+    let lx = x - f64::from(bx);
+    let ly = y - f64::from(by);
+    let lz = z - f64::from(bz);
+    host.block_collision([bx, by, bz]).into_iter().any(|b| {
+        lx >= b[0] && lx <= b[3] && ly >= b[1] + 0.04 && ly <= b[4] - 0.04 && lz >= b[2] && lz <= b[5]
+    })
+}
+
+fn step_world_effects(host: &dyn ClientHost, dt: f32) {
+    let mut clink_sounds: Vec<(f32, f32)> = Vec::new();
+    {
+        let mut fx = world_effects().lock().unwrap();
+        if fx.holes.is_empty() && fx.casings.is_empty() {
+            return;
+        }
+
+        for hole in &mut fx.holes {
+            hole.age += dt;
+        }
+        fx.holes.retain(|h| h.age < BULLET_HOLE_LIFETIME_SECS);
+
+        fx.prune_timer += dt;
+        let refresh_world = fx.prune_timer >= 0.25;
+        if refresh_world {
+            fx.prune_timer = 0.0;
+            fx.holes.retain(|h| !host.block_collision(h.block).is_empty());
+            for hole in &mut fx.holes {
+                let lit_pos = [
+                    hole.block[0] + hole.face[0],
+                    hole.block[1] + hole.face[1],
+                    hole.block[2] + hole.face[2],
+                ];
+                hole.light = sample_world_light(host, &hole.dimension, lit_pos);
+            }
+        }
+
+        let steps = ((dt / 0.022).ceil() as u32).clamp(1, 3);
+        let h = dt / (steps as f32);
+        let h64 = f64::from(h);
+
+        let mut casings = core::mem::take(&mut fx.casings);
+        for casing in &mut casings {
+            casing.age += dt;
+            if casing.settled {
+                if refresh_world {
+                    if floor_top_at(host, casing.pos[0], casing.pos[1] + 0.04, casing.pos[2])
+                        .is_none()
+                    {
+                        casing.settled = false;
+                    } else {
+                        let bp = [
+                            casing.pos[0].floor() as i32,
+                            casing.pos[1].floor() as i32,
+                            casing.pos[2].floor() as i32,
+                        ];
+                        casing.light = sample_world_light(host, &casing.dimension, bp);
+                    }
+                }
+                continue;
+            }
+
+            for _ in 0..steps {
+                casing.vel[1] -= 15.5 * h64;
+                let drag = (1.0 - 0.85 * h64).clamp(0.90, 1.0);
+                casing.vel[0] *= drag;
+                casing.vel[2] *= drag;
+
+                let next_x = casing.pos[0] + casing.vel[0] * h64;
+                let next_z = casing.pos[2] + casing.vel[2] * h64;
+                if hits_solid_wall(host, next_x, casing.pos[1] + 0.03, casing.pos[2]) {
+                    casing.vel[0] = -casing.vel[0] * 0.42;
+                } else {
+                    casing.pos[0] = next_x;
+                }
+                if hits_solid_wall(host, casing.pos[0], casing.pos[1] + 0.03, next_z) {
+                    casing.vel[2] = -casing.vel[2] * 0.42;
+                } else {
+                    casing.pos[2] = next_z;
+                }
+
+                let prev_y = casing.pos[1];
+                let next_y = prev_y + casing.vel[1] * h64;
+                if casing.vel[1] <= 0.0
+                    && let Some(floor_y) =
+                        floor_top_at(host, casing.pos[0], prev_y, casing.pos[2])
+                    && next_y <= floor_y + CASING_REST_RADIUS
+                {
+                    casing.pos[1] = floor_y + CASING_REST_RADIUS;
+                    let impact_speed = (-casing.vel[1]) as f32;
+                    if impact_speed > 0.58 && casing.bounces < 4 {
+                        casing.vel[1] = -casing.vel[1] * 0.38;
+                        casing.vel[0] *= 0.62;
+                        casing.vel[2] *= 0.62;
+                        casing.pitch_deg *= 0.25;
+                        casing.pitch_vel *= 0.28;
+                        casing.yaw_vel *= 0.55;
+                        casing.roll_vel *= 0.65;
+                        if casing.bounces < 2 {
+                            let vol = if casing.bounces == 0 { 0.72 } else { 0.34 };
+                            let pitch_var = 0.94 + 0.12 * fx.next_unit_f32();
+                            clink_sounds.push((vol, pitch_var));
+                        }
+                        casing.bounces += 1;
+                    } else {
+                        casing.vel = [0.0; 3];
+                        casing.pitch_deg = 0.0;
+                        casing.pitch_vel = 0.0;
+                        casing.yaw_vel = 0.0;
+                        casing.roll_vel = 0.0;
+                        casing.settled = true;
+                        break;
+                    }
+                } else {
+                    casing.pos[1] = next_y;
+                }
+
+                casing.yaw_deg = (casing.yaw_deg + casing.yaw_vel * h).rem_euclid(360.0);
+                casing.pitch_deg = (casing.pitch_deg + casing.pitch_vel * h).rem_euclid(360.0);
+                casing.roll_deg = (casing.roll_deg + casing.roll_vel * h).rem_euclid(360.0);
+            }
+
+            let bp = [
+                casing.pos[0].floor() as i32,
+                casing.pos[1].floor() as i32,
+                casing.pos[2].floor() as i32,
+            ];
+            casing.light = sample_world_light(host, &casing.dimension, bp);
+        }
+
+        casings.retain(|c| c.age < CASING_LIFETIME_SECS && c.pos[1] > -128.0);
+        fx.casings = casings;
+    }
+
+    for (vol, pitch_mul) in clink_sounds {
+        play_local_foley(host, SND_SHELL_DROP, vol, pitch_mul);
+    }
+}
+
+/// Builds a right-handed (`det > 0`) row-major `3x4` local transform around model center
+/// `[0.5, 0.5, 0.5]` from scaled basis columns `(col_x, col_y, col_z)`.
+fn centered_row_major_3x4(col_x: [f32; 3], col_y: [f32; 3], col_z: [f32; 3]) -> [f32; 12] {
+    let tx = -0.5 * (col_x[0] + col_y[0] + col_z[0]);
+    let ty = -0.5 * (col_x[1] + col_y[1] + col_z[1]);
+    let tz = -0.5 * (col_x[2] + col_y[2] + col_z[2]);
+    [
+        col_x[0], col_y[0], col_z[0], tx, col_x[1], col_y[1], col_z[1], ty, col_x[2], col_y[2],
+        col_z[2], tz,
+    ]
+}
+
+fn bullet_hole_instance_transform(face: [i32; 3], roll_quarter: u8, scale: f32) -> [f32; 12] {
+    let f = normalize_cardinal_face(face);
+    // Right-handed orthonormal basis `(u, v, n)` with `u × v == n` (`det == +1`).
+    let (u0, v0, n) = match f {
+        [0, 0, 1] => ([1.0_f32, 0.0, 0.0], [0.0_f32, 1.0, 0.0], [0.0_f32, 0.0, 1.0]),
+        [0, 0, -1] => (
+            [-1.0_f32, 0.0, 0.0],
+            [0.0_f32, 1.0, 0.0],
+            [0.0_f32, 0.0, -1.0],
+        ),
+        [1, 0, 0] => (
+            [0.0_f32, 0.0, -1.0],
+            [0.0_f32, 1.0, 0.0],
+            [1.0_f32, 0.0, 0.0],
+        ),
+        [-1, 0, 0] => (
+            [0.0_f32, 0.0, 1.0],
+            [0.0_f32, 1.0, 0.0],
+            [-1.0_f32, 0.0, 0.0],
+        ),
+        [0, 1, 0] => (
+            [1.0_f32, 0.0, 0.0],
+            [0.0_f32, 0.0, -1.0],
+            [0.0_f32, 1.0, 0.0],
+        ),
+        _ => (
+            [1.0_f32, 0.0, 0.0],
+            [0.0_f32, 0.0, 1.0],
+            [0.0_f32, -1.0, 0.0],
+        ),
+    };
+
+    let (u, v) = match roll_quarter & 3 {
+        0 => (u0, v0),
+        1 => (v0, [-u0[0], -u0[1], -u0[2]]),
+        2 => ([-u0[0], -u0[1], -u0[2]], [-v0[0], -v0[1], -v0[2]]),
+        _ => ([-v0[0], -v0[1], -v0[2]], u0),
+    };
+
+    let s = scale.max(0.01);
+    let sn = (scale * 0.25).max(0.01);
+    centered_row_major_3x4(
+        [u[0] * s, u[1] * s, u[2] * s],
+        [v[0] * s, v[1] * s, v[2] * s],
+        [n[0] * sn, n[1] * sn, n[2] * sn],
+    )
+}
+
+fn casing_instance_transform(
+    yaw_deg: f32,
+    pitch_deg: f32,
+    roll_deg: f32,
+    scale: f32,
+) -> [f32; 12] {
+    let (sy, cy) = yaw_deg.to_radians().sin_cos();
+    let (sp, cp) = pitch_deg.to_radians().sin_cos();
+    let (sr, cr) = roll_deg.to_radians().sin_cos();
+
+    // Proper rotation `R = R_y(yaw) * R_x(pitch) * R_z(roll)` (`det(R) == +1`).
+    // When settled (`pitch_deg == 0`), local Z cylinder axis `[sy * cp, -sp, cy * cp]`
+    // lies cleanly in the horizontal XZ plane (`y == 0`).
+    let s = scale.max(0.01);
+    let col_x = [
+        (cy * cr + sy * sp * sr) * s,
+        (cp * sr) * s,
+        (-sy * cr + cy * sp * sr) * s,
+    ];
+    let col_y = [
+        (-cy * sr + sy * sp * cr) * s,
+        (cp * cr) * s,
+        (sy * sr + cy * sp * cr) * s,
+    ];
+    let col_z = [(sy * cp) * s, (-sp) * s, (cy * cp) * s];
+    centered_row_major_3x4(col_x, col_y, col_z)
+}
+
+fn submit_world_effects(draw: &mut dyn WorldDrawContext) {
+    let Some(models) = *RIFLE_MODELS.lock().unwrap() else {
+        return;
+    };
+    let fx = world_effects().lock().unwrap();
+    if fx.holes.is_empty() && fx.casings.is_empty() {
+        return;
+    }
+
+    if !fx.holes.is_empty() {
+        let mut hole_instances = Vec::with_capacity(fx.holes.len());
+        for hole in &fx.holes {
+            let rem = (BULLET_HOLE_LIFETIME_SECS - hole.age).max(0.0);
+            let fade_scale = if rem < 2.5 { rem / 2.5 } else { 1.0 };
+            let scale = BULLET_HOLE_BASE_SCALE * fade_scale;
+            if scale <= 0.02 {
+                continue;
+            }
+            let lift = 0.004 + f64::from(hole.slot_bias) * 0.00045;
+            let origin = [
+                hole.at[0] + f64::from(hole.face[0]) * lift,
+                hole.at[1] + f64::from(hole.face[1]) * lift,
+                hole.at[2] + f64::from(hole.face[2]) * lift,
+            ];
+            let transform = bullet_hole_instance_transform(hole.face, hole.roll_quarter, scale);
+            hole_instances.push(ModelInstance::new(
+                origin,
+                transform,
+                0xFF_FF_FF_FF,
+                hole.light,
+                Overlay::NONE,
+            ));
+        }
+        if !hole_instances.is_empty() {
+            let _ = draw.draw_model_instances(models.bullet_hole, &hole_instances);
+        }
+    }
+
+    if !fx.casings.is_empty() {
+        let mut casing_instances = Vec::with_capacity(fx.casings.len());
+        for casing in &fx.casings {
+            let rem = (CASING_LIFETIME_SECS - casing.age).max(0.0);
+            let fade_scale = if rem < 1.5 { rem / 1.5 } else { 1.0 };
+            let scale = CASING_BASE_SCALE * fade_scale;
+            if scale <= 0.03 {
+                continue;
+            }
+            let transform = casing_instance_transform(
+                casing.yaw_deg,
+                casing.pitch_deg,
+                casing.roll_deg,
+                scale,
+            );
+            casing_instances.push(ModelInstance::new(
+                casing.pos,
+                transform,
+                0xFF_FF_FF_FF,
+                casing.light,
+                Overlay::NONE,
+            ));
+        }
+        if !casing_instances.is_empty() {
+            let _ = draw.draw_model_instances(models.casing, &casing_instances);
+        }
+    }
+}
+
+#[cfg(test)]
+mod world_effects_tests {
+    use super::*;
+
+    fn det3(m: [f32; 12]) -> f32 {
+        let (a, b, c) = (m[0], m[1], m[2]);
+        let (d, e, f) = (m[4], m[5], m[6]);
+        let (g, h, i) = (m[8], m[9], m[10]);
+        a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    }
+
+    fn apply3x4(m: [f32; 12], p: [f32; 3]) -> [f32; 3] {
+        [
+            m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+            m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+            m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+        ]
+    }
+
+    #[test]
+    fn bullet_hole_transforms_preserve_winding_and_center() {
+        let faces = [
+            [0, 0, 1],
+            [0, 0, -1],
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+        ];
+        for face in faces {
+            for roll in 0..4 {
+                let m = bullet_hole_instance_transform(face, roll, BULLET_HOLE_BASE_SCALE);
+                assert!(det3(m) > 0.0, "face {face:?} roll {roll} inverted winding");
+                let center = apply3x4(m, [0.5, 0.5, 0.5]);
+                assert!(
+                    center[0].abs() < 1e-6 && center[1].abs() < 1e-6 && center[2].abs() < 1e-6
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settled_casing_transform_keeps_cylinder_horizontal() {
+        for yaw in [0.0_f32, 37.5, 142.0, 289.0] {
+            let m = casing_instance_transform(yaw, 0.0, 65.0, CASING_BASE_SCALE);
+            assert!(det3(m) > 0.0);
+            let center = apply3x4(m, [0.5, 0.5, 0.5]);
+            assert!(center[0].abs() < 1e-6 && center[1].abs() < 1e-6 && center[2].abs() < 1e-6);
+            // Local Z axis (mouth-to-rim cylinder axis) must lie flat in XZ (`m[6] == 0`).
+            assert!(m[6].abs() < 1e-6);
         }
     }
 }

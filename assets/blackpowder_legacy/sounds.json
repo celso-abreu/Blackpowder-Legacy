@@ -95,5 +95,16 @@
         "pitch": 1.0
       }
     ]
+  },
+  "item.winchester_shell_drop": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_shell_drop",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_cock",
+        "volume": 0.36,
+        "pitch": 1.82,
+        "attenuation_distance": 10
+      }
+    ]
   }
 }

@@ -38,6 +38,14 @@ PALETTE: dict[str, tuple[int, int, int, int]] = {
     "L": (242, 173, 114, 255),  # copper specular highlight
     "M": (242, 213, 111, 255),  # brass highlight
     "N": (255, 240, 166, 255),  # brass specular gleam
+    # Bullet-hole cutout palette (strictly alpha 255 or '.' alpha 0 so Horizon
+    # renders the standalone decal on the fast cutout GPU-instanced path):
+    "p": (11, 12, 15, 255),     # deep bullet puncture core
+    "q": (22, 21, 20, 255),     # inner charred cavity
+    "r": (38, 35, 33, 255),     # gunpowder soot ring
+    "s": (60, 56, 52, 255),     # scorched crater bevel
+    "t": (86, 82, 77, 255),     # chipped rim highlight
+    "u": (98, 104, 112, 255),   # deformed lead glint inside core
 }
 
 CARTRIDGE = [
@@ -110,6 +118,25 @@ BULLET = [
     "................................",
 ]
 
+BULLET_HOLE = [
+    "................",
+    ".......s........",
+    ".....sttts......",
+    "....srrrrts.....",
+    "...srqqqqrrs....",
+    "..stqppppqrs....",
+    "..srqpupppqts...",
+    ".strqpppppqrs...",
+    "..srqpppppqrs...",
+    "..stqqpppqqs....",
+    "...srrqqqrrts...",
+    "....strrrrs.....",
+    ".....sstss......",
+    "........s.......",
+    "................",
+    "................",
+]
+
 
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
@@ -129,8 +156,7 @@ def write_png_rgba(path: Path, width: int, height: int, rgba_rows: list[bytes]) 
     path.write_bytes(data)
 
 
-def draw(name: str, rows: list[str]) -> None:
-    size = 32
+def draw(name: str, rows: list[str], size: int = 32) -> None:
     assert len(rows) == size, f"{name}: {len(rows)} rows, want {size}"
     rgba_rows: list[bytes] = []
     for y, row in enumerate(rows):
@@ -150,8 +176,9 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     # The rifle's texture is the 1024x1024 sheet extracted from
     # models/winchester_1873.bbmodel by tools/bbmodel_convert.py.
-    draw("cartridge_44", CARTRIDGE)
-    draw("bullet", BULLET)
+    draw("cartridge_44", CARTRIDGE, 32)
+    draw("bullet", BULLET, 32)
+    draw("bullet_hole", BULLET_HOLE, 16)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,14 @@
 
 Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), packaged as one self-contained WebAssembly `.hmod`.
 
-**v0.9.0 — multi-part animated Winchester 1873 (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`), real player skin (`slim` / `wide` + 3D sleeves), clean ADS iron sights (HUD crosshair hidden), per-round side-gate reload, weapon inspect (`I`), diagonal 3rd-person back-sling (`F`), `32×32` `.44-40` art, and 9 CC0 custom `.ogg` firearm sounds.**
+**v0.9.0 — multi-part animated Winchester 1873 (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`), terrain bullet-hole decals, 3D bouncing `.44-40` brass shell casings, real player skin (`slim` / `wide` + 3D sleeves), clean ADS iron sights (HUD crosshair hidden), per-round side-gate reload, weapon inspect (`I`), diagonal 3rd-person back-sling (`F`), `32×32` `.44-40` art, and CC0 custom `.ogg` firearm sounds.**
 
 ## How it plays
 
 - Craft the **Winchester 1873** (iron ingots, oak planks, a stick, and a tripwire hook) and **.44-40 Cartridges** (gunpowder + copper ingot + iron nugget, 6 at a time).
 - The tubular magazine holds **8 rounds**; a brass bar under the item icon and a dedicated bottom-right HUD counter track loaded vs. reserve `.44-40` rounds.
 - **Hold right click** to shoulder and aim down sights: the vanilla HUD crosshair (`minecraft:crosshair`) disappears automatically, the cocked hammer clears the sight line, and the rear notch + front blade (`alca_entalhe_base` + `massa_lamina`) slide dead-center onto the screen via FPS-independent second-order dynamics while FOV zooms (`0.67`), mouse turn sensitivity scales proportionally, and a subtle vignette frames the view. Aiming is suppressed while sprinting or reloading.
-- **Left click** (aimed or hipfire while holding the rifle in the main hand) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs. `1.50` hipfire / `2.20` moving). Each live shot drives **articulated sub-model animations** (trigger pull, hammer strike, `+48°` lever throw, and hammer re-cocking), **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick), muzzle smoke/flame particles, and layered CC0 gunshot + mechanical lever audio (`120 RPM`). Dry-firing on an empty chamber drops the hammer and keeps it uncocked until reloaded.
+- **Left click** (aimed or hipfire while holding the rifle in the main hand) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs. `1.50` hipfire / `2.20` moving). Each live shot drives **articulated sub-model animations** (trigger pull, hammer strike, `+48°` lever throw, and hammer re-cocking), **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick), barrel-tip muzzle smoke/flame particles, **3D spent `.44-40` brass shell casings** that pop out of the top receiver port, tumble, bounce off terrain/slabs/stairs with a metallic clink, and rest on the ground, **world-lit pixel-art bullet-hole decals** on terrain blocks (auto-cleared when the block is broken), and layered CC0 gunshot + mechanical lever audio (`120 RPM`). Dry-firing on an empty chamber drops the hammer and keeps it uncocked until reloaded.
 - **R** (remappable in **Options > Controls**) starts a **continuous per-cartridge reload loop** on a single press: tilts the receiver to expose `porta_B`, depresses the side loading gate (`-23°`) as each 3D `.44-40` brass/copper cartridge slides in with the left hand, and runs a full lever rack (`ReloadEndEmpty`) when reloading from `0/8` to chamber the first round and re-cock the hammer. Clicking fire mid-reload immediately interrupts the reload when `>= 1` round is already in the tube.
 - **I** (remappable in **Options > Controls**) plays a 3.4-second **weapon inspection** sequence showing both sides of the receiver, walnut stock, and brass carrier when idle in hipfire.
 - **F** (swap to off-hand) **slings the rifle diagonally across the player's back** in 3rd-person (`44°` barrel-up / stock-down, locked to the `Body` torso pose through walking, sneaking, and armor), relaxes the off-hand arm (`ArmPose::Empty`), and prevents accidental off-hand ADS right-clicks.
@@ -62,8 +62,9 @@ data/blackpowder_legacy/
 assets/blackpowder_legacy/
   items/                    # 26.3 item definitions (selects empty model in player off-hand)
   models/item/              # full 336-element item model (GUI, ground 1:1 scale, 3rd-person)
-  models/special/           # 6 standalone sub-models: body, lever, hammer, trigger, gate, cartridge
-  textures/item/            # 32x32 cartridge & bullet pixel art + 1024x1024 rifle sheet
+  models/special/           # 8 standalone sub-models: body, lever, hammer, trigger,
+                            #   gate, cartridge, spent casing, and terrain bullet-hole decal
+  textures/item/            # 32x32 cartridge & bullet, 16x16 cutout bullet hole + 1024x1024 rifle sheet
   sounds/ + sounds.json     # 9 CC0 custom .ogg firearm & Foley sound events + subtitles
   lang/                     # en_us, pt_br (items, keybinds, full audio subtitles)
 models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
@@ -84,7 +85,9 @@ tools/
 - **3rd-person diagonal back-sling:** `assets/blackpowder_legacy/items/winchester_1873.json` uses a `minecraft:select` `display_context` switch to suppress vanilla's held off-hand model on players while `Hooks::get_arm_pose` relaxes the off-hand arm and `Hooks::render_player_post` mounts the rifle at `44°` across the player's `HumanoidPart::Body` matrix (adapting depth automatically when chest armor/elytra is worn and mirroring cleanly for left-handed players).
 - **Custom CC0 audio:** 9 `.ogg` sound assets (`winchester_fire`, `winchester_thump`, `winchester_lever`, `winchester_cock`, `winchester_reload_intro`, `winchester_reload_insert`, `winchester_reload_end`, `winchester_draw`, `winchester_inspect`) with localized `pt_br` and `en_us` accessibility subtitles (see [SOUND-CREDITS.md](SOUND-CREDITS.md)).
 
+- **Terrain bullet decals & 3D spent brass casings:** `Hooks::hears_projectile_impacts` + `Hooks::projectile_impact` detect `.44-40` terrain hits (`event.entity.is_none()`), spawn impact dust/smoke + stone crack audio, and broadcast `BulletImpactSync` (compact `0.1 mm` block-relative `VarInt` offsets) to nearby players. On the client, `Hooks::submit_custom_geometry` renders up to `96` world-lit cutout `special/bullet_hole` decals (sampling `LightLayer::Block` / `LightLayer::Sky` and pruning immediately when `host.block_collision(block)` empties) and up to `48` tumbling/bouncing `special/winchester_casing` `.44-40` shells (colliding against full blocks, slabs, stairs, and carpets via `host.block_collision`, clinking via `item.winchester_shell_drop`, and settling flat on the surface) in just two GPU-instanced batches (`WorldDrawContext::draw_model_instances`).
+
 ## Roadmap
 
-- **Polish & ballistics:** spent `.44-40` brass casing ejection, richer blackpowder muzzle smoke, dynamic 3rd-person hip/aim arm poses, headshot multiplier & long-range falloff, chest loot tables & advancements.
+- **Polish & ballistics:** dynamic 3rd-person hip/aim arm poses, headshot multiplier & long-range falloff, chest loot tables & advancements.
 - **Arsenal expansion (`v0.10+`):** Colt Single Action Army M1873 revolver (sharing `.44-40` cartridges, 6-shot cylinder, hip holster on `F`), blunderbuss / coach gun (buckshot spread), misfires, and a mod settings screen.

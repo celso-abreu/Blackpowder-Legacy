@@ -65,6 +65,47 @@ CARTRIDGE_ELEMENTS = [
     },
 ]
 
+CASING_ELEMENTS = [
+    {
+        "from": [7.69, 7.69, 8.56],
+        "to": [8.31, 8.31, 8.70],
+        "faces": {
+            "north": {"uv": [8.55, 6.35, 8.7, 6.5], "texture": "#0"},
+            "south": {"uv": [8.55, 6.35, 8.7, 6.5], "texture": "#0"},
+            "east": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "west": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "up": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "down": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+        },
+    },
+    {
+        "from": [7.74, 7.74, 7.36],
+        "to": [8.26, 8.26, 8.56],
+        "faces": {
+            # Open mouth (-Z north) darkened like a fired, hollow .44-40 shell;
+            # cylinder walls & base gleaming brass.
+            "north": {"uv": [15.0, 8.5, 15.4, 8.6], "texture": "#0"},
+            "south": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "east": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "west": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "up": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+            "down": {"uv": [8.5, 6.3, 8.75, 6.55], "texture": "#0"},
+        },
+    },
+]
+
+BULLET_HOLE_TEXTURE_ID = "blackpowder_legacy:item/bullet_hole"
+BULLET_HOLE_ELEMENTS = [
+    {
+        "from": [4.5, 4.5, 7.96],
+        "to": [11.5, 11.5, 8.04],
+        "faces": {
+            "north": {"uv": [16, 0, 0, 16], "texture": "#0"},
+            "south": {"uv": [0, 0, 16, 16], "texture": "#0"},
+        },
+    }
+]
+
 
 def rounded(value: float) -> float:
     return round(value, 3)
@@ -215,6 +256,25 @@ def main() -> None:
     }
     cartridge_out.write_text(json.dumps(cartridge_doc, separators=(",", ":")))
     print(f"special-> {cartridge_out} ({len(CARTRIDGE_ELEMENTS)} elements)")
+
+    casing_out = SPECIAL_DIR / "winchester_casing.json"
+    casing_doc = {
+        "credit": "Blackpowder Legacy — Spent .44-40 Brass Casing",
+        "texture_size": [tex_w, tex_h],
+        "textures": textures_map,
+        "elements": CASING_ELEMENTS,
+    }
+    casing_out.write_text(json.dumps(casing_doc, separators=(",", ":")))
+    print(f"special-> {casing_out} ({len(CASING_ELEMENTS)} elements)")
+
+    hole_out = SPECIAL_DIR / "bullet_hole.json"
+    hole_doc = {
+        "credit": "Blackpowder Legacy — Terrain Bullet Impact Decal",
+        "textures": {"0": BULLET_HOLE_TEXTURE_ID, "particle": BULLET_HOLE_TEXTURE_ID},
+        "elements": BULLET_HOLE_ELEMENTS,
+    }
+    hole_out.write_text(json.dumps(hole_doc, separators=(",", ":")))
+    print(f"special-> {hole_out} ({len(BULLET_HOLE_ELEMENTS)} elements)")
 
     png = texture["source"].split(",", 1)[1]
     TEXTURE_OUT.write_bytes(base64.b64decode(png))
