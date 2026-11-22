@@ -1,6 +1,6 @@
 id = "blackpowder_legacy"
 name = "Blackpowder Legacy"
-version = "0.5.1"
+version = "0.5.2"
 description = "Blackpowder-era firearms for Horizon. Aim-down-sights Winchester 1873: RMB aims (zoom + vignette), LMB fires, a remappable key reloads."
 authors = ["celso-abreu"]
 license = "MIT"

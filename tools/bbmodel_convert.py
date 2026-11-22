@@ -99,17 +99,19 @@ def main() -> None:
         "credit": "Winchester 1873 3D model, converted from models/winchester_1873.bbmodel",
         "textures": {"0": TEXTURE_ID, "particle": TEXTURE_ID},
         "elements": out_elements,
-        # Display poses, derived from Horizon's render chain (vanilla-faithful):
-        # third person applies arm * rotX(-90) * rotY(180) * T(1,2,-10)/16
-        # (mobs/render.rs hand_base), which maps the item axes to
-        # +X:character-right, +Y:forward, +Z:up — so rotation [90,0,0] turns
-        # the barrel (-Z) forward and the top (+Y) up, and the translation
-        # brings the grip (the stock wrist, ~(8, 7.3, 18.6) in model units)
-        # onto the hand anchor. First person is plain view space (-Z
+        # Display poses, derived from Horizon's render chain (vanilla-faithful).
+        # The item declares `arm_pose: crossbow_hold`, so the arm is always
+        # raised: right_arm xrot=-90deg+0.1rad, yrot=-0.3rad (anim.rs
+        # crossbow_hold), THEN the hand chain rotX(-90) rotY(180) T(1,2,-10)/16
+        # applies (mobs/render.rs hand_base). The display rotation
+        # [5.73, -17.19, 0] cancels the arm's offset, making the rifle level
+        # with the barrel forward and the grip (stock wrist, ~(8, 7.3, 18.6)
+        # model units) exactly on the hand anchor — and it follows the head's
+        # pitch like a crossbow. First person is plain view space (-Z
         # forward): identity rotation, translation pulls the grip to the
         # hand. Left hands inherit the right's entry and mirror it.
         "display": {
-            "thirdperson_righthand": {"rotation": [90, 0, 0], "translation": [0, 4.75, 0.3], "scale": [0.45, 0.45, 0.45]},
+            "thirdperson_righthand": {"rotation": [5.73, -17.19, 0], "translation": [1.4, 0.75, -4.49], "scale": [0.45, 0.45, 0.45]},
             "firstperson_righthand": {"rotation": [0, 0, 0], "translation": [0, 0.3, -4.75], "scale": [0.45, 0.45, 0.45]},
             "ground": {"rotation": [0, 0, 0], "translation": [0, 2, 0], "scale": [0.25, 0.25, 0.25]},
             "gui": {"rotation": [30, 225, 0], "translation": [0, 0, 0], "scale": [0.4, 0.4, 0.4]},
