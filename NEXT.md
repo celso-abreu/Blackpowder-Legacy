@@ -76,6 +76,157 @@ Fonte de verdade: `src/lib.rs`. Resumo do que já existe:
 - A textura do sprite é `minecraft:entity/player/wide/steve` — fixa. Se o
   jogador usar skin slim, a mão fica com a textura errada.
 
+## Achados
+
+Material analisado em `/tmp/tac-src/` (`Nova pasta.zip` do Drive →
+`tac-0.3.10.1-1.18.2.jar` + árvore CFR com 1.304 classes) e cruzado com o SDK
+pinado do Horizon (`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`).
+
+### 1. Mão em primeira pessoa (TAC + 3 bugs reais achados no `draw_forearm` atual)
+
+- **Como o TAC resolve (`RenderUtil`, `PlayerHandAnimation`, `TwoHandedPoseHighRes_m1894`):**
+  - Os braços **não** fazem parte do JSON da arma; o mod desenha o `ModelPart`
+    do jogador (`rightArm` + `rightSleeve` e `leftArm` + `leftSleeve`) no
+    espaço local da arma, herdando a matriz já transformada por ADS, recuo e
+    animação.
+  - Pose procedural de carabina lever-action (`TwoHandedPoseHighRes_m1894`,
+    após `translate(0, 0, -1)` e `rotY(180°)`):
+    - **Mão esquerda (guarda-mão):** `(7 * side * 0.0625, -0.995, -0.2)`,
+      rotações `X=80°`, `Y=-15°*side`, `Z=-15°*side`, `X=-35°`, escala `1.0`.
+      Durante a recarga (`r`), desliza `(+1.5r, -1.0r, -1.5r) * 0.0625`.
+    - **Mão direita (punho):** `(-2.5 * 0.0465, -0.4, -0.975)`, rotação
+      `X=80°`, escala `0.5`.
+- **Diagnóstico da v0.7.1 contra o código do Horizon (`horizon-client` / `horizon-mod-vocab`):**
+  1. **Árvore inteira em vez do braço:** `client_setup` guarda o retorno bruto
+     de `host.bake_layer("minecraft:player#main")` (raiz com cabeça, tronco,
+     pernas e braços) e `draw_forearm` desenha essa raiz sem chamar
+     `.get_child("right_arm")` / `.get_child("right_sleeve")` nem zerar o
+     `initial_pose` do ombro (`x = -5, y = 2, z = 0` texels).
+  2. **`event.draw` não herda `event.render`:** em
+     `crates/horizon-client/src/game/interface/frame_geometry.rs` e
+     `hooks/render_hand.rs`, `render_hand` roda **antes** de
+     `hand_pose_matrix(render)` e **antes** de `item_pose(0.56, -0.52 - equip*0.6, -0.72)`.
+     O comentário em `src/lib.rs` assumia que `draw` seguia `render` de graça,
+     mas `draw` tem pose própria: na v0.7.1 o braço fica parado no quadril
+     enquanto a arma mira, recua ou cicla. É preciso replicar a pose da arma
+     em `event.draw` antes de posicionar punho e guarda-mão.
+  3. **Sistema de eixos do `ModelPart`:** `host/draw.rs` documenta que
+     `ModelPart` usa `+Y` para baixo e frente em `-Z`, exigindo
+     `draw.scale([1.0, -1.0, -1.0])` antes de `model_part`; sem isso o braço
+     fica invertido verticalmente.
+  - **Skin do jogador no WASM:** `hooks/render_hand.rs` confirma que o estado
+    de render do jogador não é exposto aos mods WASM no commit pinado; o sprite
+    continua fixo em `"minecraft:entity/player/wide/steve"`, mas já podemos
+    extrair `right_arm` + `right_sleeve` e `left_arm` + `left_sleeve`.
+
+### 2. Curva de recuo (`RecoilHandler`, `GunRenderingHandler`, `SecondOrderDynamics`)
+
+- O TAC separa o recuo em **câmera** e **modelo**, nunca usando apenas decaimento
+  exponencial simples:
+  - **Recuo da câmera (`RecoilHandler`):**
+    - Magnitude por tiro: `angle = recoilAngle * (1 - adsReduction * ads) * rand(0.75..1.22)`.
+    - **3 fases:** subida rápida de pitch nos primeiros ~`100 ms`; platô curto
+      de `100 ms`; retorno parcial a `1 / 1.75` (~`57%`) da velocidade de
+      subida, deixando ~`43%` de subida líquida para o jogador compensar no
+      mouse. Inclui leve desvio horizontal aleatório (metade revertido na
+      volta) e `60 ms` de micro-shake em roll/pitch.
+    - **Suporte no SDK Horizon:** `ClientHost::set_local_rotation(yaw, pitch)`
+      move a mira real do jogador sem salto entre frames, e `Hooks::camera_shake`
+      aplica roll/pitch transitório de impacto por frame.
+  - **Recuo visual da arma (`GunRenderingHandler`, janela de `200 ms`):**
+    - Envelope assimétrico: subida linear explosiva nos primeiros `15–25%` do
+      tempo (`weaponRecoilOffset` `0.725–0.97`) e retorno quadrático suave no
+      restante, filtrado por um sistema massa-mola de 2ª ordem
+      `SecondOrderDynamics(f = 0.5, z = 0.6, r = 2.65)` integrado com `dt` do
+      frame.
+    - Coice em `Z` (`recoilKick * 0.0625 * normal * adsFactor`) + subida em `X`
+      ao redor de pivô traseiro perto do punho (`(0, 0.05*kick, 0.35*kick)`),
+      reduzido em `-12.5%` agachado, mais micro-oscilação aleatória em `Y/Z`.
+
+### 3. Transição de ADS e geometria real da mira (`AimingHandler` + auditoria do `.bbmodel`)
+
+- **Dinâmica do TAC (`AimingHandler`):**
+  - Progresso base `MAX_AIM_PROGRESS = 4` ticks (`200 ms`, ~`220–250 ms` efetivos),
+    com ganho progressivo por tick (`0.8 → 1.3`, `+0.1`/tick) suavizado por
+    `SecondOrderDynamics(f = 0.45, z = 0.8, r = 1.2)` — independente de FPS
+    (diferente do `0.3/frame` atual).
+  - **Trajetória em arco:** aplica um mergulho parabólico em `Y` no meio da
+    transição (`-(0.033 - |0.5 - ads| * 0.066)` blocos, pico `-0.033` em
+    `ads = 0.5`) e desfaz `5° * (1 - ads)` de inclinação `Z` do quadril.
+  - **FOV e sensibilidade:** `fov = fovModifier + (1 - fovModifier) * (1 - ads)`
+    (`0.67` em rifles de mira aberta como `m24`/`mk14`/`sks_tactical`, `0.80` em
+    revólveres/escopetas). Reduz a sensibilidade do mouse proporcionalmente ao
+    zoom — mapeável direto em `Hooks::calculate_player_turn`. Bloqueado ao
+    recarregar ou correr.
+- **Auditoria geométrica de `models/winchester_1873.bbmodel` / `winchester_1873.json`:**
+  - Com `item_pose = (+0.56, -0.52, -0.72)` e `display.firstperson_righthand`
+    (`translation = [0, 0.3, -4.75]` texels, `scale = 0.45`):
+    - Grupo `Miras` está centrado em **`X = 8.139` texels** (`mira_frontal_ponto`
+      `[8.019..8.259]`, topo `Y = 12.380`, `Z = -15.14`; `mira_traseira_folha`
+      `[7.923..8.355]`, topo `Y = 12.444`, `Z = +5.36`).
+    - Offset exato para zerar a massa de mira no centro da tela (`X = 0, Y = 0`):
+      **`X = -0.5639`**, **`Y = +0.3775`**.
+    - **Conflito visual detectado no modelo:** `cao_ponta` (`[298]`, espora do
+      cão em `Z = 15.17`) sobe até **`Y = 12.644`** sobre o mesmo `X = 8.139`
+      — `0.20..0.26` texels (`~0.007` blocos) **acima** da linha das miras. Se
+      `Y = +0.3775`, a ponta do cão cruza a linha de visada; usar `Y ≈ +0.369`
+      (visada rasante sobre o cão) ou rebaixar levemente o cão resolve.
+    - Coronha (`coronha_01`, `Z = 31.614`) fica em `Z = -0.353` no quadril
+      (`-0.303` com `Z = +0.05`), longe do near-plane (`-0.05`) mesmo com coice.
+
+### 4. Máquina de estados de recarga (`ReloadHandler` / `ReloadTracker`)
+
+- Na v0.7.1, cada aperto de `R` insere **só 1 cartucho** (`6` ticks). No TAC,
+  armas de tubo (`m870_classic` e equivalentes) entram num **estado contínuo de
+  recarga** com um único `R`:
+  1. **Abertura (`PreReload`, `8–12` ticks):** inclina a arma expondo a janela
+     lateral (`loading gate`) e abaixa o ADS.
+  2. **Ciclo por cartucho (`InterReload`, `10–15` ticks/cartucho):** servidor
+     valida inventário, consome 1 munição, incrementa o tubo e toca o som de
+     inserção; repete sozinho até encher (`8/8`) ou acabar a munição.
+  3. **Fechamento (`PostReload`, `6–8` ticks):** retorna à pose neutra.
+- **Regras de interrupção:** clicar para atirar com ≥1 cartucho no tubo cancela
+  a recarga na hora e permite disparar; trocar de slot na hotbar, largar o item
+  ou correr também cancelam o estado no servidor e no cliente.
+- **Detalhe importante no Horizon:** alterar `stack.damage` a cada cartucho/tiro
+  pode disparar a animação vanilla de re-equipar a mão; implementar
+  `ItemPart::should_cause_reequip_animation` retornando `false` quando o item
+  continua sendo `winchester_1873` elimina esse salto visual.
+
+### 5. Números de balanceamento (comparativo TAC vs v0.7.1)
+
+Nota: `data/tac/guns/m1873.json` no jar é um JSON legado do revólver **Colt SAA
+M1873** de 6 tiros (`damage = 8.25`, `speed = 7.5`), útil como referência futura
+para o Colt SAA. Para carabina/rifle de ação manual e tubo, os parâmetros ativos
+da 0.3.10.1 são:
+
+| Arma / Ref | Dano | Velocidade (b/t) | Spread ADS | Mult. Hipfire | Recuo Cam (°) | Kick Z | FOV ADS | Cadência / Recarga |
+|---|---|---|---|---|---|---|---|---|
+| **Blackpowder v0.7.1** | `12.0` | `6.0` | `0.35` (fixo) | `1.0x` (igual!) | `0°` (só visual `7°`) | `0.10` bl | `0.60` | `8t` (`150 RPM`) / `6t` avulso |
+| **TAC `sks_tactical`** | `10.0` | `27.5` | `0.065°` | `8.5x` | `6.25°` (`-30%` ADS) | `1.50` | `0.67` | `300 RPM` / pente |
+| **TAC `mk14`** | `16.0` | `31.5` | `0.030°` | `8.5x` | `6.88°` (`-25%` ADS) | `1.63` | `0.67` | `300 RPM` / pente |
+| **TAC `m24` (ferrolho)** | `21.5` | `35.5` | `0.015°` | `14.5x` | `5.75°` (`-27.5%` ADS) | `1.63` | `0.67` | `50 RPM` / ferrolho |
+| **TAC `colt_python`** | `12.5` | `17.0` | `0.125°` | `4.5x` | `8.50°` (`-25%` ADS) | `2.35` | `0.80` | `133 RPM` (`9t`) |
+| **TAC `m870_classic`** | `22.0` | `15.0` |pellet | — | `9.50°` (`-15%` ADS) | `1.35` | `0.80` | tubo: `12t` abre + `15t`/cartucho |
+
+Principais discrepâncias da v0.7.1 reveladas pela tabela:
+- **Velocidade `6.0` b/t** é velocidade de bola de neve forte (cai muito cedo
+  com a gravidade do template `snowball`); subir para **`15.0` b/t** (`300 m/s`)
+  dá balística de carabina `.44-40` mantendo leve queda a longa distância.
+- **`inaccuracy = 0.35` fixo** faz o ADS ser só cosmético; separar **ADS
+  (`0.06`, ou `0.04` agachado)** de **Hipfire (`1.5`, ou `2.2` em movimento)**
+  torna mirar realmente recompensador.
+- **Cadência e recarga:** `LEVER_TICKS = 10` (`120 RPM`) dá tempo para ler o
+  recuo + ciclo da alavanca; loop de recarga com `8t` de abertura + `10t` por
+  cartucho + `6t` de fechamento leva `~4.7s` de `0 → 8` com um único `R`.
+
+## Implementado na v0.8.0
+
+- **Opção B (cão engatilhado + mira centralizada):** elementos `cao_disco_1..3` (`[293..295]`), `cao` (`[296]`), `cao_espora` (`[297]`) e `cao_ponta` (`[298]`) rotacionados em `+62°` ao redor do pino `[0.0, 16.6, 65.6]` em `models/winchester_1873.bbmodel` e reconvertidos via `tools/bbmodel_convert.py`, baixando o topo do cão para `12.360` (abaixo da alça `12.544` e da massa `12.480`) com `ADS_OFFSET = [-0.5639, 0.3695, 0.05]`.
+- **Braços duplos em 1ª pessoa (`draw_arms`):** `right_arm` + `left_arm` (com mangas) extraídos com `PartPose::ZERO`, `scale([sxz, -sy, -sxz])` e matriz de pose da arma replicada em `event.draw`, incluindo movimento de alavanca na mão direita e inserção na janela `porta_B` pela mão esquerda.
+- **ADS & Recuo em 2 camadas (`render_frame_pre` + `compute_fov` + `calculate_player_turn` + `camera_pose`):** dinâmica de 2ª ordem por frame (`event.elapsed`), zoom `0.67`, sensibilidade escalada, subida de câmera com recuperação suave de `57%` (`set_local_rotation`), micro-jolt e coice visual pivotado na coronha.
+- **Recarga contínua & balística (`level_tick_post` + `ToClient<RifleSync>`):** ciclo `Opening 8t -> Inserting 10t/bala -> Closing 6t` com 1 aperto de `R` (interrompível por tiro com munição no tubo, corrida ou troca de slot), `should_cause_reequip_animation` desativado para variações de `damage`, velocidade `15.0` b/t, `LEVER_TICKS = 10` e dispersão dinâmica ADS/Hipfire.
+
 ## Regras do projeto
 
 - **Português**, técnico e objetivo, sem encher linguiça.

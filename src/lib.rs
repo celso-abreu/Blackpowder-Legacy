@@ -1,39 +1,40 @@
-//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod).
+//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod, v0.8.0).
 //!
 //! Controls:
-//! - Hold right click: shoulder the rifle and aim down the sights — the gun
-//!   slides to the screen's centre (`render_hand`), the view zooms in
-//!   smoothly (`compute_fov_modifier`) and a vanilla vignette frames it
-//!   (`gui_render_post`). Aiming for at least LEVER_TICKS cycles the lever.
-//!   The player's own arm is drawn from `client_setup`'s baked player layer
-//!   (`draw_forearm`), so the rifle is held rather than floating.
-//! - Left click while aiming: fire one round (`key_mapping_pre` cancels the
-//!   vanilla attack, so the rifle never mines or punches, and a typed payload
-//!   asks the server to shoot). Each shot kicks (recoil) and the lever cycles
-//!   again: LEVER_TICKS between shots, enforced server-side, with the gun
-//!   rolling through the lever motion in first person.
-//! - R (a real Controls keybind, remappable): load one cartridge per press,
-//!   RELOAD_TICKS apart, up to the tube's 8 — the gun dips as each round
-//!   slides in.
+//! - Hold right click: shoulder the rifle and aim down the sights — the cocked
+//!   hammer clears the sight line and the iron sights slide onto the camera axis
+//!   via frame-rate-independent second-order dynamics (`render_frame_pre` +
+//!   `render_hand`), the world FOV zooms smoothly (`compute_fov`), mouse turn
+//!   sensitivity scales proportionally (`calculate_player_turn`), and a subtle
+//!   vignette frames the view (`gui_render_post`). Disabled while sprinting or
+//!   reloading.
+//! - Left click (aimed or hipfire while holding the rifle): fire one `.44-40`
+//!   round (`key_mapping_pre` cancels vanilla attack/mining and queues a typed
+//!   payload). Accuracy rewards aiming (`0.06` ADS, `0.04` crouched) vs hipfire
+//!   (`1.50` standing, `2.20` moving). Each live shot applies two-layer recoil
+//!   (camera pitch climb with `57%` smooth recovery + micro-jolt, and rear-stock
+//!   pivoted 2nd-order weapon kick) followed by the 10-tick lever cycle.
+//!   Clicking fire mid-reload immediately interrupts the reload when >= 1 round
+//!   is already in the tube.
+//! - R (remappable in `Options > Controls`): press once to start a continuous
+//!   per-cartridge reload loop (`8t` open -> `10t` per round -> `6t` close) up
+//!   to `8 / 8`, or until interrupted by firing, sprinting, or swapping slots.
 //!
-//! The server stays authoritative: tube load, lever timing, cartridge
-//! consumption and the projectile all live server-side. The client only
-//! detects inputs and draws the aiming effects, so aim visuals never lag.
-//!
-//! The magazine lives in the stack's vanilla `damage` component (0..=8);
-//! the item declares `max_damage = 100` so every write is valid and the rifle
-//! never breaks. The `item_bar` hook replaces the (misleading) vanilla damage
-//! bar with a brass ammo gauge. Sounds go through the level's own broadcast
-//! (`LevelRef::play_sound`), never /playsound commands (those spammed the
-//! chat). A shot also puffs black-powder smoke past the muzzle.
+//! Both first-person player arms (`right_arm` + `left_arm` with sleeves) are
+//! extracted from `minecraft:player#main` with zeroed local poses and drawn
+//! under the rifle's exact pose matrix so they follow ADS, recoil, lever action,
+//! and per-shell loading-gate insertion in lockstep.
 
 use mod_api::{
-    ClientHost, ClientSetupEvent, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
-    Hand, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemKey, ItemPart,
-    ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, ModelPart,
-    OnUseTickEvent, ParticleKey, ParticleOptions, PayloadId, PartPose, Registrar,
-    RegistrationContext, ReleaseUsingEvent, RenderHandEvent, ServerHost, ServerTickEvent,
-    ServerTickPhase, SoundSource, Text, ToServer, UseDurationEvent, VarInt,
+    BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
+    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, EntityUuid, Flow, GuiDraw,
+    GuiRenderPostEvent, Hand, Hooks, Host, HostSide, IPayloadContext, Identifier, ItemBarEvent,
+    ItemKey, ItemPart, ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration,
+    LevelTickPostEvent, LivingRef, ModelPart, OnUseTickEvent, PartPose, ParticleKey,
+    ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
+    RenderFramePreEvent, RenderHandEvent, ServerHost, ServerTickEvent, ServerTickPhase,
+    ShouldCauseReequipAnimationEvent, SoundSource, Text, ToClient, ToServer, UseDurationEvent,
+    VarInt,
 };
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
@@ -44,174 +45,461 @@ const WINCHESTER: &str = "blackpowder_legacy:winchester_1873";
 const CARTRIDGE: &str = "blackpowder_legacy:cartridge_44";
 const BULLET: &str = "blackpowder_legacy:bullet";
 
-const TUBE_CAPACITY: u32 = 8;
-const USE_DURATION: i32 = 72000; // vanilla's "use forever" duration
-const LEVER_TICKS: i32 = 8; // 0.4 s: aim ticks cycling the lever, and the delay between shots
-const RELOAD_TICKS: u64 = 6; // 0.3 s between one cartridge sliding in and the next
-
-/// The mod's own id (horizon-mod.toml), owning the registered keybind.
 const MOD_ID: &str = "blackpowder_legacy";
-/// The registered reload keybind's id within the mod (`Options > Controls`).
 const RELOAD_MAPPING: &str = "reload";
 const ATTACK_MAPPING: &str = "key.attack";
+const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
+const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
+const PLAYER_SKIN_FALLBACK: &str = "minecraft:entity/player/wide/steve";
 
-/// The aim zoom's deepest FOV scale (smaller = narrower); eased toward it.
-const AIM_FOV: f32 = 0.6;
-/// How far the vignette darkens at full aim (1.0 is vanilla's invisible).
-const AIM_VIGNETTE: f32 = 0.65;
+const TUBE_CAPACITY: u32 = 8;
+const USE_DURATION: i32 = 72000;
 
-// First-person animation, in client ticks (matched by the server's delays).
-const LEVER_ANIM_TICKS: f32 = 8.0;
-const RELOAD_ANIM_TICKS: f32 = 6.0;
-/// Where the sights go at full aim, in view-space blocks (+x right, +y up,
-/// -z into the screen): the sight line leaves (0.56, -0.40) for the camera
-/// axis, the gun pulled a touch closer.
-const ADS_OFFSET: [f32; 3] = [-0.56, 0.38, 0.05];
+/// Ticks between consecutive shots while working the lever (`10` ticks = `0.50 s`, `120 RPM`).
+const LEVER_TICKS: u64 = 10;
+/// Ticks after a shot when the metallic lever-lock click plays (`400 ms`).
+const LEVER_CLICK_DELAY_TICKS: u64 = 8;
+/// Ticks holding right-click before full server-side ADS accuracy settles.
+const ADS_SETTLE_TICKS: i32 = 4;
 
-// Vanilla sound events; played through the level broadcast, never via commands.
+// Continuous per-cartridge server reload timing (at 20 TPS).
+const RELOAD_OPEN_TICKS: u64 = 8;
+const RELOAD_INSERT_TICKS: u64 = 10;
+const RELOAD_CLOSE_TICKS: u64 = 6;
+
+// Winchester 1873 (.44-40) projectile speed & stance-dependent inaccuracy.
+const BULLET_SPEED: f32 = 15.0;
+const SPREAD_ADS_CROUCH: f32 = 0.04;
+const SPREAD_ADS_STAND: f32 = 0.06;
+const SPREAD_ADS_MOVING: f32 = 0.12;
+const SPREAD_HIP_CROUCH: f32 = 1.10;
+const SPREAD_HIP_STAND: f32 = 1.50;
+const SPREAD_HIP_MOVING: f32 = 2.20;
+
+/// World FOV scale at full ADS (`~1.5x` magnification, TAC iron-sight baseline).
+const AIM_FOV: f32 = 0.67;
+/// Vignette darkness at full aim (`1.0` is invisible).
+const AIM_VIGNETTE: f32 = 0.68;
+
+/// `ItemInHandRenderer` right-hand base translation (`equip = 0`, `attack = 0`).
+const HAND_BASE: [f32; 3] = [0.56, -0.52, -0.72];
+
+/// First-person right-hand offset placing the cocked Winchester 1873 iron sights
+/// (`mira_frontal_ponto` over `mira_traseira_folha` at baked `X = 8.139`) dead-center
+/// on screen (`X = 0.0000`) with natural cheek-weld eye relief.
+const ADS_OFFSET: [f32; 3] = [-0.5639, 0.3695, 0.05];
+
+/// Mirror of `display.firstperson_righthand` in `models/item/winchester_1873.json`.
+/// Vanilla stores item-model translation in sixteenths of a block.
+const RIFLE_DISPLAY: ([f32; 3], [f32; 3], f32) = ([0.0, 0.3, -4.75], [0.0, 0.0, 0.0], 0.45);
+
+/// Baked model texel coordinates (`0..16` space) for hand anchors and recoil pivot.
+const GRIP_WRIST_TEXELS: [f32; 3] = [8.14, 8.15, 18.00];
+const FORESTOCK_TEXELS: [f32; 3] = [8.05, 9.65, 3.20];
+const LOADING_GATE_TEXELS: [f32; 3] = [9.05, 10.15, 11.20];
+const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
+
+// Vanilla sound events broadcast through the level (never via commands).
 const SHOT_SOUND: &str = "minecraft:entity.firework_rocket.blast";
 const DRY_SOUND: &str = "minecraft:block.lever.click";
 const LOAD_SOUND: &str = "minecraft:item.crossbow.loading_middle";
-/// The crossbow's "loaded" click: the last cartridge seating, and the lever
-/// closing after a shot. Two pitches keep them told apart.
 const CLICK_SOUND: &str = "minecraft:item.crossbow.loading_end";
 
-// Volume above 1.0 extends the hearing range past 16 blocks (3.0 → ~48, as a
-// gunshot should carry); the rest stay inside the vanilla 16-block bubble.
 const SHOT_VOLUME: f32 = 3.0;
 const SHOT_PITCH: f32 = 0.6;
 const UI_VOLUME: f32 = 0.7;
 const DRY_PITCH: f32 = 0.7;
 const LOAD_PITCH: f32 = 1.2;
 const READY_PITCH: f32 = 1.0;
-/// The lever click when the post-shot cycle completes (from the aim ticker's
-/// server half, LEVER_TICKS after a shot).
 const LEVER_PITCH: f32 = 1.5;
 
 const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
-/// The ammo gauge's colour (0xRRGGBB): brass, like the cartridge cases.
 const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 
-// Rifle input actions carried by the typed payload.
+// Client -> Server actions.
 const ACTION_FIRE: i32 = 1;
 const ACTION_RELOAD: i32 = 2;
+const ACTION_RELOAD_CANCEL: i32 = 3;
 
-/// Client-side aim state: set while the rifle is in use (aimed), cleared on
-/// release. Drives the zoom, the vignette and the left-click fire gate.
+// Server -> Client authoritative weapon feedback events.
+const SYNC_SHOT: i32 = 1;
+const SYNC_DRY_CLICK: i32 = 2;
+const SYNC_RELOAD_START: i32 = 3;
+const SYNC_SHELL_INSERTED: i32 = 4;
+const SYNC_RELOAD_END: i32 = 5;
+
+// Client-side state.
 static AIMING: AtomicBool = AtomicBool::new(false);
-/// A fire input queued by `key_mapping_pre` for the next client tick's send.
+static CLIENT_RELOADING: AtomicBool = AtomicBool::new(false);
+static CLIENT_SPRINTING: AtomicBool = AtomicBool::new(false);
+static CLIENT_SNEAKING: AtomicBool = AtomicBool::new(false);
 static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
+static PENDING_RELOAD_CANCEL: AtomicBool = AtomicBool::new(false);
 
-/// Client tick counter, bumped by `client_tick_pre`.
 static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
-/// The last client tick `on_use_tick` saw the rifle in use. Dropping or
-/// swapping the held item stops the use *without* a release, so the heartbeat
-/// — not `release_using` alone — is what reliably ends an aim.
 static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
-/// The eased aim strength (f32 bits, 0.0..=1.0), advanced per frame by
-/// `compute_fov_modifier`; drives the zoom, the vignette and the gun's slide
-/// to the sights.
+static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
+static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
+/// Latest `aim_dyn.y` (`f32::to_bits`), updated once per rendered frame in `render_frame_pre`
+/// and shared lock-free with `compute_fov`, `calculate_player_turn`, `gui_render_post`, and
+/// `render_hand`.
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
-/// The client tick the shot cycle (recoil + lever) animation started, or
-/// u64::MAX when idle.
-static LEVER_ANIM_START: AtomicU64 = AtomicU64::new(u64::MAX);
-/// The client tick the reload dip animation started, or u64::MAX when idle.
-static RELOAD_ANIM_START: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Server tick counter, bumped by `server_tick` (end phase).
+// Server-side authoritative state.
 static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
-/// Per-player lever state, server-side: (aim ticks, last server tick seen).
-/// Written by `on_use_tick`, cleared by `release_using` and reset by each
-/// shot. The timestamp keeps a dropped or swapped rifle from leaving a
-/// "lever armed" state behind — a shot is only honoured while the use is
-/// still ticking.
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
-/// Per-player server tick at which the lever is worked through after the last
-/// shot — the enforced delay between shots (the old AIM_TICKS reset alone was
-/// overwritten by the next `on_use_tick`, so shots used to come out as fast
-/// as the clicks arrived).
 static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
-/// Per-player server tick at which the next cartridge may slide in.
-static RELOAD_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
+static PENDING_LEVER_CLICKS: Mutex<Vec<(u128, u64)>> = Mutex::new(Vec::new());
+static RELOAD_SESSIONS: Mutex<BTreeMap<u128, ReloadSession>> = Mutex::new(BTreeMap::new());
 
-/// The registered serverbound channel for rifle inputs.
 static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
-/// The rifle's item key, cached so `render_hand` can recognise the held stack
-/// without a registry lookup per frame.
+static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
-/// The player model baked once at client setup, so the first-person hand is
-/// the player's own arm and skin rather than a box of the mod's own. `None`
-/// until the first draw, or when the layer cannot be baked.
-static PLAYER_ARM: OnceLock<Option<ModelPart>> = OnceLock::new();
-/// The smoke particle key, kept for the payload handler (the Part owns one
-/// copy; the free-function handler reaches this one).
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static PLAYER_ARMS: OnceLock<Option<PlayerArms>> = OnceLock::new();
+static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 
-/// The rifle's `firstperson_righthand` display transform, copied from the
-/// baked model. Vanilla writes item-model translation in sixteenths of a
-/// block, so the arm divides it back out (`tools/bbmodel_convert.py`).
-const RIFLE_DISPLAY: ([f32; 3], [f32; 3], f32) = ([0.0, 0.3, -4.75], [0.0, 0.0, 0.0], 0.45);
-
-/// Where the fist closes, in the rifle model's own texels (16 to a block). The
-/// item model is baked around its 8,8 centre, so the barrel runs down -z and
-/// this is the small of the stock, just behind the lever's tail.
-const GRIP_TEXELS: [f32; 3] = [8.14, 6.90, 23.50];
-
-/// How far the shoulder sits behind the fist, in blocks, and which way: to the
-/// right, below the frame and back toward the player, so the forearm enters
-/// screen-right and low. Tuned to the gun's own first-person framing.
-const ARM_BACK: [f32; 3] = [0.30, 0.52, 0.66];
-
-/// Draws the player's own right arm from off-screen to the fist on the rifle's
-/// wrist. `bake_layer` hands back the whole player tree, so the arm is taken
-/// out by name and posed here. It draws under `render`'s pose, which means it
-/// recoils, levers and reloads with the gun for free.
-fn draw_forearm(event: &mut RenderHandEvent<'_, '_>) {
-    let Some(arm) = PLAYER_ARM.get_or_init(|| None).as_ref() else {
-        return;
-    };
-    let (translate, _rotation, scale) = RIFLE_DISPLAY;
-    // Where the fist goes, in the hand's view space: the grip put through the
-    // same display transform the gun's model is drawn under.
-    let grip = [
-        (GRIP_TEXELS[0] - 8.0) / 16.0,
-        (GRIP_TEXELS[1] - 8.0) / 16.0,
-        GRIP_TEXELS[2] / 16.0,
-    ];
-    let mut fist = [grip[0] * scale, grip[1] * scale, grip[2] * scale];
-    for axis in 0..3 {
-        fist[axis] += translate[axis] / 16.0;
-    }
-    let draw = &mut *event.draw;
-    draw.push();
-    // The arm's pivot is its shoulder, and a player model's arm hangs down +y
-    // from there in texels; start the shoulder a forearm's length back from
-    // the fist along `ARM_BACK` and turn the hanging arm onto the fist.
-    let back = ARM_BACK;
-    let len = (back[0] * back[0] + back[1] * back[1] + back[2] * back[2]).sqrt();
-    let reach = 12.0 / 16.0; // a vanilla forearm, in blocks
-    let dir = [back[0] / len, back[1] / len, back[2] / len];
-    draw.translate([
-        fist[0] + dir[0] * reach,
-        fist[1] + dir[1] * reach,
-        fist[2] + dir[2] * reach,
-    ]);
-    // Part space is +y down; flip it into the view's +y up, then roll the
-    // hanging arm back onto `-dir` (shoulder to fist).
-    draw.scale([1.0, -1.0, 1.0]);
-    // Rotating about x by -90 lifts the hanging arm to point at -z (away from
-    // the player); the remaining tilt lands it on the grip.
-    draw.rotate_about([1.0, 0.0, 0.0], -90.0, [0.0; 3]);
-    draw.rotate_about([0.0, 1.0, 0.0], -28.0, [0.0; 3]);
-    draw.rotate_about([0.0, 0.0, 1.0], 12.0, [0.0; 3]);
-    let _ = draw.model_part(arm, "minecraft:entity/player/wide/steve", 0xFF_FFFF);
-    draw.pop();
-}
-
-/// One rifle input from the owning client: fire (1) or reload one round (2).
 #[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleInput {
     action: VarInt,
+}
+
+#[derive(horizon_mod_api_macros::PayloadCodec)]
+struct RifleSync {
+    kind: VarInt,
+}
+
+#[derive(Clone, Copy)]
+enum ReloadPhase {
+    Opening { until: u64 },
+    Inserting { next_tick: u64 },
+    Closing { until: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct ReloadSession {
+    slot: u32,
+    phase: ReloadPhase,
+}
+
+/// Semi-implicit second-order spring-damper (`f` Hz natural frequency, `zeta` damping,
+/// `r` initial velocity response). Sub-stepped so arbitrary frame deltas remain stable.
+#[derive(Clone, Copy)]
+struct SecondOrder {
+    k1: f32,
+    k2: f32,
+    k3: f32,
+    xp: f32,
+    y: f32,
+    yd: f32,
+}
+
+impl SecondOrder {
+    fn new(f: f32, zeta: f32, r: f32, x0: f32) -> Self {
+        let w = 2.0 * PI * f;
+        Self {
+            k1: zeta / (PI * f),
+            k2: 1.0 / (w * w),
+            k3: r * zeta / w,
+            xp: x0,
+            y: x0,
+            yd: 0.0,
+        }
+    }
+
+    fn step(&mut self, dt: f32, x: f32) -> f32 {
+        let dt = dt.clamp(0.0, 0.05);
+        if dt <= 1e-6 {
+            return self.y;
+        }
+        let steps = ((dt / 0.008).ceil() as u32).clamp(1, 8);
+        let h = dt / (steps as f32);
+        let xd = (x - self.xp) / dt;
+        self.xp = x;
+        let k2_stable = self
+            .k2
+            .max(0.5 * h * h + 0.5 * h * self.k1)
+            .max(h * self.k1);
+        for _ in 0..steps {
+            self.y += h * self.yd;
+            self.yd += h * (x + self.k3 * xd - self.y - self.k1 * self.yd) / k2_stable;
+        }
+        self.y
+    }
+
+    fn reset(&mut self, x0: f32) {
+        self.xp = x0;
+        self.y = x0;
+        self.yd = 0.0;
+    }
+}
+
+struct ClientAnimState {
+    aim_dyn: SecondOrder,
+    recoil_dyn: SecondOrder,
+    reload_dyn: SecondOrder,
+    shot_timer: Option<f32>,
+    shot_ads_factor: f32,
+    shot_crouch_factor: f32,
+    shot_roll_sign: f32,
+    cam_recoil_timer: Option<f32>,
+    cam_pitch_kick: f32,
+    cam_yaw_kick: f32,
+    jolt_timer: f32,
+    jolt_yaw_sign: f32,
+    dry_timer: f32,
+    shell_timer: Option<f32>,
+    rng: u32,
+}
+
+impl ClientAnimState {
+    fn new() -> Self {
+        Self {
+            aim_dyn: SecondOrder::new(3.6, 0.86, 1.05, 0.0),
+            recoil_dyn: SecondOrder::new(5.5, 0.58, 2.4, 0.0),
+            reload_dyn: SecondOrder::new(3.2, 0.88, 0.80, 0.0),
+            shot_timer: None,
+            shot_ads_factor: 1.0,
+            shot_crouch_factor: 1.0,
+            shot_roll_sign: 1.0,
+            cam_recoil_timer: None,
+            cam_pitch_kick: 0.0,
+            cam_yaw_kick: 0.0,
+            jolt_timer: 0.0,
+            jolt_yaw_sign: 1.0,
+            dry_timer: 0.0,
+            shell_timer: None,
+            rng: 0x6D2B_79F5,
+        }
+    }
+
+    fn next_unit_f32(&mut self) -> f32 {
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((self.rng >> 8) as f32) * (1.0 / 16_777_216.0)
+    }
+
+    fn on_shot(&mut self) {
+        let aim = self.aim_dyn.y.clamp(0.0, 1.0);
+        let sneaking = CLIENT_SNEAKING.load(Ordering::Relaxed);
+        let ads_factor = 1.0 - 0.30 * aim;
+        let crouch_factor = if sneaking { 0.875 } else { 1.0 };
+        let variance = 0.86 + 0.28 * self.next_unit_f32();
+        let yaw_rand = self.next_unit_f32() * 2.0 - 1.0;
+
+        self.shot_timer = Some(0.0);
+        self.shot_ads_factor = ads_factor;
+        self.shot_crouch_factor = crouch_factor;
+        self.shot_roll_sign = if yaw_rand >= 0.0 { 1.0 } else { -1.0 };
+
+        self.cam_recoil_timer = Some(0.0);
+        self.cam_pitch_kick = 5.4 * ads_factor * crouch_factor * variance;
+        self.cam_yaw_kick = 0.72 * ads_factor * yaw_rand;
+
+        self.jolt_timer = 0.065;
+        self.jolt_yaw_sign = self.shot_roll_sign;
+        self.dry_timer = 0.0;
+    }
+
+    fn on_dry_click(&mut self) {
+        self.dry_timer = 0.09;
+    }
+}
+
+struct LimbModel {
+    limb: ModelPart,
+    detached_sleeve: Option<ModelPart>,
+}
+
+struct PlayerArms {
+    right: LimbModel,
+    left: LimbModel,
+}
+
+impl LimbModel {
+    fn extract(root: &ModelPart, limb_name: &str, sleeve_name: &str) -> Option<Self> {
+        let mut limb = root.get_child(limb_name)?.clone();
+        limb.load_pose(PartPose::ZERO);
+        // Sleeves sit either as a child of the arm (26.3 PlayerModel) or on root.
+        let detached_sleeve = if limb.get_child(sleeve_name).is_some() {
+            None
+        } else {
+            root.get_child(sleeve_name).cloned().map(|mut s| {
+                s.load_pose(PartPose::ZERO);
+                s
+            })
+        };
+        Some(Self {
+            limb,
+            detached_sleeve,
+        })
+    }
+
+    fn draw(&self, draw: &mut dyn BlockEntityDrawContext) {
+        let _ = draw.model_part(&self.limb, PLAYER_SKIN_FALLBACK, 0xFF_FFFF);
+        if let Some(sleeve) = &self.detached_sleeve {
+            let _ = draw.model_part(sleeve, PLAYER_SKIN_FALLBACK, 0xFF_FFFF);
+        }
+    }
+}
+
+fn client_anim() -> &'static Mutex<ClientAnimState> {
+    CLIENT_ANIM.get_or_init(|| Mutex::new(ClientAnimState::new()))
+}
+
+fn aim_progress() -> f32 {
+    f32::from_bits(ADS_BITS.load(Ordering::Relaxed)).clamp(0.0, 1.2)
+}
+
+fn holding_rifle_recently() -> bool {
+    let seen = RIFLE_SEEN_FRAME.load(Ordering::Relaxed);
+    let now = FRAME_SEQ.load(Ordering::Relaxed);
+    seen > 0 && now.saturating_sub(seen) <= 2
+}
+
+/// Converts baked model texels (`0..16`) into right-hand view space after `RIFLE_DISPLAY`.
+fn model_texel_to_hand(tex: [f32; 3]) -> [f32; 3] {
+    let (translate, _rot, scale) = RIFLE_DISPLAY;
+    let k = scale / 16.0;
+    [
+        translate[0] / 16.0 + (tex[0] - 8.0) * k,
+        translate[1] / 16.0 + (tex[1] - 8.0) * k,
+        translate[2] / 16.0 + (tex[2] - 8.0) * k,
+    ]
+}
+
+/// Cumulative normalized camera recoil curve `C(t)` over `0.00..0.38 s`:
+/// `0..95 ms` smooth bell-curve climb to `1.0`, `95..185 ms` apex plateau,
+/// `185..380 ms` smooth `57.1%` (`1 / 1.75`) recovery leaving `42.9%` net climb.
+fn cam_recoil_curve(t: f32) -> (f32, f32) {
+    const CLIMB_END: f32 = 0.095;
+    const HOLD_END: f32 = 0.185;
+    const REC_END: f32 = 0.380;
+    const RECOVERY_FRAC: f32 = 1.0 / 1.75;
+
+    if t <= 0.0 {
+        (0.0, 0.0)
+    } else if t < CLIMB_END {
+        let u = (t / CLIMB_END).clamp(0.0, 1.0);
+        let c = 0.5 * (1.0 - (PI * u).cos());
+        (c, c)
+    } else if t < HOLD_END {
+        (1.0, 1.0)
+    } else if t < REC_END {
+        let u = ((t - HOLD_END) / (REC_END - HOLD_END)).clamp(0.0, 1.0);
+        let ease = 0.5 * (1.0 - (PI * u).cos());
+        (1.0 - RECOVERY_FRAC * ease, 1.0 - 0.5 * ease)
+    } else {
+        (1.0 - RECOVERY_FRAC, 0.5)
+    }
+}
+
+/// Visual weapon recoil target envelope (`0..0.20 s`): fast `35 ms` snap, smooth `(1 - u)^2` decay.
+fn recoil_envelope(t: f32) -> f32 {
+    if !(0.0..0.20).contains(&t) {
+        return 0.0;
+    }
+    if t < 0.035 {
+        t / 0.035
+    } else {
+        let u = (t - 0.035) / (0.20 - 0.035);
+        (1.0 - u) * (1.0 - u)
+    }
+}
+
+/// Lever-action cycle envelope (`0.13..0.48 s`, matching `LEVER_TICKS = 10`).
+fn lever_envelope(t: f32) -> f32 {
+    const START: f32 = 0.13;
+    const END: f32 = 0.48;
+    if !(START..END).contains(&t) {
+        return 0.0;
+    }
+    let u = (t - START) / (END - START);
+    (PI * u).sin()
+}
+
+/// Draws a single limb anchored by its fist (`local_x = shaft_cx`, `local_y = 9.5/16`)
+/// at `fist_pos` so rotations `(rx, ry, rz)` pivot cleanly around the hand's grip point.
+fn draw_anchored_limb(
+    draw: &mut dyn BlockEntityDrawContext,
+    limb: &LimbModel,
+    fist_pos: [f32; 3],
+    shaft_cx: f32,
+    rot_xyz: [f32; 3],
+    scale_sxz_sy: [f32; 2],
+) {
+    let sxz = scale_sxz_sy[0];
+    let sy = scale_sxz_sy[1];
+    draw.push();
+    draw.translate(fist_pos);
+    draw.rotate_about([0.0, 1.0, 0.0], rot_xyz[1], [0.0; 3]);
+    draw.rotate_about([1.0, 0.0, 0.0], rot_xyz[0], [0.0; 3]);
+    draw.rotate_about([0.0, 0.0, 1.0], rot_xyz[2], [0.0; 3]);
+    draw.translate([-sxz * shaft_cx, sy * (9.5 / 16.0), 0.0]);
+    draw.scale([sxz, -sy, -sxz]);
+    limb.draw(draw);
+    draw.pop();
+}
+
+/// Draws both first-person arms locked to the rifle's exact pose matrix (`render` + `HAND_BASE`).
+fn draw_arms(event: &mut RenderHandEvent<'_, '_>, lever: f32, reload_blend: f32, shell_pulse: f32) {
+    let Some(arms) = PLAYER_ARMS.get_or_init(|| None).as_ref() else {
+        return;
+    };
+    let render = &*event.render;
+    let translation = render.translation;
+    let rotation = render.rotation;
+    let scale = render.scale;
+    let equip = render.equip;
+
+    let draw = &mut *event.draw;
+    draw.push();
+    draw.translate(translation);
+    draw.rotate_about([1.0, 0.0, 0.0], rotation[0], [0.0; 3]);
+    draw.rotate_about([0.0, 1.0, 0.0], rotation[1], [0.0; 3]);
+    draw.rotate_about([0.0, 0.0, 1.0], rotation[2], [0.0; 3]);
+    draw.scale([scale; 3]);
+    draw.translate([HAND_BASE[0], HAND_BASE[1] - equip * 0.6, HAND_BASE[2]]);
+
+    // Right hand holds the stock wrist and swings forward/down with the lever loop.
+    let right_tex = [
+        GRIP_WRIST_TEXELS[0],
+        GRIP_WRIST_TEXELS[1] - 1.10 * lever,
+        GRIP_WRIST_TEXELS[2] - 1.80 * lever,
+    ];
+    draw_anchored_limb(
+        draw,
+        &arms.right,
+        model_texel_to_hand(right_tex),
+        -1.0 / 16.0,
+        [118.0 - 14.0 * lever, 18.0, -10.0 + 8.0 * lever],
+        [0.56, 0.95],
+    );
+
+    // Left hand cradles the wooden forestock and slides back to feed shells into `porta_B`.
+    let gate_mix = reload_blend.clamp(0.0, 1.0);
+    let left_tex = [
+        FORESTOCK_TEXELS[0]
+            + (LOADING_GATE_TEXELS[0] - FORESTOCK_TEXELS[0]) * gate_mix
+            - 0.38 * shell_pulse,
+        FORESTOCK_TEXELS[1]
+            + (LOADING_GATE_TEXELS[1] - FORESTOCK_TEXELS[1]) * gate_mix
+            + 0.28 * shell_pulse,
+        FORESTOCK_TEXELS[2] + (LOADING_GATE_TEXELS[2] - FORESTOCK_TEXELS[2]) * gate_mix,
+    ];
+    draw_anchored_limb(
+        draw,
+        &arms.left,
+        model_texel_to_hand(left_tex),
+        1.0 / 16.0,
+        [
+            116.0 - 10.0 * gate_mix + 4.0 * shell_pulse,
+            -24.0 + 14.0 * gate_mix - 5.0 * shell_pulse,
+            18.0 + 12.0 * gate_mix,
+        ],
+        [0.56, 1.35],
+    );
+
+    draw.pop();
 }
 
 #[derive(Default)]
@@ -225,66 +513,110 @@ impl Hooks for Mod {
         r.item_part(winchester, Winchester { smoke });
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(r.particle_key(SMOKE_PARTICLE));
-        // The reload key as a real Controls binding: remappable, persisted in
-        // horizon-mods.txt and silent while a screen or the chat is open
-        // (which the raw `input_key` listener was not).
+
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
                 .label("key.blackpowder_legacy.reload")
                 .context(KeyConflictContext::InGame),
         );
+
         let mut payloads = r.payload_handlers();
         let mut view = payloads.registrar("1");
         let input = view.play_to_server_typed::<RifleInput>(
-            PayloadId("blackpowder_legacy:rifle_input".into()),
+            PayloadId(INPUT_CHANNEL.into()),
             on_rifle_input,
         );
+        let sync = view.play_to_client_typed::<RifleSync>(
+            PayloadId(SYNC_CHANNEL.into()),
+            on_rifle_sync,
+        );
         let _ = RIFLE_INPUT.set(input);
+        let _ = RIFLE_SYNC.set(sync);
     }
 
-    /// Left click while aiming fires: cancel the vanilla attack press (no
-    /// mining, no punch) and queue the shot. Outside an aim the attack
-    /// behaves as usual, so carrying the rifle never blocks the pickaxe use.
-    fn key_mapping_pre(
-        &self,
-        _: &mut dyn ClientHost,
-        event: &mut KeyMappingPreEvent<'_>,
-    ) -> mod_api::Flow {
-        if event.mapping == ATTACK_MAPPING
-            && event.pressed
-            && AIMING.load(Ordering::Relaxed)
-        {
+    fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
+        let arms = host.bake_layer("minecraft:player#main").and_then(|root| {
+            Some(PlayerArms {
+                right: LimbModel::extract(&root, "right_arm", "right_sleeve")?,
+                left: LimbModel::extract(&root, "left_arm", "left_sleeve")?,
+            })
+        });
+        let _ = PLAYER_ARMS.set(arms);
+    }
+
+    /// Left click while holding or aiming the rifle fires a round (`Flow::Cancel` suppresses
+    /// vanilla mining and melee punches).
+    fn key_mapping_pre(&self, host: &mut dyn ClientHost, event: &mut KeyMappingPreEvent<'_>) -> Flow {
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        if event.mapping == ATTACK_MAPPING && event.pressed && holding && host.playing() {
             PENDING_FIRE.store(true, Ordering::Relaxed);
-            return mod_api::Flow::Cancel;
+            return Flow::Cancel;
         }
-        mod_api::Flow::Continue
+        Flow::Continue
     }
 
-    /// The client tick: heartbeat for the aim flag, then the payload sends
-    /// (they need this mutable client host).
     fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
-        // End a stale aim: dropping or swapping the rifle stops its use
-        // without a release, which used to leave the vignette and the fire
-        // gate stuck on.
         let tick = CLIENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
         if AIMING.load(Ordering::Relaxed)
-            && tick - AIM_LAST_TICK.load(Ordering::Relaxed) > 2
+            && tick.saturating_sub(AIM_LAST_TICK.load(Ordering::Relaxed)) > 2
         {
             AIMING.store(false, Ordering::Relaxed);
         }
-        let Some(input) = RIFLE_INPUT.get() else { return };
-        // One reload payload per queued keybind click; clicks that happened
-        // behind an open screen never reach us. Each sent press starts the
-        // reload dip; the server paces the cartridges (RELOAD_TICKS).
+
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        let Some(input) = RIFLE_INPUT.get() else {
+            return;
+        };
+
+        if !host.playing() || !holding {
+            PENDING_FIRE.store(false, Ordering::Relaxed);
+            CLIENT_SPRINTING.store(false, Ordering::Relaxed);
+            CLIENT_SNEAKING.store(false, Ordering::Relaxed);
+            if !holding && CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
+                let _ = input.send(
+                    host,
+                    &RifleInput {
+                        action: VarInt(ACTION_RELOAD_CANCEL),
+                    },
+                );
+            }
+            return;
+        }
+
+        let sneak_down = matches!(host.mapping("key.sneak"), Ok(Some(m)) if m.down);
+        let sprint_down = matches!(host.mapping("key.sprint"), Ok(Some(m)) if m.down);
+        let forward_down = matches!(host.mapping("key.forward"), Ok(Some(m)) if m.down);
+        let sprinting = sprint_down && forward_down && !sneak_down;
+        CLIENT_SNEAKING.store(sneak_down, Ordering::Relaxed);
+        CLIENT_SPRINTING.store(sprinting, Ordering::Relaxed);
+
+        if sprinting {
+            if AIMING.swap(false, Ordering::Relaxed) {
+                let _ = host.set_mapping_down("key.use", false);
+            }
+            if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
+                PENDING_RELOAD_CANCEL.store(true, Ordering::Relaxed);
+            }
+        }
+
+        if CLIENT_RELOADING.load(Ordering::Relaxed) && AIMING.swap(false, Ordering::Relaxed) {
+            let _ = host.set_mapping_down("key.use", false);
+        }
+
+        let mut want_reload = false;
         while host.consume_click(MOD_ID, RELOAD_MAPPING) {
+            want_reload = true;
+        }
+
+        if PENDING_RELOAD_CANCEL.swap(false, Ordering::Relaxed) {
             let _ = input.send(
                 host,
                 &RifleInput {
-                    action: VarInt(ACTION_RELOAD),
+                    action: VarInt(ACTION_RELOAD_CANCEL),
                 },
             );
-            RELOAD_ANIM_START.store(tick, Ordering::Relaxed);
         }
+
         if PENDING_FIRE.swap(false, Ordering::Relaxed) {
             let _ = input.send(
                 host,
@@ -292,109 +624,263 @@ impl Hooks for Mod {
                     action: VarInt(ACTION_FIRE),
                 },
             );
-            // The recoil + lever cycle plays on send; if the server refuses
-            // the shot (lever mid-cycle, empty tube) the dip still reads as
-            // the attempt.
-            LEVER_ANIM_START.store(tick, Ordering::Relaxed);
+        }
+
+        if want_reload && !CLIENT_RELOADING.load(Ordering::Relaxed) && !sprinting {
+            AIMING.store(false, Ordering::Relaxed);
+            let _ = host.set_mapping_down("key.use", false);
+            let _ = input.send(
+                host,
+                &RifleInput {
+                    action: VarInt(ACTION_RELOAD),
+                },
+            );
         }
     }
 
-    /// Bake the player model once, so the first-person arm is the player's own
-    /// (skin, sleeve and all) rather than a box of the mod's. A layer that will
-    /// not bake leaves the rifle handless, as it was before.
-    fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
-        let _ = PLAYER_ARM.set(host.bake_layer("minecraft:player#main"));
-    }
-
-    /// The server tick feeds the lever state's clock.
     fn server_tick(&self, _: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
             SERVER_TICKS.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// The aim zoom: the FOV scale eases toward AIM_FOV as the sights come
-    /// up, and back out as the aim drops — one shared eased value
-    /// (`ADS_BITS`), advanced here once per frame, also drives the vignette
-    /// and the gun's slide in `render_hand`.
-    fn compute_fov_modifier(&self, _: &dyn ClientHost, event: &mut ComputeFovModifierEvent<'_>) {
-        let target: f32 = if AIMING.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
-        let value = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
-        let value = value + (target - value) * 0.3;
-        ADS_BITS.store(value.to_bits(), Ordering::Relaxed);
-        if value > 0.001 {
-            event.modifier = 1.0 - (1.0 - AIM_FOV) * value;
-        }
-    }
-
-    /// First-person pose of the rifle, per frame: at full aim the sights sit
-    /// on the camera axis (ADS_OFFSET); a shot adds a recoil kick that decays
-    /// into the lever's roll-and-dip cycle; each cartridge loaded dips the
-    /// gun. `render`'s transform is view-space (+x right, +y up, -z into the
-    /// screen), applied before the hand's own pose, so the offsets compose
-    /// with the item's display transform directly.
-    fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> mod_api::Flow {
-        let render = &mut *event.render;
-        if render.hand != Hand::Main {
-            return mod_api::Flow::Continue;
-        }
-        let Some(rifle) = RIFLE_KEY.get().copied() else {
-            return mod_api::Flow::Continue;
+    fn level_tick_post(&self, host: HostSide<'_>, _: &mut LevelTickPostEvent) {
+        let HostSide::Server(host) = host else {
+            return;
         };
-        if !matches!(render.stack.map(|stack| stack.item()), Some(item) if item == rifle) {
-            return mod_api::Flow::Continue;
-        }
-        let aim = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
-        let mut offset = [ADS_OFFSET[0] * aim, ADS_OFFSET[1] * aim, ADS_OFFSET[2] * aim];
-        let mut rotate = [0.0f32; 3];
-        let now = CLIENT_TICKS.load(Ordering::Relaxed);
-        // The shot cycle: a fast recoil kick, then the lever's roll-and-dip.
-        let lever = LEVER_ANIM_START.load(Ordering::Relaxed);
-        if lever != u64::MAX {
-            let p = (now.saturating_sub(lever) as f32 + render.partial) / LEVER_ANIM_TICKS;
-            if p >= 1.0 {
-                LEVER_ANIM_START.store(u64::MAX, Ordering::Relaxed);
-            } else {
-                let recoil = (-6.0 * p).exp();
-                offset[2] += 0.10 * recoil; // kicked back toward the shoulder
-                rotate[0] += 7.0 * recoil; // muzzle rise
-                let dip = (((p - 0.2) / 0.8).clamp(0.0, 1.0) * PI).sin();
-                rotate[2] += 10.0 * dip; // canted right as the lever swings
-                offset[1] -= 0.05 * dip;
-            }
-        }
-        // One cartridge in: a short dip-and-roll.
-        let reload = RELOAD_ANIM_START.load(Ordering::Relaxed);
-        if reload != u64::MAX {
-            let p = (now.saturating_sub(reload) as f32 + render.partial) / RELOAD_ANIM_TICKS;
-            if p >= 1.0 {
-                RELOAD_ANIM_START.store(u64::MAX, Ordering::Relaxed);
-            } else {
-                let dip = (p * PI).sin();
-                offset[1] -= 0.07 * dip;
-                offset[0] += 0.02 * dip;
-                rotate[2] += 8.0 * dip;
-            }
-        }
-        for axis in 0..3 {
-            render.translation[axis] += offset[axis];
-            render.rotation[axis] += rotate[axis];
-        }
-        draw_forearm(event);
-        mod_api::Flow::Continue
+        let now = SERVER_TICKS.load(Ordering::Relaxed);
+        tick_pending_lever_clicks(host, now);
+        tick_reload_sessions(host, now);
     }
 
-    /// The aim vignette: vanilla's own `misc/vignette` texture blitted full
-    /// screen with the VIGNETTE blend (dst * (1 - src)), exactly how the game
-    /// frames dark areas — the eased aim strength scales its brightness, so
-    /// the edges close in as the sights rise. Hidden with the F1 HUD.
+    /// Per-frame animation stepper (`event.elapsed`) + 240Hz camera recoil climb & partial recovery.
+    fn render_frame_pre(&self, host: &mut dyn ClientHost, event: &mut RenderFramePreEvent) {
+        FRAME_SEQ.fetch_add(1, Ordering::Relaxed);
+        if host.is_paused() {
+            return;
+        }
+        let dt = event.elapsed.as_secs_f32().clamp(0.0, 0.05);
+        if dt <= 0.0 {
+            return;
+        }
+
+        let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        let aiming_want = holding
+            && AIMING.load(Ordering::Relaxed)
+            && !CLIENT_RELOADING.load(Ordering::Relaxed)
+            && !CLIENT_SPRINTING.load(Ordering::Relaxed);
+        let reload_want = holding && CLIENT_RELOADING.load(Ordering::Relaxed);
+
+        let mut cam_delta_pitch = 0.0_f32;
+        let mut cam_delta_yaw = 0.0_f32;
+
+        {
+            let mut anim = client_anim().lock().unwrap();
+            if !holding {
+                anim.aim_dyn.reset(0.0);
+                anim.recoil_dyn.reset(0.0);
+                anim.reload_dyn.reset(0.0);
+                anim.shot_timer = None;
+                anim.cam_recoil_timer = None;
+                anim.jolt_timer = 0.0;
+                anim.dry_timer = 0.0;
+                anim.shell_timer = None;
+                ADS_BITS.store(0.0_f32.to_bits(), Ordering::Relaxed);
+                return;
+            }
+
+            let aim_y = anim.aim_dyn.step(dt, if aiming_want { 1.0 } else { 0.0 });
+            ADS_BITS.store(aim_y.clamp(0.0, 1.2).to_bits(), Ordering::Relaxed);
+
+            let _ = anim.reload_dyn.step(dt, if reload_want { 1.0 } else { 0.0 });
+
+            let kick_target = if let Some(cur) = anim.shot_timer {
+                let next = cur + dt;
+                anim.shot_timer = if next >= 0.52 { None } else { Some(next) };
+                recoil_envelope(cur)
+            } else {
+                0.0
+            };
+            let _ = anim.recoil_dyn.step(dt, kick_target);
+
+            if let Some(t0) = anim.cam_recoil_timer {
+                let t1 = t0 + dt;
+                let (cp0, cy0) = cam_recoil_curve(t0);
+                let (cp1, cy1) = cam_recoil_curve(t1);
+                cam_delta_pitch = (cp1 - cp0) * anim.cam_pitch_kick;
+                cam_delta_yaw = (cy1 - cy0) * anim.cam_yaw_kick;
+                anim.cam_recoil_timer = if t1 >= 0.385 { None } else { Some(t1) };
+            }
+
+            if anim.jolt_timer > 0.0 {
+                anim.jolt_timer = (anim.jolt_timer - dt).max(0.0);
+            }
+            if anim.dry_timer > 0.0 {
+                anim.dry_timer = (anim.dry_timer - dt).max(0.0);
+            }
+            if let Some(st) = &mut anim.shell_timer {
+                *st += dt;
+                if *st >= 0.24 {
+                    anim.shell_timer = None;
+                }
+            }
+        }
+
+        if (cam_delta_pitch.abs() > 1e-5 || cam_delta_yaw.abs() > 1e-5)
+            && let Some(cam) = host.camera_entity()
+            && let Some([yaw, pitch]) = cam.rotation(host)
+        {
+            // Negative pitch looks up in Minecraft; upward recoil subtracts from pitch.
+            let new_pitch = (pitch - cam_delta_pitch).clamp(-89.9, 89.9);
+            let new_yaw = yaw + cam_delta_yaw;
+            let _ = host.set_local_rotation(new_yaw, new_pitch);
+        }
+    }
+
+    /// World FOV zoom per rendered frame (`ViewportEvent.ComputeFov`), synchronized with `ADS_BITS`.
+    fn compute_fov(&self, _: &dyn ClientHost, event: &mut ComputeFovEvent) {
+        let aim = aim_progress().clamp(0.0, 1.15);
+        if aim > 0.001 {
+            let scale = 1.0 - (1.0 - AIM_FOV) * aim;
+            let scaled = (event.degrees * scale).clamp(1.0, 179.0);
+            if scaled.is_finite() {
+                event.degrees = scaled;
+            }
+        }
+    }
+
+    /// Proportional mouse sensitivity scaling while aiming down sights.
+    fn calculate_player_turn(&self, _: &dyn ClientHost, event: &mut CalculatePlayerTurnEvent) {
+        let aim = aim_progress().clamp(0.0, 1.0);
+        if aim > 0.001 {
+            let sens_scale = 1.0 - (1.0 - AIM_FOV) * aim * 0.85;
+            event.mouse_sensitivity *= f64::from(sens_scale);
+        }
+    }
+
+    /// Transient high-frequency shot micro-jolt (`65 ms`).
+    fn camera_pose(&self, _: &dyn ClientHost, event: &mut CameraPoseEvent<'_>) {
+        let (jolt, sign) = {
+            let anim = client_anim().lock().unwrap();
+            (anim.jolt_timer, anim.jolt_yaw_sign)
+        };
+        if jolt > 0.0 {
+            let u = (jolt / 0.065).clamp(0.0, 1.0);
+            let wave = (PI * (1.0 - u) * 2.0).sin() * u;
+            event.pitch -= 0.42 * wave;
+            event.yaw += 0.24 * wave * sign;
+        }
+    }
+
+    fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> Flow {
+        let Some(rifle) = RIFLE_KEY.get().copied() else {
+            return Flow::Continue;
+        };
+        {
+            let render = &mut *event.render;
+            if render.hand != Hand::Main {
+                return Flow::Continue;
+            }
+            if !matches!(render.stack.map(|stack| stack.item()), Some(item) if item == rifle) {
+                RIFLE_SEEN_FRAME.store(0, Ordering::Relaxed);
+                return Flow::Continue;
+            }
+        }
+        RIFLE_SEEN_FRAME.store(FRAME_SEQ.load(Ordering::Relaxed), Ordering::Relaxed);
+
+        let (
+            aim,
+            kick,
+            reload_blend,
+            shot_t,
+            ads_factor,
+            crouch_factor,
+            roll_sign,
+            dry_t,
+            shell_t,
+        ) = {
+            let anim = client_anim().lock().unwrap();
+            (
+                anim.aim_dyn.y,
+                anim.recoil_dyn.y,
+                anim.reload_dyn.y.clamp(0.0, 1.15),
+                anim.shot_timer,
+                anim.shot_ads_factor,
+                anim.shot_crouch_factor,
+                anim.shot_roll_sign,
+                anim.dry_timer,
+                anim.shell_timer,
+            )
+        };
+
+        let lever = shot_t.map_or(0.0, lever_envelope);
+        let shell_pulse = shell_t.map_or(0.0, |t| (PI * (t / 0.24).clamp(0.0, 1.0)).sin());
+
+        {
+            let render = &mut *event.render;
+            let aim_clamped = aim.clamp(0.0, 1.0);
+            // Natural shoulder-pocket parabolic dip while raising/lowering sights.
+            let arc_dip = -0.032 * (4.0 * aim_clamped * (1.0 - aim_clamped));
+            render.translation[0] += ADS_OFFSET[0] * aim;
+            render.translation[1] += ADS_OFFSET[1] * aim + arc_dip;
+            render.translation[2] += ADS_OFFSET[2] * aim;
+            render.rotation[2] += 3.2 * (1.0 - aim_clamped) * (1.0 - reload_blend.clamp(0.0, 1.0));
+
+            // Rear-stock-pivoted 2nd-order visual recoil kick.
+            if kick.abs() > 1e-4 {
+                let pitch_deg = 7.5 * kick * ads_factor * crouch_factor;
+                let pitch_rad = pitch_deg * (PI / 180.0);
+                let pivot = model_texel_to_hand(RECOIL_PIVOT_TEXELS);
+                let py = HAND_BASE[1] - render.equip * 0.6 + pivot[1];
+                let pz = HAND_BASE[2] + pivot[2];
+                let dy = py - (py * pitch_rad.cos() - pz * pitch_rad.sin());
+                let dz = pz - (py * pitch_rad.sin() + pz * pitch_rad.cos());
+
+                render.translation[1] += dy + 0.008 * kick * ads_factor;
+                render.translation[2] += dz + 0.105 * kick * ads_factor;
+                render.rotation[0] += pitch_deg;
+                render.rotation[1] += 0.9 * kick * ads_factor * roll_sign;
+                render.rotation[2] += 1.4 * kick * ads_factor * roll_sign;
+            }
+
+            // Lever-action cycle between shots (`0.13..0.48 s`).
+            if lever > 1e-4 {
+                let damp = 1.0 - 0.35 * aim_clamped;
+                render.translation[1] -= 0.042 * lever * damp;
+                render.translation[2] += 0.018 * lever * damp;
+                render.rotation[0] -= 3.2 * lever * damp;
+                render.rotation[2] += 11.0 * lever * damp;
+            }
+
+            // Empty-chamber dry click flinch.
+            if dry_t > 0.0 {
+                let flinch = (PI * (dry_t / 0.09).clamp(0.0, 1.0)).sin();
+                render.translation[2] += 0.010 * flinch;
+                render.rotation[0] -= 0.9 * flinch;
+            }
+
+            // Continuous loading-gate tilt + per-shell insertion seat pulse.
+            if reload_blend > 1e-3 || shell_pulse > 1e-3 {
+                render.translation[0] -= 0.048 * reload_blend;
+                render.translation[1] -= 0.042 * reload_blend + 0.016 * shell_pulse;
+                render.translation[2] += 0.038 * reload_blend + 0.012 * shell_pulse;
+                render.rotation[0] += 5.5 * reload_blend + 2.8 * shell_pulse;
+                render.rotation[1] += 8.5 * reload_blend;
+                render.rotation[2] -= 14.5 * reload_blend - 3.5 * shell_pulse;
+            }
+        }
+
+        draw_arms(event, lever, reload_blend, shell_pulse);
+        Flow::Continue
+    }
+
     fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-        let aim = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
+        let aim = aim_progress().clamp(0.0, 1.0);
         if aim < 0.02 || event.gui_hidden {
             return;
         }
         let [w, h] = event.batch.size();
-        let brightness = ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0) as u32;
+        let brightness = ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0).clamp(0.0, 255.0) as u32;
         let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
         let (w, h) = (w as i32, h as i32);
         let _ = event.batch.gui_paint(&[GuiDraw::Blit {
@@ -412,43 +898,86 @@ impl Hooks for Mod {
     }
 }
 
-/// The server's answer to one rifle input. The context carries the sending
-/// player and the server host on the main thread.
 fn on_rifle_input(value: RifleInput, cx: &mut dyn IPayloadContext) -> Result<(), String> {
     let player = cx.player().map_err(|e| format!("{e:?}"))?;
     let host = cx.server_host().map_err(|e| format!("{e:?}"))?;
     match value.action.0 {
         ACTION_FIRE => {
-            let Some(smoke) = SMOKE_KEY.get().copied() else {
-                return Ok(());
-            };
-            fire_rifle(host, player, smoke);
+            if let Some(smoke) = SMOKE_KEY.get().copied() {
+                fire_rifle(host, player, smoke);
+            }
         }
-        ACTION_RELOAD => reload_one(host, player),
+        ACTION_RELOAD => start_reload(host, player),
+        ACTION_RELOAD_CANCEL => {
+            let _ = cancel_reload_session(host, player);
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn on_rifle_sync(value: RifleSync, _: &mut dyn IPayloadContext) -> Result<(), String> {
+    match value.kind.0 {
+        SYNC_SHOT => {
+            CLIENT_RELOADING.store(false, Ordering::Relaxed);
+            client_anim().lock().unwrap().on_shot();
+        }
+        SYNC_DRY_CLICK => {
+            client_anim().lock().unwrap().on_dry_click();
+        }
+        SYNC_RELOAD_START => {
+            CLIENT_RELOADING.store(true, Ordering::Relaxed);
+            AIMING.store(false, Ordering::Relaxed);
+        }
+        SYNC_SHELL_INSERTED => {
+            CLIENT_RELOADING.store(true, Ordering::Relaxed);
+            client_anim().lock().unwrap().shell_timer = Some(0.0);
+        }
+        SYNC_RELOAD_END => {
+            CLIENT_RELOADING.store(false, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn send_sync(host: &mut dyn ServerHost, player: mod_api::PlayerRef, kind: i32) {
+    if let Some(sync) = RIFLE_SYNC.get() {
+        let _ = sync.send(host, player, &RifleSync { kind: VarInt(kind) });
+    }
 }
 
 struct Winchester {
     smoke: ParticleKey,
 }
 
-/// Rounds in the tube, read from the stack's damage component.
 fn rounds(stack: &ItemStack) -> u32 {
     stack.damage().min(TUBE_CAPACITY)
 }
 
-/// The acting player of a server hook (the one using the rifle), or none when
-/// the call has no acting player.
 fn shooter(host: &dyn ServerHost) -> Option<mod_api::PlayerRef> {
     host.players().acting_player()
 }
 
-/// Play a sound at the player through the level's own broadcast
-/// (`ServerLevel.playSound(null, ...)`): every nearby player hears it and no
-/// command feedback reaches anyone's chat.
-fn play_sound_at(host: &mut dyn ServerHost, player: mod_api::PlayerRef, sound: &str, volume: f32, pitch: f32) {
+fn is_player_reloading(uuid: u128) -> bool {
+    RELOAD_SESSIONS.lock().unwrap().contains_key(&uuid)
+}
+
+fn cancel_reload_session(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
+    let removed = RELOAD_SESSIONS.lock().unwrap().remove(&player.uuid()).is_some();
+    if removed {
+        send_sync(host, player, SYNC_RELOAD_END);
+    }
+    removed
+}
+
+fn play_sound_at(
+    host: &mut dyn ServerHost,
+    player: mod_api::PlayerRef,
+    sound: &str,
+    volume: f32,
+    pitch: f32,
+) {
     let entity = player.entity();
     let Some(level) = entity.level(host) else {
         return;
@@ -459,7 +988,6 @@ fn play_sound_at(host: &mut dyn ServerHost, player: mod_api::PlayerRef, sound: &
     level.play_sound(host, sound, at, SoundSource::Players, volume, pitch);
 }
 
-/// A puff of black-powder smoke just past the muzzle, along the view vector.
 fn smoke_at_muzzle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
     let entity = player.entity();
     let Some(level) = entity.level(host) else {
@@ -480,18 +1008,27 @@ fn smoke_at_muzzle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke:
     level.send_particles(host, &options, None, muzzle, [0.05, 0.05, 0.05], 0.02, 8);
 }
 
-/// The first rifle in the player's inventory, with its slot.
-fn find_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> Option<(u32, ItemStack)> {
+/// Reads the Winchester strictly from the player's currently selected hotbar slot (`0..9`).
+fn held_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> Option<(u32, ItemStack)> {
+    let sel = player.selected_slot(host)? as u32;
     let slots = player.inventory_slots(host)?;
     for (slot, stack) in slots {
-        if stack.item().id(host).to_string() == WINCHESTER {
+        if slot == sel && stack.item().id(host).to_string() == WINCHESTER {
             return Some((slot, stack));
         }
     }
     None
 }
 
-/// Take one cartridge from the player's inventory. Returns true when taken.
+fn has_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
+    let Some(slots) = player.inventory_slots(host) else {
+        return false;
+    };
+    slots
+        .into_iter()
+        .any(|(_, stack)| stack.item().id(host).to_string() == CARTRIDGE && stack.count() > 0)
+}
+
 fn take_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool {
     let Some(slots) = player.inventory_slots(host) else {
         return false;
@@ -515,154 +1052,346 @@ fn take_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool
     false
 }
 
-/// Load one cartridge into the tube (one R press, RELOAD_TICKS apart), with
-/// the loading sounds and the ammo counter. Server-side.
-fn reload_one(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
-    let uuid = player.uuid();
-    let now = SERVER_TICKS.load(Ordering::Relaxed);
-    let reload_ready = RELOAD_READY
-        .lock()
-        .unwrap()
-        .get(&uuid)
-        .copied()
-        .unwrap_or(0);
-    if reload_ready > now {
-        return;
-    }
-    let Some((slot, rifle)) = find_rifle(host, player) else {
-        return;
-    };
-    let loaded = rounds(&rifle);
-    if loaded >= TUBE_CAPACITY || !take_cartridge(host, player) {
-        return;
-    }
-    RELOAD_READY.lock().unwrap().insert(uuid, now + RELOAD_TICKS);
-    let mut rifle = rifle;
-    rifle.set_damage(loaded + 1);
-    if player.set_inventory_slot(host, slot, Some(rifle)).is_err() {
-        return;
-    }
-    let full = loaded + 1 == TUBE_CAPACITY;
-    if full {
-        play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, READY_PITCH);
-    } else {
-        play_sound_at(host, player, LOAD_SOUND, UI_VOLUME, LOAD_PITCH);
-    }
-    let _ = player.action_bar(
-        host,
-        Text::literal(format!("{} / {}", loaded + 1, TUBE_CAPACITY)),
-    );
-}
+fn compute_spread(host: &dyn ServerHost, player: mod_api::PlayerRef, now: u64) -> f32 {
+    let entity = player.entity();
+    let crouching = entity.is_crouching(host).unwrap_or(false);
+    let sprinting = entity.is_sprinting(host).unwrap_or(false);
+    let on_ground = entity.on_ground(host).unwrap_or(true);
+    let horiz_speed_sq = entity
+        .velocity(host)
+        .map_or(0.0, |[vx, _, vz]| vx * vx + vz * vz);
+    let moving = sprinting || !on_ground || horiz_speed_sq > 0.012;
 
-/// Fire one round, if the lever was cycled (aimed LEVER_TICKS, with the use
-/// still ticking) and the tube is loaded. Cycling starts over after each
-/// shot. Server-side.
-fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
-    let uuid = player.uuid();
-    let now = SERVER_TICKS.load(Ordering::Relaxed);
-    let (aimed, last_seen) = AIM_TICKS
+    let hip = if moving {
+        SPREAD_HIP_MOVING
+    } else if crouching {
+        SPREAD_HIP_CROUCH
+    } else {
+        SPREAD_HIP_STAND
+    };
+
+    let (held, last_seen) = AIM_TICKS
         .lock()
         .unwrap()
-        .get(&uuid)
+        .get(&player.uuid())
         .copied()
         .unwrap_or((0, 0));
-    if aimed < LEVER_TICKS || now - last_seen > 2 {
-        return; // the lever is still cycling, or the aim went stale (dropped)
+    if held <= 0 || now.saturating_sub(last_seen) > 2 {
+        return hip;
     }
-    // The post-shot lever delay. AIM_TICKS alone could never hold it: the
-    // next on_use_tick overwrote the reset, so a fast clicker outpaced the
-    // lever. LEVER_READY stands between shots.
-    let lever_ready = LEVER_READY
-        .lock()
-        .unwrap()
-        .get(&uuid)
-        .copied()
-        .unwrap_or(0);
+
+    let ads = if moving {
+        SPREAD_ADS_MOVING
+    } else if crouching {
+        SPREAD_ADS_CROUCH
+    } else {
+        SPREAD_ADS_STAND
+    };
+
+    if held >= ADS_SETTLE_TICKS {
+        ads
+    } else {
+        let frac = (held as f32) / (ADS_SETTLE_TICKS as f32);
+        hip + (ads - hip) * frac
+    }
+}
+
+fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: ParticleKey) {
+    let Some((slot, rifle)) = held_rifle(host, player) else {
+        return;
+    };
+    let uuid = player.uuid();
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    let loaded = rounds(&rifle);
+
+    // Firing mid-reload interrupts the reload immediately if >= 1 round is in the tube.
+    if is_player_reloading(uuid) {
+        let _ = cancel_reload_session(host, player);
+        if loaded == 0 {
+            play_sound_at(host, player, DRY_SOUND, UI_VOLUME, DRY_PITCH);
+            send_sync(host, player, SYNC_DRY_CLICK);
+            return;
+        }
+    }
+
+    let lever_ready = LEVER_READY.lock().unwrap().get(&uuid).copied().unwrap_or(0);
     if lever_ready > now {
         return;
     }
-    let Some((slot, rifle)) = find_rifle(host, player) else {
-        return;
-    };
-    let loaded = rounds(&rifle);
+
     if loaded == 0 {
         play_sound_at(host, player, DRY_SOUND, UI_VOLUME, DRY_PITCH);
+        send_sync(host, player, SYNC_DRY_CLICK);
         return;
     }
-    let Ok(bullet) = Identifier::parse(BULLET) else { return };
-    let Some(item) = host.item_key(&bullet) else { return };
+
+    let Ok(bullet) = Identifier::parse(BULLET) else {
+        return;
+    };
+    let Some(item) = host.item_key(&bullet) else {
+        return;
+    };
     let Some(carried) = ItemStack::new(item, 1) else {
         return;
     };
     let owner = LivingRef::new(player.entity());
-    // Rifle shot: fast and flat; snowball-template ballistics apply.
-    let shot = host.spawn_projectile_from_rotation(owner, &bullet, &carried, 0.0, 6.0, 0.35);
+    let spread = compute_spread(host, player, now);
+    let shot =
+        host.spawn_projectile_from_rotation(owner, &bullet, &carried, 0.0, BULLET_SPEED, spread);
     if shot.is_none() {
         return;
     }
+
+    let remaining = loaded - 1;
     let mut rifle = rifle;
-    rifle.set_damage(loaded - 1);
+    rifle.set_damage(remaining);
     let _ = player.set_inventory_slot(host, slot, Some(rifle));
-    AIM_TICKS.lock().unwrap().insert(uuid, (0, now));
-    LEVER_READY.lock().unwrap().insert(uuid, now + LEVER_TICKS as u64);
+
+    LEVER_READY.lock().unwrap().insert(uuid, now + LEVER_TICKS);
+    if remaining > 0 {
+        PENDING_LEVER_CLICKS
+            .lock()
+            .unwrap()
+            .push((uuid, now + LEVER_CLICK_DELAY_TICKS));
+    }
+
     play_sound_at(host, player, SHOT_SOUND, SHOT_VOLUME, SHOT_PITCH);
     smoke_at_muzzle(host, player, smoke);
     let _ = player.action_bar(
         host,
-        Text::literal(format!("{} / {}", loaded - 1, TUBE_CAPACITY)),
+        Text::literal(format!("{remaining} / {TUBE_CAPACITY}")),
     );
+    send_sync(host, player, SYNC_SHOT);
 }
 
+fn start_reload(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
+    let Some((slot, rifle)) = held_rifle(host, player) else {
+        return;
+    };
+    let uuid = player.uuid();
+    if is_player_reloading(uuid) {
+        return;
+    }
+    if player.entity().is_sprinting(host).unwrap_or(false) {
+        return;
+    }
 
+    let loaded = rounds(&rifle);
+    if loaded >= TUBE_CAPACITY {
+        let _ = player.action_bar(host, Text::literal(format!("{loaded} / {TUBE_CAPACITY}")));
+        return;
+    }
+
+    let infinite = player.has_infinite_materials(host).unwrap_or(false);
+    if !infinite && !has_cartridge(host, player) {
+        play_sound_at(host, player, DRY_SOUND, UI_VOLUME, DRY_PITCH);
+        let _ = player.action_bar(host, Text::literal(format!("{loaded} / {TUBE_CAPACITY}")));
+        return;
+    }
+
+    AIM_TICKS.lock().unwrap().remove(&uuid);
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    RELOAD_SESSIONS.lock().unwrap().insert(
+        uuid,
+        ReloadSession {
+            slot,
+            phase: ReloadPhase::Opening {
+                until: now + RELOAD_OPEN_TICKS,
+            },
+        },
+    );
+    play_sound_at(host, player, CLICK_SOUND, UI_VOLUME * 0.85, LEVER_PITCH);
+    send_sync(host, player, SYNC_RELOAD_START);
+}
+
+fn tick_pending_lever_clicks(host: &mut dyn ServerHost, now: u64) {
+    let mut due = Vec::new();
+    {
+        let mut list = PENDING_LEVER_CLICKS.lock().unwrap();
+        let mut i = 0;
+        while i < list.len() {
+            let (uuid, tick_at) = list[i];
+            if now >= tick_at {
+                if host.entity_by_uuid(EntityUuid(uuid)).is_some() {
+                    due.push(uuid);
+                    list.swap_remove(i);
+                    continue;
+                } else if now.saturating_sub(tick_at) > 40 {
+                    list.swap_remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    for uuid in due {
+        if let Some(player) = host.player(uuid)
+            && held_rifle(host, player).is_some()
+        {
+            play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, LEVER_PITCH);
+        }
+    }
+}
+
+fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
+    let uuids: Vec<u128> = RELOAD_SESSIONS.lock().unwrap().keys().copied().collect();
+    for uuid in uuids {
+        // Process only sessions whose player belongs to the server level currently ticking.
+        let Some(entity) = host.entity_by_uuid(EntityUuid(uuid)) else {
+            continue;
+        };
+        let Some(player) = host.player(uuid) else {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            continue;
+        };
+        let Some(mut session) = RELOAD_SESSIONS.lock().unwrap().get(&uuid).copied() else {
+            continue;
+        };
+
+        let sprinting = entity.is_sprinting(host).unwrap_or(false);
+        let valid_rifle = held_rifle(host, player).filter(|(sel, _)| *sel == session.slot);
+
+        let Some((slot, rifle)) = valid_rifle else {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            send_sync(host, player, SYNC_RELOAD_END);
+            continue;
+        };
+        if sprinting {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            send_sync(host, player, SYNC_RELOAD_END);
+            continue;
+        }
+
+        let mut finished = false;
+        match session.phase {
+            ReloadPhase::Opening { until } => {
+                if now >= until {
+                    session.phase = ReloadPhase::Inserting { next_tick: now };
+                }
+            }
+            ReloadPhase::Inserting { next_tick } => {
+                if now >= next_tick {
+                    let loaded = rounds(&rifle);
+                    let infinite = player.has_infinite_materials(host).unwrap_or(false);
+                    if loaded >= TUBE_CAPACITY {
+                        session.phase = ReloadPhase::Closing {
+                            until: now + RELOAD_CLOSE_TICKS,
+                        };
+                    } else if infinite || take_cartridge(host, player) {
+                        let next_loaded = loaded + 1;
+                        let mut rifle = rifle;
+                        rifle.set_damage(next_loaded);
+                        if player.set_inventory_slot(host, slot, Some(rifle)).is_err() {
+                            finished = true;
+                        } else {
+                            if next_loaded >= TUBE_CAPACITY {
+                                play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, READY_PITCH);
+                                session.phase = ReloadPhase::Closing {
+                                    until: now + RELOAD_CLOSE_TICKS,
+                                };
+                            } else {
+                                play_sound_at(host, player, LOAD_SOUND, UI_VOLUME, LOAD_PITCH);
+                                if infinite || has_cartridge(host, player) {
+                                    session.phase = ReloadPhase::Inserting {
+                                        next_tick: now + RELOAD_INSERT_TICKS,
+                                    };
+                                } else {
+                                    session.phase = ReloadPhase::Closing {
+                                        until: now + RELOAD_CLOSE_TICKS,
+                                    };
+                                }
+                            }
+                            let _ = player.action_bar(
+                                host,
+                                Text::literal(format!("{next_loaded} / {TUBE_CAPACITY}")),
+                            );
+                            send_sync(host, player, SYNC_SHELL_INSERTED);
+                        }
+                    } else {
+                        session.phase = ReloadPhase::Closing {
+                            until: now + RELOAD_CLOSE_TICKS,
+                        };
+                    }
+                }
+            }
+            ReloadPhase::Closing { until } => {
+                if now >= until {
+                    finished = true;
+                }
+            }
+        }
+
+        if finished {
+            RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
+            LEVER_READY.lock().unwrap().insert(uuid, now + 2);
+            send_sync(host, player, SYNC_RELOAD_END);
+        } else {
+            RELOAD_SESSIONS.lock().unwrap().insert(uuid, session);
+        }
+    }
+}
 
 #[mod_api::horizon_part]
 impl ItemPart for Winchester {
-    /// A use duration above zero is what makes a mod item usable over time
-    /// on a right click (vanilla's `Item.use` → `startUsingItem`). For the
-    /// rifle, "in use" is the aim.
     fn use_duration(&self, _: &dyn Host, event: &mut UseDurationEvent<'_>) {
         event.duration = USE_DURATION;
     }
 
-    /// Ammo gauge under the rifle icon. Vanilla's damage bar would lie here:
-    /// our "damage" component is the tube's load (0..=8) on a max_damage=100
-    /// item, so it would show a nearly full green bar on a full tube and none
-    /// when empty. Replace it with the tube's fullness, in brass.
     fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
-        let rounds = rounds(&event.stack);
-        let width = (rounds * 13 / TUBE_CAPACITY) as i32;
+        let loaded = rounds(&event.stack);
+        let width = (loaded * 13 / TUBE_CAPACITY) as i32;
         *event.bar = Some((width, AMMO_BAR_RGB));
     }
 
-    /// While aimed: the client flags the aim (zoom, vignette, fire gate) and
-    /// stamps the heartbeat; the server counts lever ticks with a timestamp.
+    /// Suppress vanilla's equip dip whenever ammo count (`damage`) updates in the same slot.
+    fn should_cause_reequip_animation(
+        &self,
+        _: &dyn ClientHost,
+        event: &mut ShouldCauseReequipAnimationEvent<'_>,
+    ) {
+        event.reequip = event.slot_changed;
+    }
+
     fn on_use_tick(&self, host: HostSide<'_>, event: &mut OnUseTickEvent<'_>) {
         match host {
             HostSide::Client(_) => {
-                AIMING.store(true, Ordering::Relaxed);
-                AIM_LAST_TICK.store(CLIENT_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+                if !CLIENT_RELOADING.load(Ordering::Relaxed)
+                    && !CLIENT_SPRINTING.load(Ordering::Relaxed)
+                {
+                    AIMING.store(true, Ordering::Relaxed);
+                    AIM_LAST_TICK.store(CLIENT_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+                }
             }
             HostSide::Server(host) => {
-                let Some(player) = shooter(host) else { return };
+                let Some(player) = shooter(host) else {
+                    return;
+                };
+                let uuid = player.uuid();
+                if is_player_reloading(uuid) {
+                    AIM_TICKS.lock().unwrap().remove(&uuid);
+                    return;
+                }
                 let held = USE_DURATION - event.remaining;
                 let now = SERVER_TICKS.load(Ordering::Relaxed);
-                let uuid = player.uuid();
                 let mut ticks = AIM_TICKS.lock().unwrap();
-                let was = ticks.get(&uuid).map(|&(n, _)| n);
+                let is_fresh = ticks
+                    .get(&uuid)
+                    .is_none_or(|&(_, prev)| now.saturating_sub(prev) > 3);
                 ticks.insert(uuid, (held, now));
-                // The lever's click, LEVER_TICKS into a re-armed aim: a fresh
-                // aim after a shot (AIM_TICKS starts at 0) crosses the count
-                // exactly when the lever delay ends.
-                if was == Some(0) && held >= LEVER_TICKS {
-                    drop(ticks);
-                    play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, LEVER_PITCH);
+                drop(ticks);
+                if is_fresh
+                    && let Some((_, rifle)) = held_rifle(host, player)
+                {
+                    let loaded = rounds(&rifle);
+                    let _ = player.action_bar(
+                        host,
+                        Text::literal(format!("{loaded} / {TUBE_CAPACITY}")),
+                    );
                 }
             }
         }
     }
 
-    /// Letting go of the aim clears both sides' aim state. The shot itself is
-    /// the left click's payload; nothing fires here anymore.
     fn release_using(&self, host: HostSide<'_>, event: &mut ReleaseUsingEvent<'_>) {
         event.used = true;
         match host {
