@@ -1,15 +1,18 @@
 //! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod).
 //!
-//! Controls (v0.4):
-//! - Hold right click: shoulder and aim the rifle — a fixed zoom
-//!   (`compute_fov_modifier`) and a light vignette (`gui_render_post`) apply
-//!   while aiming. Aiming for at least LEVER_TICKS cycles the lever.
+//! Controls (v0.6):
+//! - Hold right click: shoulder the rifle and aim down the sights — the gun
+//!   slides to the screen's centre (`render_hand`), the view zooms in
+//!   smoothly (`compute_fov_modifier`) and a vanilla vignette frames it
+//!   (`gui_render_post`). Aiming for at least LEVER_TICKS cycles the lever.
 //! - Left click while aiming: fire one round (`key_mapping_pre` cancels the
 //!   vanilla attack, so the rifle never mines or punches, and a typed payload
-//!   asks the server to shoot). After each shot the lever must be cycled
-//!   again (keep holding right click for LEVER_TICKS).
+//!   asks the server to shoot). Each shot kicks (recoil) and the lever cycles
+//!   again: LEVER_TICKS between shots, enforced server-side, with the gun
+//!   rolling through the lever motion in first person.
 //! - R (a real Controls keybind, remappable): load one cartridge per press,
-//!   up to the tube's 8.
+//!   RELOAD_TICKS apart, up to the tube's 8 — the gun dips as each round
+//!   slides in.
 //!
 //! The server stays authoritative: tube load, lever timing, cartridge
 //! consumption and the projectile all live server-side. The client only
@@ -23,13 +26,15 @@
 //! chat). A shot also puffs black-powder smoke past the muzzle.
 
 use mod_api::{
-    ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiRenderPostEvent, Hooks, Host,
-    HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemPart, ItemStack, KeyConflictContext,
-    KeyMappingPreEvent, KeyRegistration, LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions,
-    PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent, ServerHost, ServerTickEvent,
-    ServerTickPhase, SoundSource, Text, ToServer, UseDurationEvent, VarInt,
+    Blend, ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
+    Hand, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemKey, ItemPart,
+    ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, OnUseTickEvent,
+    ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
+    RenderHandEvent, ServerHost, ServerTickEvent, ServerTickPhase, SoundSource, Text, ToServer,
+    UseDurationEvent, VarInt,
 };
 use std::collections::BTreeMap;
+use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -39,7 +44,8 @@ const BULLET: &str = "blackpowder_legacy:bullet";
 
 const TUBE_CAPACITY: u32 = 8;
 const USE_DURATION: i32 = 72000; // vanilla's "use forever" duration
-const LEVER_TICKS: i32 = 8; // aim ticks (0.4 s) cycling the lever before a shot
+const LEVER_TICKS: i32 = 8; // 0.4 s: aim ticks cycling the lever, and the delay between shots
+const RELOAD_TICKS: u64 = 6; // 0.3 s between one cartridge sliding in and the next
 
 /// The mod's own id (horizon-mod.toml), owning the registered keybind.
 const MOD_ID: &str = "blackpowder_legacy";
@@ -47,10 +53,18 @@ const MOD_ID: &str = "blackpowder_legacy";
 const RELOAD_MAPPING: &str = "reload";
 const ATTACK_MAPPING: &str = "key.attack";
 
-/// The aim zoom as a FOV scale (smaller = narrower). Fixed, on purpose.
+/// The aim zoom's deepest FOV scale (smaller = narrower); eased toward it.
 const AIM_FOV: f32 = 0.6;
-/// Vignette strength: the alpha at the screen's outer edge while aiming.
-const VIGNETTE_ALPHA: u32 = 0x55;
+/// How far the vignette darkens at full aim (1.0 is vanilla's invisible).
+const AIM_VIGNETTE: f32 = 0.65;
+
+// First-person animation, in client ticks (matched by the server's delays).
+const LEVER_ANIM_TICKS: f32 = 8.0;
+const RELOAD_ANIM_TICKS: f32 = 6.0;
+/// Where the sights go at full aim, in view-space blocks (+x right, +y up,
+/// -z into the screen): the sight line leaves (0.56, -0.40) for the camera
+/// axis, the gun pulled a touch closer.
+const ADS_OFFSET: [f32; 3] = [-0.56, 0.38, 0.05];
 
 // Vanilla sound events; played through the level broadcast, never via commands.
 const SHOT_SOUND: &str = "minecraft:entity.firework_rocket.blast";
@@ -66,6 +80,10 @@ const UI_VOLUME: f32 = 0.7;
 const DRY_PITCH: f32 = 0.7;
 const LOAD_PITCH: f32 = 1.2;
 const READY_PITCH: f32 = 1.0;
+/// The lever click when the post-shot cycle completes (from the aim ticker's
+/// server half, LEVER_TICKS after a shot).
+const LEVER_SOUND: &str = "minecraft:item.crossbow.loading_end";
+const LEVER_PITCH: f32 = 1.5;
 
 const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
 /// The ammo gauge's colour (0xRRGGBB): brass, like the cartridge cases.
@@ -87,8 +105,15 @@ static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
 /// swapping the held item stops the use *without* a release, so the heartbeat
 /// — not `release_using` alone — is what reliably ends an aim.
 static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
-/// The vignette's animated strength (f32 bits, 0.0..=1.0), eased per frame.
-static VIGNETTE_BITS: AtomicU32 = AtomicU32::new(0);
+/// The eased aim strength (f32 bits, 0.0..=1.0), advanced per frame by
+/// `compute_fov_modifier`; drives the zoom, the vignette and the gun's slide
+/// to the sights.
+static ADS_BITS: AtomicU32 = AtomicU32::new(0);
+/// The client tick the shot cycle (recoil + lever) animation started, or
+/// u64::MAX when idle.
+static LEVER_ANIM_START: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The client tick the reload dip animation started, or u64::MAX when idle.
+static RELOAD_ANIM_START: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Server tick counter, bumped by `server_tick` (end phase).
 static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -98,9 +123,19 @@ static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
 /// "lever armed" state behind — a shot is only honoured while the use is
 /// still ticking.
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
+/// Per-player server tick at which the lever is worked through after the last
+/// shot — the enforced delay between shots (the old AIM_TICKS reset alone was
+/// overwritten by the next `on_use_tick`, so shots used to come out as fast
+/// as the clicks arrived).
+static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
+/// Per-player server tick at which the next cartridge may slide in.
+static RELOAD_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
 
 /// The registered serverbound channel for rifle inputs.
 static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
+/// The rifle's item key, cached so `render_hand` can recognise the held stack
+/// without a registry lookup per frame.
+static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
 /// The smoke particle key, kept for the payload handler (the Part owns one
 /// copy; the free-function handler reaches this one).
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
@@ -120,6 +155,7 @@ impl Hooks for Mod {
         let winchester = r.item_key(WINCHESTER);
         let smoke = r.particle_key(SMOKE_PARTICLE);
         r.item_part(winchester, Winchester { smoke });
+        let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(r.particle_key(SMOKE_PARTICLE));
         // The reload key as a real Controls binding: remappable, persisted in
         // horizon-mods.txt and silent while a screen or the chat is open
@@ -170,7 +206,8 @@ impl Hooks for Mod {
         }
         let Some(input) = RIFLE_INPUT.get() else { return };
         // One reload payload per queued keybind click; clicks that happened
-        // behind an open screen never reach us.
+        // behind an open screen never reach us. Each sent press starts the
+        // reload dip; the server paces the cartridges (RELOAD_TICKS).
         while host.consume_click(MOD_ID, RELOAD_MAPPING) {
             let _ = input.send(
                 host,
@@ -178,6 +215,7 @@ impl Hooks for Mod {
                     action: VarInt(ACTION_RELOAD),
                 },
             );
+            RELOAD_ANIM_START.store(tick, Ordering::Relaxed);
         }
         if PENDING_FIRE.swap(false, Ordering::Relaxed) {
             let _ = input.send(
@@ -186,6 +224,10 @@ impl Hooks for Mod {
                     action: VarInt(ACTION_FIRE),
                 },
             );
+            // The recoil + lever cycle plays on send; if the server refuses
+            // the shot (lever mid-cycle, empty tube) the dip still reads as
+            // the attempt.
+            LEVER_ANIM_START.store(tick, Ordering::Relaxed);
         }
     }
 
@@ -196,42 +238,101 @@ impl Hooks for Mod {
         }
     }
 
-    /// The aim zoom: a fixed FOV scale while the rifle is shouldered.
+    /// The aim zoom: the FOV scale eases toward AIM_FOV as the sights come
+    /// up, and back out as the aim drops — one shared eased value
+    /// (`ADS_BITS`), advanced here once per frame, also drives the vignette
+    /// and the gun's slide in `render_hand`.
     fn compute_fov_modifier(&self, _: &dyn ClientHost, event: &mut ComputeFovModifierEvent<'_>) {
-        if AIMING.load(Ordering::Relaxed) {
-            event.modifier = AIM_FOV;
+        let target: f32 = if AIMING.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        let value = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
+        let value = value + (target - value) * 0.3;
+        ADS_BITS.store(value.to_bits(), Ordering::Relaxed);
+        if value > 0.001 {
+            event.modifier = 1.0 - (1.0 - AIM_FOV) * value;
         }
     }
 
-    /// A light vignette while aiming: soft dark bands fading in from the
-    /// screen edges, eased in and out over a few frames instead of popping.
-    /// Hidden with the F1 HUD. `batch` is the GUI's `DrawContext`; colours
-    /// are ARGB.
-    fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-        let target: f32 = if AIMING.load(Ordering::Relaxed) && !event.gui_hidden {
-            1.0
-        } else {
-            0.0
+    /// First-person pose of the rifle, per frame: at full aim the sights sit
+    /// on the camera axis (ADS_OFFSET); a shot adds a recoil kick that decays
+    /// into the lever's roll-and-dip cycle; each cartridge loaded dips the
+    /// gun. `render`'s transform is view-space (+x right, +y up, -z into the
+    /// screen), applied before the hand's own pose, so the offsets compose
+    /// with the item's display transform directly.
+    fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_>) -> mod_api::Flow {
+        let render = &mut *event.render;
+        if render.hand != Hand::Main {
+            return mod_api::Flow::Continue;
+        }
+        let Some(rifle) = RIFLE_KEY.get().copied() else {
+            return mod_api::Flow::Continue;
         };
-        let value = f32::from_bits(VIGNETTE_BITS.load(Ordering::Relaxed));
-        let value = value + (target - value) * 0.25;
-        VIGNETTE_BITS.store(value.to_bits(), Ordering::Relaxed);
-        if value < 0.02 {
+        if !matches!(render.stack.map(|stack| stack.item()), Some(item) if item == rifle) {
+            return mod_api::Flow::Continue;
+        }
+        let aim = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
+        let mut offset = [ADS_OFFSET[0] * aim, ADS_OFFSET[1] * aim, ADS_OFFSET[2] * aim];
+        let mut rotate = [0.0f32; 3];
+        let now = CLIENT_TICKS.load(Ordering::Relaxed);
+        // The shot cycle: a fast recoil kick, then the lever's roll-and-dip.
+        let lever = LEVER_ANIM_START.load(Ordering::Relaxed);
+        if lever != u64::MAX {
+            let p = (now.saturating_sub(lever) as f32 + render.partial) / LEVER_ANIM_TICKS;
+            if p >= 1.0 {
+                LEVER_ANIM_START.store(u64::MAX, Ordering::Relaxed);
+            } else {
+                let recoil = (-6.0 * p).exp();
+                offset[2] += 0.10 * recoil; // kicked back toward the shoulder
+                rotate[0] += 7.0 * recoil; // muzzle rise
+                let dip = (((p - 0.2) / 0.8).clamp(0.0, 1.0) * PI).sin();
+                rotate[2] += 10.0 * dip; // canted right as the lever swings
+                offset[1] -= 0.05 * dip;
+            }
+        }
+        // One cartridge in: a short dip-and-roll.
+        let reload = RELOAD_ANIM_START.load(Ordering::Relaxed);
+        if reload != u64::MAX {
+            let p = (now.saturating_sub(reload) as f32 + render.partial) / RELOAD_ANIM_TICKS;
+            if p >= 1.0 {
+                RELOAD_ANIM_START.store(u64::MAX, Ordering::Relaxed);
+            } else {
+                let dip = (p * PI).sin();
+                offset[1] -= 0.07 * dip;
+                offset[0] += 0.02 * dip;
+                rotate[2] += 8.0 * dip;
+            }
+        }
+        for axis in 0..3 {
+            render.translation[axis] += offset[axis];
+            render.rotation[axis] += rotate[axis];
+        }
+        mod_api::Flow::Continue
+    }
+
+    /// The aim vignette: vanilla's own `misc/vignette` texture blitted full
+    /// screen with the VIGNETTE blend (dst * (1 - src)), exactly how the game
+    /// frames dark areas — the eased aim strength scales its brightness, so
+    /// the edges close in as the sights rise. Hidden with the F1 HUD.
+    fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
+        let aim = f32::from_bits(ADS_BITS.load(Ordering::Relaxed));
+        if aim < 0.02 || event.gui_hidden {
             return;
         }
         let [w, h] = event.batch.size();
-        let band = h * 0.16;
-        let side = w * 0.10;
-        let solid = ((VIGNETTE_ALPHA as f32) * value) as u32; // peak alpha at the edge…
-        let solid = solid << 24; // …scaled by the eased strength
-        let clear = 0u32; // transparent toward the centre
-        let batch = &mut *event.batch;
-        // Top and bottom fade down/up; left and right are drawn sideways by
-        // rotating the gradient's rect (a gradient runs along its height).
-        batch.fill_gradient([0.0, 0.0, w, band], solid, clear);
-        batch.fill_gradient([0.0, h - band, w, band], clear, solid);
-        batch.fill_gradient([0.0, 0.0, side, h], solid, clear);
-        batch.fill_gradient([w - side, 0.0, side, h], clear, solid);
+        let brightness = ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0) as u32;
+        let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
+        let (w, h) = (w as i32, h as i32);
+        let _ = event.batch.gui_paint(&[GuiDraw::Blit {
+            texture: "misc/vignette".into(),
+            blend: Blend::Vignette,
+            x: 0,
+            y: 0,
+            w,
+            h,
+            uv: [0.0, 0.0],
+            src: [w, h],
+            tex: [w, h],
+            color,
+        }]);
     }
 }
 
@@ -338,9 +439,20 @@ fn take_cartridge(host: &mut dyn ServerHost, player: mod_api::PlayerRef) -> bool
     false
 }
 
-/// Load one cartridge into the tube (one R press), with the loading sounds
-/// and the ammo counter. Server-side.
+/// Load one cartridge into the tube (one R press, RELOAD_TICKS apart), with
+/// the loading sounds and the ammo counter. Server-side.
 fn reload_one(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
+    let uuid = player.uuid();
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    let reload_ready = RELOAD_READY
+        .lock()
+        .unwrap()
+        .get(&uuid)
+        .copied()
+        .unwrap_or(0);
+    if reload_ready > now {
+        return;
+    }
     let Some((slot, rifle)) = find_rifle(host, player) else {
         return;
     };
@@ -348,6 +460,7 @@ fn reload_one(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
     if loaded >= TUBE_CAPACITY || !take_cartridge(host, player) {
         return;
     }
+    RELOAD_READY.lock().unwrap().insert(uuid, now + RELOAD_TICKS);
     let mut rifle = rifle;
     rifle.set_damage(loaded + 1);
     if player.set_inventory_slot(host, slot, Some(rifle)).is_err() {
@@ -380,6 +493,18 @@ fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: Part
     if aimed < LEVER_TICKS || now - last_seen > 2 {
         return; // the lever is still cycling, or the aim went stale (dropped)
     }
+    // The post-shot lever delay. AIM_TICKS alone could never hold it: the
+    // next on_use_tick overwrote the reset, so a fast clicker outpaced the
+    // lever. LEVER_READY stands between shots.
+    let lever_ready = LEVER_READY
+        .lock()
+        .unwrap()
+        .get(&uuid)
+        .copied()
+        .unwrap_or(0);
+    if lever_ready > now {
+        return;
+    }
     let Some((slot, rifle)) = find_rifle(host, player) else {
         return;
     };
@@ -403,6 +528,7 @@ fn fire_rifle(host: &mut dyn ServerHost, player: mod_api::PlayerRef, smoke: Part
     rifle.set_damage(loaded - 1);
     let _ = player.set_inventory_slot(host, slot, Some(rifle));
     AIM_TICKS.lock().unwrap().insert(uuid, (0, now));
+    LEVER_READY.lock().unwrap().insert(uuid, now + LEVER_TICKS as u64);
     play_sound_at(host, player, SHOT_SOUND, SHOT_VOLUME, SHOT_PITCH);
     smoke_at_muzzle(host, player, smoke);
     let _ = player.action_bar(
@@ -444,7 +570,17 @@ impl ItemPart for Winchester {
                 let Some(player) = shooter(host) else { return };
                 let held = USE_DURATION - event.remaining;
                 let now = SERVER_TICKS.load(Ordering::Relaxed);
-                AIM_TICKS.lock().unwrap().insert(player.uuid(), (held, now));
+                let uuid = player.uuid();
+                let mut ticks = AIM_TICKS.lock().unwrap();
+                let was = ticks.get(&uuid).map(|&(n, _)| n);
+                ticks.insert(uuid, (held, now));
+                // The lever's click, LEVER_TICKS into a re-armed aim: a fresh
+                // aim after a shot (AIM_TICKS starts at 0) crosses the count
+                // exactly when the lever delay ends.
+                if was == Some(0) && held >= LEVER_TICKS {
+                    drop(ticks);
+                    play_sound_at(host, player, LEVER_SOUND, UI_VOLUME, LEVER_PITCH);
+                }
             }
         }
     }
