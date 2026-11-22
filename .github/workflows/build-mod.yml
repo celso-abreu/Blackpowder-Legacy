@@ -19,7 +19,7 @@ concurrency:
 
 env:
   # Must match [package.metadata.horizon] sdk in Cargo.toml.
-  HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+  HORIZON_SDK_COMMIT: 2b77287de099c9316278ba7ac4d83590fdb7ef30
   # Wasm builds compile std from source; Horizon's docs warn one wasm compile
   # wants ~10 GiB, over the 7 GiB runner's RAM. One job at a time stays under.
   CARGO_BUILD_JOBS: "1"

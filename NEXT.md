@@ -250,8 +250,37 @@ Principais discrepâncias da v0.7.1 reveladas pela tabela:
   Para rodar de novo, faça um commit vazio e dê push.
 - **Não edite o `[wasm]` do `horizon-mod.toml` à mão.** O
   `cargo horizon-mod build --wasm` escreve.
-- O SDK é pinado (`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`). A API muda entre
-  commits: confira assinaturas no SDK antes de inventar nomes.
+- O SDK é pinado (`2b77287de099c9316278ba7ac4d83590fdb7ef30` — Nightly
+  2026-11-22). A API muda entre commits: confira assinaturas no SDK antes de
+  inventar nomes.
+
+## Entrega `v0.9.0` (implementada)
+
+1. **SDK atualizado:** `Cargo.toml`, `.github/workflows/build-mod.yml` e
+   `.github/workflows/release.yml` migrados para
+   `2b77287de099c9316278ba7ac4d83590fdb7ef30` (`Nightly 2026-11-22`).
+2. **Skin real do jogador + `slim`/`wide` + mangas 3D (`0.25` deformação):**
+   - Fallback imediato no frame 0 via `default_skin(uuid)` (18 skins modernas,
+     `0..9` `slim` `3x12x4` e `9..18` `wide` `4x12x4`).
+   - Resolução online no servidor via `ServerHost::profile_by_uuid`, decodificando
+     `textures` Base64 em `"skins/" + sha1_utf16le(hash)` + `"model" == "slim"`
+     e sincronizando via canal tipado `RifleSkinSync`.
+   - Ambos os braços são desenhados no espaço `[0..1]` da arma com a mesma
+     proporção do glTF do TAC (`[1.0, 1.55, 1.0]` dentro da escala `0.45` =
+     `[0.45, 0.70, 0.45]` no mundo), eliminando a diferença de tamanho entre os
+     braços e mantendo `max_z < -0.16` longe do near plane (`-0.05`).
+3. **Sub-modelos articulados + máquina de estados estilo TAC + áudio CC0 `.ogg`:**
+   - `winchester_1873.json` dividido nos 6 modelos standalone em
+     `assets/blackpowder_legacy/models/special/` (`body`, `lever`, `hammer`,
+     `trigger`, `gate`, `cartridge`), mantendo `models/item/winchester_1873.json`
+     intacto para inventário, chão e 3ª pessoa.
+   - Estados completos: `Draw`, `Idle`/`Walk`/`Sprint`/`ADS`, `FireCycle`
+     (gatilho, cão batendo, alavanca abrindo `+48°` e rearmando o cão),
+     `DryClick`, `ReloadIntro`, `ReloadLoop` (cartucho `.44-40` entrando pela
+     `porta_B` deprimida em `-23°`), `ReloadEndNorm`, `ReloadEndEmpty` (ciclo
+     completo da alavanca ao recarregar seco) e `Inspect` (tecla `I`).
+   - 9 sons CC0 `.ogg` empacotados em `assets/blackpowder_legacy/sounds/` +
+     `sounds.json` (ver `SOUND-CREDITS.md`).
 
 ## Licença — leia antes de copiar
 

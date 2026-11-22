@@ -1,7 +1,7 @@
 id = "blackpowder_legacy"
 name = "Blackpowder Legacy"
-version = "0.8.1"
-description = "Blackpowder-era firearms for Horizon. Aim-down-sights Winchester 1873: RMB aims (zoom + vignette), LMB fires, a remappable key reloads."
+version = "0.9.0"
+description = "TAC-inspired Winchester 1873 lever-action rifle for Horizon: multi-part animated receiver/lever/hammer/gate/cartridge, real player skin & slim/wide arms, ADS zoom, per-round reload, inspect, and CC0 custom firearm audio."
 authors = ["celso-abreu"]
 license = "MIT"
 api = "0.2"

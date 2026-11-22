@@ -1,0 +1,95 @@
+{
+  "item.winchester_fire": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_fire",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_fire",
+        "volume": 1.0,
+        "pitch": 0.96,
+        "attenuation_distance": 48
+      }
+    ]
+  },
+  "item.winchester_thump": {
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_thump",
+        "volume": 0.65,
+        "pitch": 0.78,
+        "attenuation_distance": 36
+      }
+    ]
+  },
+  "item.winchester_lever": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_lever",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_lever",
+        "volume": 0.9,
+        "pitch": 1.05,
+        "attenuation_distance": 16
+      }
+    ]
+  },
+  "item.winchester_cock": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_cock",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_cock",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_intro": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_reload",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_reload_intro",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_insert": {
+    "subtitle": "subtitles.blackpowder_legacy.winchester_reload_insert",
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_reload_insert",
+        "volume": 0.9,
+        "pitch": 1.04,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_end": {
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_reload_end",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_draw": {
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_draw",
+        "volume": 0.8,
+        "pitch": 1.02
+      }
+    ]
+  },
+  "animation.winchester_inspect": {
+    "sounds": [
+      {
+        "name": "blackpowder_legacy:winchester_inspect",
+        "volume": 0.85,
+        "pitch": 1.0
+      }
+    ]
+  }
+}

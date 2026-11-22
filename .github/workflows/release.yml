@@ -34,7 +34,7 @@ concurrency:
 
 env:
   # Must match [package.metadata.horizon] sdk in Cargo.toml.
-  HORIZON_SDK_COMMIT: 0a875da91dbb0fdcb7ba8c42c11341aa229af51a
+  HORIZON_SDK_COMMIT: 2b77287de099c9316278ba7ac4d83590fdb7ef30
   # See build-mod.yml: one wasm compile job stays under the runner's RAM.
   CARGO_BUILD_JOBS: "1"
 

@@ -1,6 +1,6 @@
 [package]
 name = "blackpowder-legacy"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 publish = false
 license = "MIT"
@@ -13,9 +13,9 @@ horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 # Referenced by the PayloadCodec derive's fully-qualified macro path.
 horizon-mod-api-macros = { path = ".horizon/sdk/api/crates/horizon-mod-api-macros" }
 
-# The build this mod is made for: Nightly 2026-11-20 (0a875da).
+# The build this mod is made for: Nightly 2026-11-22 (2b77287).
 [package.metadata.horizon]
-sdk = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
+sdk = "2b77287de099c9316278ba7ac4d83590fdb7ef30"
 
 # A mod is its own project, not a member of the game's workspace.
 [workspace]

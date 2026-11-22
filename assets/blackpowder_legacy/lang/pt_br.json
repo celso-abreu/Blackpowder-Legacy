@@ -4,5 +4,11 @@
   "item.blackpowder_legacy.bullet": "Bala de rifle",
   "entity.blackpowder_legacy.bullet": "Bala de rifle",
   "itemGroup.blackpowder_legacy.blackpowder": "Blackpowder Legacy",
-  "key.blackpowder_legacy.reload": "Recarregar rifle"
+  "key.blackpowder_legacy.reload": "Recarregar rifle",
+  "key.blackpowder_legacy.inspect": "Inspecionar rifle",
+  "subtitles.blackpowder_legacy.winchester_fire": "Disparo de Winchester 1873",
+  "subtitles.blackpowder_legacy.winchester_lever": "Alavanca da Winchester ciclada",
+  "subtitles.blackpowder_legacy.winchester_cock": "Clique seco do rifle",
+  "subtitles.blackpowder_legacy.winchester_reload": "Recarregando Winchester",
+  "subtitles.blackpowder_legacy.winchester_reload_insert": "Cartucho .44-40 inserido"
 }
