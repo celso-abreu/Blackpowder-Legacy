@@ -22,18 +22,25 @@
 //!   (brass `.44-40` cartridge sliding through the depressed `-23°` King's loading gate),
 //!   `ReloadEndNorm`, `ReloadEndEmpty` (full lever chambering on empty reload), and
 //!   `Inspect` (`I` key, remappable).
+//! - **Diagonal Back-Sling when swapped to Off-Hand (`F` key):**
+//!   Pressing `F` to move the Winchester into the off-hand (left hand) stows it diagonally
+//!   (`44°`) across the player's back (`Hooks::render_player_post` locked to `HumanoidPart::Body`
+//!   through standing, walking, torso twist, and sneaking), relaxes the off-hand arm to
+//!   `ArmPose::Empty` (`Hooks::get_arm_pose`), suppresses duplicate left-hand rendering in
+//!   1st/3rd person, and blocks accidental off-hand ADS right-clicks (`ItemPart::use_item`).
 
 use mod_api::{
-    BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
+    ArmPose, BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
     ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent,
-    CubeDeformation, CubeListBuilder, EntityUuid, Flow, GuiDraw, GuiRenderPostEvent, Hand, Hooks,
-    Host, HostSide, IPayloadContext, Identifier, ItemBarEvent, ItemKey, ItemPart, ItemStack,
-    KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent,
-    LivingRef, MeshDefinition, ModelBakingCompletedEvent, ModelPart, ModelRef, OnUseTickEvent,
-    PartPose, ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext,
-    ReleaseUsingEvent, RenderFramePreEvent, RenderHandEvent, ServerHost, ServerTickEvent,
+    CubeDeformation, CubeListBuilder, EntityUuid, EquipmentSlot, Flow, GetArmPoseEvent, GuiDraw,
+    GuiRenderPostEvent, Hand, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
+    InteractionResult, ItemBarEvent, ItemKey, ItemPart, ItemStack, KeyConflictContext,
+    KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent, LivingRef,
+    MeshDefinition, ModelBakingCompletedEvent, ModelPart, ModelRef, OnUseTickEvent, PartPose,
+    ParticleKey, ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
+    RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent,
     ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundPlay, SoundSource,
-    StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, VarInt,
+    StandaloneModelsEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
 };
 use std::collections::BTreeMap;
 use std::f32::consts::{PI, TAU};
@@ -155,6 +162,25 @@ const FORESTOCK_TEXELS: [f32; 3] = [7.65, 5.15, 4.60];
 const ARM_GUN_SPACE_WIDTH: f32 = 1.92;
 const ARM_GUN_SPACE_LENGTH: f32 = 2.12;
 
+/// Third-person diagonal back-sling constants (`Hooks::render_player_post` on `HumanoidPart::Body`):
+/// - `AVATAR_RENDER_SCALE` (`15/16 = 0.9375`) and `AVATAR_MODEL_OFFSET_Y` (`-1.501`) match
+///   `AvatarRenderer::scale` / `base_transform` so the slung rifle stays welded to the player's
+///   spine across standing, walking, torso twist, and sneaking (`Body` `x_rot = 0.5 rad`).
+/// - `BACK_SLING_MODEL_SCALE = 0.45 / 0.9375 = 0.48` preserves exact `0.45` (`1.34`-block)
+///   1:1 world proportions.
+/// - `BACK_SLING_DIAG_DEG = -44.0` angles the barrel upward over the main-hand shoulder while
+///   the walnut buttstock rests down near the off-hand hip, with the flat steel receiver side
+///   flush against the back and the King's loading gate facing outward.
+const AVATAR_RENDER_SCALE: f32 = 0.9375;
+const AVATAR_MODEL_OFFSET_Y: f32 = -1.501;
+const BACK_SLING_MODEL_SCALE: f32 = RIFLE_DISPLAY_SCALE / AVATAR_RENDER_SCALE;
+const BACK_SLING_DIAG_DEG: f32 = -44.0;
+const BACK_SLING_CENTER_TEX: [f32; 3] = [8.139, 8.50, 8.20];
+const BACK_SLING_OFFSET_Y_TEX: f32 = -5.80;
+const BACK_SLING_JACKET_Z_TEX: f32 = 3.10;
+const BACK_SLING_ARMOR_Z_TEX: f32 = 3.85;
+const BACK_SLING_REMOTE_Z_TEX: f32 = 3.55;
+
 /// Modern 18-skin default table (`crates/horizon-client-render/src/skins.rs`).
 const DEFAULT_SKINS: [(&str, bool); 18] = [
     ("entity/player/slim/alex", true),
@@ -243,6 +269,14 @@ static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
+static SLUNG_RIFLES: Mutex<BTreeMap<u32, SlungRifleState>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Copy)]
+struct SlungRifleState {
+    last_tick: u64,
+    hammer_uncocked: bool,
+    main_arm_left: bool,
+}
 
 #[derive(Clone, Copy)]
 struct RifleModels {
@@ -378,6 +412,7 @@ struct ClientAnimState {
     sprint_dyn: SecondOrder,
     action: ActionAnim,
     was_holding: bool,
+    was_slung: bool,
     known_rounds: u32,
     hammer_uncocked: bool,
     walk_phase: f32,
@@ -405,6 +440,7 @@ impl ClientAnimState {
             sprint_dyn: SecondOrder::new(3.4, 0.90, 0.75, 0.0),
             action: ActionAnim::None,
             was_holding: false,
+            was_slung: false,
             known_rounds: TUBE_CAPACITY,
             hammer_uncocked: false,
             walk_phase: 0.0,
@@ -922,14 +958,17 @@ impl Hooks for Mod {
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             CLIENT_RELOADING.store(false, Ordering::Relaxed);
+            SLUNG_RIFLES.lock().unwrap().clear();
             let mut anim = client_anim().lock().unwrap();
             anim.was_holding = false;
+            anim.was_slung = false;
             anim.action = ActionAnim::None;
             anim.skin_requested = false;
             return;
         }
 
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
+        let is_slung = local_offhand_rifle_status(host).is_some();
 
         // Read horizontal velocity from camera entity (`Side: both`).
         let mut horiz_speed = 0.0_f32;
@@ -958,6 +997,16 @@ impl Hooks for Mod {
             } else if !holding && anim.was_holding {
                 anim.was_holding = false;
                 anim.action = ActionAnim::None;
+            }
+
+            if is_slung && !anim.was_slung {
+                anim.was_slung = true;
+                if foley_to_play.is_none() {
+                    // Crisp leather/wood sling foley when pressing `F` to stow onto the back.
+                    foley_to_play = Some((SND_DRAW, 0.72, 0.84));
+                }
+            } else if !is_slung && anim.was_slung {
+                anim.was_slung = false;
             }
 
             // Smooth 20 Hz walk bobbing phase.
@@ -1345,6 +1394,127 @@ impl Hooks for Mod {
         }
     }
 
+    fn get_arm_pose(&self, _: &dyn ClientHost, event: &mut GetArmPoseEvent<'_>) -> Option<ArmPose> {
+        let rifle = RIFLE_KEY.get().copied()?;
+        let now = CLIENT_TICKS.load(Ordering::Relaxed);
+        {
+            let mut slung = SLUNG_RIFLES.lock().unwrap();
+            if let Some(off) = event.humanoid.off_hand.filter(|s| s.item() == rifle) {
+                slung.insert(
+                    event.entity_id,
+                    SlungRifleState {
+                        last_tick: now,
+                        hammer_uncocked: rounds(off) == 0,
+                        main_arm_left: event.humanoid.main_arm_left,
+                    },
+                );
+            } else {
+                slung.remove(&event.entity_id);
+            }
+        }
+
+        if event.hand == Hand::Off && event.stack.item() == rifle {
+            // Keep the off-hand arm relaxed at the player's side while the rifle is slung on the back.
+            return Some(ArmPose::Empty);
+        }
+        None
+    }
+
+    fn render_player_post(&self, host: &dyn ClientHost, event: &mut RenderPlayerPostEvent<'_>) {
+        if event.player.death_time > 0 {
+            return;
+        }
+        let Some(body_part) = event
+            .parts
+            .as_ref()
+            .and_then(|parts| parts.get(HumanoidPart::Body))
+        else {
+            return;
+        };
+        if !body_part.visible {
+            return;
+        }
+
+        let now = CLIENT_TICKS.load(Ordering::Relaxed);
+        let cached = SLUNG_RIFLES
+            .lock()
+            .unwrap()
+            .get(&event.player.id)
+            .copied()
+            .filter(|s| now.saturating_sub(s.last_tick) <= 4);
+
+        let (hammer_uncocked, main_arm_left, back_z_tex) = if event.who.local {
+            if let Some((off_rounds, chest_armored)) = local_offhand_rifle_status(host) {
+                let left = cached.is_some_and(|s| s.main_arm_left);
+                let z_tex = if chest_armored {
+                    BACK_SLING_ARMOR_Z_TEX
+                } else {
+                    BACK_SLING_JACKET_Z_TEX
+                };
+                (off_rounds == 0, left, z_tex)
+            } else {
+                return;
+            }
+        } else if let Some(state) = cached {
+            (
+                state.hammer_uncocked,
+                state.main_arm_left,
+                BACK_SLING_REMOTE_Z_TEX,
+            )
+        } else {
+            return;
+        };
+
+        let Some(models) = *RIFLE_MODELS.lock().unwrap() else {
+            return;
+        };
+
+        let body = body_part.pose;
+        let draw = &mut *event.draw;
+        draw.push();
+
+        // 1. Match AvatarRenderer::base_transform (`Ry(180 - yaw) * S(-1, -1, 1)` == `Ry(-yaw) * Rx(180)`, det = +1).
+        draw.rotate_about([1.0, 0.0, 0.0], 180.0, [0.0; 3]);
+        draw.scale([AVATAR_RENDER_SCALE; 3]);
+        if event.player.baby {
+            draw.scale([0.5; 3]);
+        }
+        draw.translate([0.0, AVATAR_MODEL_OFFSET_Y, 0.0]);
+
+        // 2. Follow HumanoidPart::Body PartPose (`ModelPart.translateAndRotate`: T(p/16) * Rz * Ry * Rx * S).
+        draw.translate([body.x / 16.0, body.y / 16.0, body.z / 16.0]);
+        draw.rotate_about([0.0, 0.0, 1.0], body.z_rot.to_degrees(), [0.0; 3]);
+        draw.rotate_about([0.0, 1.0, 0.0], body.y_rot.to_degrees(), [0.0; 3]);
+        draw.rotate_about([1.0, 0.0, 0.0], body.x_rot.to_degrees(), [0.0; 3]);
+        draw.scale([body.x_scale, body.y_scale, body.z_scale]);
+
+        // 3. Return to upright torso space (+X player left, +Y up from neck, -Z behind back; det = +1).
+        draw.rotate_about([1.0, 0.0, 0.0], 180.0, [0.0; 3]);
+
+        // 4. Diagonal 44° cross-back sling: barrel rises over the main-hand shoulder, walnut buttstock
+        //    angles down toward the off-hand hip, flat receiver side rests flush against the back, and
+        //    the King's loading gate faces outward.
+        let diag_deg = if main_arm_left {
+            -BACK_SLING_DIAG_DEG
+        } else {
+            BACK_SLING_DIAG_DEG
+        };
+        let ry_deg = if main_arm_left { -90.0 } else { 90.0 };
+        draw.translate([0.0, BACK_SLING_OFFSET_Y_TEX / 16.0, -back_z_tex / 16.0]);
+        draw.rotate_about([0.0, 0.0, 1.0], diag_deg, [0.0; 3]);
+        draw.rotate_about([0.0, 1.0, 0.0], ry_deg, [0.0; 3]);
+        draw.scale([BACK_SLING_MODEL_SCALE; 3]);
+        draw.translate([
+            -BACK_SLING_CENTER_TEX[0] / 16.0,
+            -BACK_SLING_CENTER_TEX[1] / 16.0,
+            -BACK_SLING_CENTER_TEX[2] / 16.0,
+        ]);
+
+        let hammer_deg = if hammer_uncocked { -34.0 } else { 0.0 };
+        let _ = draw_rifle_assembly(draw, models, 0.0, hammer_deg, 0.0, 0.0);
+        draw.pop();
+    }
+
     fn render_hand(&self, _: &dyn ClientHost, event: &mut RenderHandEvent<'_, '_>) -> Flow {
         let Some(rifle) = RIFLE_KEY.get().copied() else {
             return Flow::Continue;
@@ -1352,8 +1522,10 @@ impl Hooks for Mod {
 
         let hand = event.render.hand;
         if hand == Hand::Off {
-            if holding_rifle_recently() {
-                // Two-handed lever-action rifle occupies both hands while equipped.
+            let off_is_rifle = event.render.stack.is_some_and(|s| s.item() == rifle);
+            if off_is_rifle || holding_rifle_recently() {
+                // Off-hand Winchester is slung diagonally across the player's back,
+                // and main-hand Winchester occupies both hands.
                 return Flow::Cancel;
             }
             return Flow::Continue;
@@ -1444,40 +1616,15 @@ impl Hooks for Mod {
             draw.scale([RIFLE_DISPLAY_SCALE; 3]);
             draw.translate([-0.5, -0.5, -0.5]);
 
-            // 3. Receiver / barrel / walnut stock body (`winchester_body.json`).
-            if draw.model(models.body, 0xFF_FF_FF_FF).is_ok() {
-                // 4. Articulated lever (`winchester_lever.json`).
-                draw.push();
-                draw.rotate_about([1.0, 0.0, 0.0], pose.lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
-                let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
-                draw.pop();
-
-                // 5. Articulated hammer (`winchester_hammer.json`).
-                draw.push();
-                draw.rotate_about(
-                    [1.0, 0.0, 0.0],
-                    pose.hammer_deg,
-                    tex_to_unit(HAMMER_PIVOT_TEX),
-                );
-                let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
-                draw.pop();
-
-                // 6. Articulated trigger (`winchester_trigger.json`).
-                draw.push();
-                draw.rotate_about(
-                    [1.0, 0.0, 0.0],
-                    pose.trigger_deg,
-                    tex_to_unit(TRIGGER_PIVOT_TEX),
-                );
-                let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
-                draw.pop();
-
-                // 7. Articulated King's loading gate (`winchester_gate.json`).
-                draw.push();
-                draw.rotate_about([0.0, 1.0, 0.0], pose.gate_deg, tex_to_unit(GATE_PIVOT_TEX));
-                let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
-                draw.pop();
-
+            // 3–7. Articulated 5-part Winchester assembly (`body`, `lever`, `hammer`, `trigger`, `gate`).
+            if draw_rifle_assembly(
+                draw,
+                models,
+                pose.lever_deg,
+                pose.hammer_deg,
+                pose.trigger_deg,
+                pose.gate_deg,
+            ) {
                 // 8. Brass `.44-40` cartridge pushed through the loading gate during reload.
                 if pose.show_cartridge {
                     draw.push();
@@ -2011,6 +2158,58 @@ fn draw_gun_space_arm(
     draw.scale([sx, -sy, -sx]);
     limb.draw(draw, skin);
     draw.pop();
+}
+
+/// Draws the 5-part articulated Winchester 1873 (`body` + `lever` + `hammer` + `trigger` + `gate`)
+/// inside `[0..1]` unit-block rifle model space (`1` unit = `16` JSON texels). Shared by both
+/// 1st-person `render_hand` and 3rd-person diagonal back-sling `render_player_post`.
+fn draw_rifle_assembly(
+    draw: &mut dyn BlockEntityDrawContext,
+    models: RifleModels,
+    lever_deg: f32,
+    hammer_deg: f32,
+    trigger_deg: f32,
+    gate_deg: f32,
+) -> bool {
+    if draw.model(models.body, 0xFF_FF_FF_FF).is_err() {
+        return false;
+    }
+
+    draw.push();
+    draw.rotate_about([1.0, 0.0, 0.0], lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
+    let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
+    draw.pop();
+
+    draw.push();
+    draw.rotate_about([1.0, 0.0, 0.0], hammer_deg, tex_to_unit(HAMMER_PIVOT_TEX));
+    let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+    draw.pop();
+
+    draw.push();
+    draw.rotate_about([1.0, 0.0, 0.0], trigger_deg, tex_to_unit(TRIGGER_PIVOT_TEX));
+    let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
+    draw.pop();
+
+    draw.push();
+    draw.rotate_about([0.0, 1.0, 0.0], gate_deg, tex_to_unit(GATE_PIVOT_TEX));
+    let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
+    draw.pop();
+
+    true
+}
+
+/// Returns `(loaded_rounds, chest_armored)` when the local player has the Winchester 1873
+/// stowed in their off-hand (`Hand::Off`).
+fn local_offhand_rifle_status(host: &dyn ClientHost) -> Option<(u32, bool)> {
+    let rifle = RIFLE_KEY.get().copied()?;
+    let cam = host.camera_entity()?;
+    let liv = host.living(cam)?;
+    let off = liv.hand_item(host, Hand::Off)?;
+    if off.item() != rifle {
+        return None;
+    }
+    let chest_armored = liv.equipment(host, EquipmentSlot::Chest).is_some();
+    Some((rounds(&off), chest_armored))
 }
 
 /// Converts `[0..16]` JSON texels into right-hand view space after `RIFLE_DISPLAY`.
@@ -2592,6 +2791,18 @@ fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
 
 #[mod_api::horizon_part]
 impl ItemPart for Winchester {
+    fn use_item(
+        &self,
+        _: HostSide<'_>,
+        event: &mut UseItemEvent<'_>,
+    ) -> Option<InteractionResult> {
+        if event.hand == Hand::Off {
+            // Slung diagonally across the back when in the off-hand: never enter ADS from off-hand.
+            return Some(InteractionResult::Fail);
+        }
+        None
+    }
+
     fn use_duration(&self, _: &dyn Host, event: &mut UseDurationEvent<'_>) {
         event.duration = USE_DURATION;
     }
