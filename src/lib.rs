@@ -671,11 +671,15 @@ impl LimbModel {
         })
     }
 
-    fn draw_part_with_skin(draw: &mut dyn BlockEntityDrawContext, part: &ModelPart, skin: &ResolvedSkin) {
-        if !draw.model_part(part, &skin.primary, 0xFF_FFFF) {
-            if !draw.model_part(part, &skin.fallback, 0xFF_FFFF) {
-                let _ = draw.model_part(part, DEFAULT_STEVE_WIDE, 0xFF_FFFF);
-            }
+    fn draw_part_with_skin(
+        draw: &mut dyn BlockEntityDrawContext,
+        part: &ModelPart,
+        skin: &ResolvedSkin,
+    ) {
+        if !draw.model_part(part, &skin.primary, 0xFF_FFFF)
+            && !draw.model_part(part, &skin.fallback, 0xFF_FFFF)
+        {
+            let _ = draw.model_part(part, DEFAULT_STEVE_WIDE, 0xFF_FFFF);
         }
     }
 
@@ -780,20 +784,8 @@ fn refresh_rifle_models(host: &dyn ClientHost) {
 }
 
 fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
-    let Ok(identifier) = Identifier::parse(event_id) else {
-        return;
-    };
-    let sound = SoundPlay {
-        identifier,
-        source: SoundSource::Players,
-        volume,
-        pitch,
-        position: [0.0, 0.0, 0.0],
-        looping: false,
-        delay: 0,
-        attenuation: false,
-        relative: true,
-    };
+    let mut sound = SoundPlay::ui(event_id).with_volume(volume).with_pitch(pitch);
+    sound.source = SoundSource::Players;
     let _ = host.play_local_sound(&sound, 0);
 }
 
@@ -815,9 +807,7 @@ impl Hooks for Mod {
             MODEL_GATE_ID,
             MODEL_CARTRIDGE_ID,
         ] {
-            if let Ok(parsed) = Identifier::parse(id) {
-                event.models.push(parsed);
-            }
+            event.models.push(id.into());
         }
     }
 
