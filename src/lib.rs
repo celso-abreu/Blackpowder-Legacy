@@ -145,58 +145,68 @@ static PLAYER_ARM: OnceLock<Option<ModelPart>> = OnceLock::new();
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 
 /// The rifle's `firstperson_righthand` display transform, copied from the
-/// baked model so the arm can be drawn under the very pose the gun is drawn
-/// in (see `tools/bbmodel_convert.py`).
+/// baked model. Vanilla writes item-model translation in sixteenths of a
+/// block, so the arm divides it back out (`tools/bbmodel_convert.py`).
 const RIFLE_DISPLAY: ([f32; 3], [f32; 3], f32) = ([0.0, 0.3, -4.75], [0.0, 0.0, 0.0], 0.45);
 
-/// Where the fist closes, in the rifle model's own texels (16 to a block): the
-/// small of the stock behind the lever's tail, measured off the baked model.
-/// The model is baked around the origin with its own 8,8 centre subtracted
-/// (item models are centred), so this is already relative to the gun's origin.
+/// Where the fist closes, in the rifle model's own texels (16 to a block). The
+/// item model is baked around its 8,8 centre, so the barrel runs down -z and
+/// this is the small of the stock, just behind the lever's tail.
 const GRIP_TEXELS: [f32; 3] = [8.14, 6.90, 23.50];
 
-/// Draws the player's right arm from outside the frame to the fist on the
-/// rifle's wrist. `bake_layer` gives back the whole player tree, so the arm is
-/// pulled out by name and posed here: the fist lands on the grip and the
-/// forearm falls away below it, following recoil, the lever and the reload dip
-/// because it is drawn under `render`'s pose. Undoing the display transform is
-/// what puts the arm in the gun's space rather than the camera's.
+/// How far the shoulder sits behind the fist, in blocks, and which way: to the
+/// right, below the frame and back toward the player, so the forearm enters
+/// screen-right and low. Tuned to the gun's own first-person framing.
+const ARM_BACK: [f32; 3] = [0.30, 0.52, 0.66];
+
+/// Draws the player's own right arm from off-screen to the fist on the rifle's
+/// wrist. `bake_layer` hands back the whole player tree, so the arm is taken
+/// out by name and posed here. It draws under `render`'s pose, which means it
+/// recoils, levers and reloads with the gun for free.
 fn draw_forearm(event: &mut RenderHandEvent<'_, '_>) {
     let Some(arm) = PLAYER_ARM.get_or_init(|| None).as_ref() else {
         return;
     };
     let (translate, rotation, scale) = RIFLE_DISPLAY;
-    let draw = &mut *event.draw;
-    draw.push();
-    // `display` runs after the hand's own offset, so it has to be undone in
-    // reverse to stand where the gun's origin is: scale, rotations, translate.
-    draw.scale([1.0 / scale; 3]);
-    for (axis, degrees) in [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]
-        .into_iter()
-        .zip(rotation)
-    {
-        if degrees != 0.0 {
-            draw.rotate_about(axis, -degrees, [0.0; 3]);
-        }
-    }
-    draw.translate([-translate[0], -translate[1], -translate[2]]);
-    // The rifle's own block space: texels to blocks, minus the item model's
-    // centre, which is where both the gun and the fist have to meet.
-    draw.translate([
+    // Where the fist goes, in the hand's view space: the grip put through the
+    // same display transform the gun's model is drawn under.
+    let grip = [
         (GRIP_TEXELS[0] - 8.0) / 16.0,
         (GRIP_TEXELS[1] - 8.0) / 16.0,
         GRIP_TEXELS[2] / 16.0,
+    ];
+    let mut fist = [grip[0] * scale, grip[1] * scale, grip[2] * scale];
+    for axis in 0..3 {
+        fist[axis] += translate[axis] / 16.0;
+    }
+    let draw = &mut *event.draw;
+    draw.push();
+    // The arm's pivot is its shoulder, and a player model's arm hangs down +y
+    // from there in texels; start the shoulder a forearm's length back from
+    // the fist along `ARM_BACK` and turn the hanging arm onto the fist.
+    let back = ARM_BACK;
+    let len = (back[0] * back[0] + back[1] * back[1] + back[2] * back[2]).sqrt();
+    let reach = 12.0 / 16.0; // a vanilla forearm, in blocks
+    let dir = [back[0] / len, back[1] / len, back[2] / len];
+    draw.translate([
+        fist[0] + dir[0] * reach,
+        fist[1] + dir[1] * reach,
+        fist[2] + dir[2] * reach,
     ]);
-    // A vanilla player model's parts are built facing +z with the arm hanging
-    // down from a pivot at its top: turn the fist to the gun and lay the
-    // forearm back under it.
-    draw.rotate_about([1.0, 0.0, 0.0], 90.0, [0.0; 3]);
-    draw.rotate_about([0.0, 1.0, 0.0], -90.0, [0.0; 3]);
+    // Part space is +y down; flip it into the view's +y up, then roll the
+    // hanging arm back onto `-dir` (shoulder to fist).
+    draw.scale([1.0, -1.0, 1.0]);
+    // Rotating about x by -90 lifts the hanging arm to point at -z (away from
+    // the player); the remaining tilt lands it on the grip.
+    draw.rotate_about([1.0, 0.0, 0.0], -90.0, [0.0; 3]);
+    draw.rotate_about([0.0, 1.0, 0.0], -28.0, [0.0; 3]);
+    draw.rotate_about([0.0, 0.0, 1.0], 12.0, [0.0; 3]);
+    let _ = rotation;
     let _ = draw.model_part(arm, "minecraft:entity/player/wide/steve", 0xFF_FFFF);
     draw.pop();
 }
 
-/// One rifle input from the owning client/// One rifle input from the owning client/// One rifle input from the owning client: fire (1) or reload one round (2).
+/// One rifle input from the owning client/// One rifle input from the owning client/// One rifle input from the owning client/// One rifle input from the owning client: fire (1) or reload one round (2).
 #[derive(horizon_mod_api_macros::PayloadCodec)]
 struct RifleInput {
     action: VarInt,
