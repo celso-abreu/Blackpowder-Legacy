@@ -1,4 +1,4 @@
-//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod, v0.8.0).
+//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod, v0.8.1).
 //!
 //! Controls:
 //! - Hold right click: shoulder the rifle and aim down the sights — the cocked
@@ -21,20 +21,22 @@
 //!   to `8 / 8`, or until interrupted by firing, sprinting, or swapping slots.
 //!
 //! Both first-person player arms (`right_arm` + `left_arm` with sleeves) are
-//! extracted from `minecraft:player#main` with zeroed local poses and drawn
-//! under the rifle's exact pose matrix so they follow ADS, recoil, lever action,
-//! and per-shell loading-gate insertion in lockstep.
+//! extracted from `minecraft:player#main` (with a procedural `LayerDefinition`
+//! fallback) and drawn with the unprefixed vanilla atlas key
+//! `"entity/player/wide/steve"` under the rifle's exact pose matrix so they
+//! follow ADS, recoil, lever action, and per-shell loading-gate insertion in
+//! lockstep.
 
 use mod_api::{
     BlockEntityDrawContext, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
-    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, EntityUuid, Flow, GuiDraw,
-    GuiRenderPostEvent, Hand, Hooks, Host, HostSide, IPayloadContext, Identifier, ItemBarEvent,
-    ItemKey, ItemPart, ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration,
-    LevelTickPostEvent, LivingRef, ModelPart, OnUseTickEvent, PartPose, ParticleKey,
-    ParticleOptions, PayloadId, Registrar, RegistrationContext, ReleaseUsingEvent,
-    RenderFramePreEvent, RenderHandEvent, ServerHost, ServerTickEvent, ServerTickPhase,
-    ShouldCauseReequipAnimationEvent, SoundSource, Text, ToClient, ToServer, UseDurationEvent,
-    VarInt,
+    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, CubeDeformation, CubeListBuilder,
+    EntityUuid, Flow, GuiDraw, GuiRenderPostEvent, Hand, Hooks, Host, HostSide, IPayloadContext,
+    Identifier, ItemBarEvent, ItemKey, ItemPart, ItemStack, KeyConflictContext,
+    KeyMappingPreEvent, KeyRegistration, LayerDefinition, LevelTickPostEvent, LivingRef,
+    MeshDefinition, ModelPart, OnUseTickEvent, PartPose, ParticleKey, ParticleOptions, PayloadId,
+    Registrar, RegistrationContext, ReleaseUsingEvent, RenderFramePreEvent, RenderHandEvent,
+    ServerHost, ServerTickEvent, ServerTickPhase, ShouldCauseReequipAnimationEvent, SoundSource,
+    Text, ToClient, ToServer, UseDurationEvent, VarInt,
 };
 use std::collections::BTreeMap;
 use std::f32::consts::PI;
@@ -50,7 +52,10 @@ const RELOAD_MAPPING: &str = "reload";
 const ATTACK_MAPPING: &str = "key.attack";
 const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
 const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
-const PLAYER_SKIN_FALLBACK: &str = "minecraft:entity/player/wide/steve";
+/// Horizon's sprite atlas registers vanilla sprites without the `"minecraft:"` namespace
+/// (`"entity/player/wide/steve"`, matching `Game::first_person_arm` in `frame_geometry.rs`).
+const PLAYER_SKIN_WIDE: &str = "entity/player/wide/steve";
+const PLAYER_SKIN_WIDE_NS: &str = "minecraft:entity/player/wide/steve";
 
 const TUBE_CAPACITY: u32 = 8;
 const USE_DURATION: i32 = 72000;
@@ -94,8 +99,8 @@ const ADS_OFFSET: [f32; 3] = [-0.5639, 0.3695, 0.05];
 const RIFLE_DISPLAY: ([f32; 3], [f32; 3], f32) = ([0.0, 0.3, -4.75], [0.0, 0.0, 0.0], 0.45);
 
 /// Baked model texel coordinates (`0..16` space) for hand anchors and recoil pivot.
-const GRIP_WRIST_TEXELS: [f32; 3] = [8.14, 8.15, 18.00];
-const FORESTOCK_TEXELS: [f32; 3] = [8.05, 9.65, 3.20];
+const GRIP_WRIST_TEXELS: [f32; 3] = [8.20, 8.45, 17.20];
+const FORESTOCK_TEXELS: [f32; 3] = [7.95, 9.65, 3.20];
 const LOADING_GATE_TEXELS: [f32; 3] = [9.05, 10.15, 11.20];
 const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
 
@@ -156,7 +161,7 @@ static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
 static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
 static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
-static PLAYER_ARMS: OnceLock<Option<PlayerArms>> = OnceLock::new();
+static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 
 #[derive(horizon_mod_api_macros::PayloadCodec)]
@@ -334,10 +339,66 @@ impl LimbModel {
         })
     }
 
+    fn draw_part_with_skin(draw: &mut dyn BlockEntityDrawContext, part: &ModelPart) {
+        if !draw.model_part(part, PLAYER_SKIN_WIDE, 0xFF_FFFF) {
+            let _ = draw.model_part(part, PLAYER_SKIN_WIDE_NS, 0xFF_FFFF);
+        }
+    }
+
     fn draw(&self, draw: &mut dyn BlockEntityDrawContext) {
-        let _ = draw.model_part(&self.limb, PLAYER_SKIN_FALLBACK, 0xFF_FFFF);
+        Self::draw_part_with_skin(draw, &self.limb);
         if let Some(sleeve) = &self.detached_sleeve {
-            let _ = draw.model_part(sleeve, PLAYER_SKIN_FALLBACK, 0xFF_FFFF);
+            Self::draw_part_with_skin(draw, sleeve);
+        }
+    }
+}
+
+impl PlayerArms {
+    /// Extracts `right_arm`/`left_arm` + sleeves from a baked `minecraft:player#main` root.
+    fn from_baked_root(root: &ModelPart) -> Option<Self> {
+        Some(Self {
+            right: LimbModel::extract(root, "right_arm", "right_sleeve")?,
+            left: LimbModel::extract(root, "left_arm", "left_sleeve")?,
+        })
+    }
+
+    /// Procedural 64x64 wide `PlayerModel` arms + `0.25`-inflated sleeves, guaranteeing
+    /// non-empty arm geometry even if `bake_layer` returns `None` or `render_hand` runs early.
+    fn fallback_wide() -> Self {
+        let build_limb = |origin_x: f32, arm_uv: (i32, i32), sleeve_uv: (i32, i32)| -> LimbModel {
+            let mut mesh = MeshDefinition::new();
+            let root = mesh.root();
+            let arm = mesh.add_or_replace_child(
+                root,
+                "arm",
+                CubeListBuilder::create()
+                    .tex_offs(arm_uv.0, arm_uv.1)
+                    .add_box([origin_x, -2.0, -2.0], [4.0, 12.0, 4.0]),
+                PartPose::ZERO,
+            );
+            mesh.add_or_replace_child(
+                arm,
+                "sleeve",
+                CubeListBuilder::create()
+                    .tex_offs(sleeve_uv.0, sleeve_uv.1)
+                    .add_box_with(
+                        [origin_x, -2.0, -2.0],
+                        [4.0, 12.0, 4.0],
+                        CubeDeformation::new(0.25),
+                    ),
+                PartPose::ZERO,
+            );
+            let baked = LayerDefinition::create(mesh, 64, 64).bake_root();
+            let mut limb = baked.get_child("arm").cloned().unwrap_or(baked);
+            limb.load_pose(PartPose::ZERO);
+            LimbModel {
+                limb,
+                detached_sleeve: None,
+            }
+        };
+        Self {
+            right: build_limb(-3.0, (40, 16), (40, 32)),
+            left: build_limb(-1.0, (32, 48), (48, 48)),
         }
     }
 }
@@ -442,9 +503,7 @@ fn draw_anchored_limb(
 
 /// Draws both first-person arms locked to the rifle's exact pose matrix (`render` + `HAND_BASE`).
 fn draw_arms(event: &mut RenderHandEvent<'_, '_>, lever: f32, reload_blend: f32, shell_pulse: f32) {
-    let Some(arms) = PLAYER_ARMS.get_or_init(|| None).as_ref() else {
-        return;
-    };
+    let arms = PLAYER_ARMS.get_or_init(PlayerArms::fallback_wide);
     let render = &*event.render;
     let translation = render.translation;
     let rotation = render.rotation;
@@ -471,8 +530,8 @@ fn draw_arms(event: &mut RenderHandEvent<'_, '_>, lever: f32, reload_blend: f32,
         &arms.right,
         model_texel_to_hand(right_tex),
         -1.0 / 16.0,
-        [118.0 - 14.0 * lever, 18.0, -10.0 + 8.0 * lever],
-        [0.56, 0.95],
+        [110.0 - 14.0 * lever, 14.0, -8.0 + 8.0 * lever],
+        [0.56, 0.82],
     );
 
     // Left hand cradles the wooden forestock and slides back to feed shells into `porta_B`.
@@ -492,11 +551,11 @@ fn draw_arms(event: &mut RenderHandEvent<'_, '_>, lever: f32, reload_blend: f32,
         model_texel_to_hand(left_tex),
         1.0 / 16.0,
         [
-            116.0 - 10.0 * gate_mix + 4.0 * shell_pulse,
+            112.0 - 10.0 * gate_mix + 4.0 * shell_pulse,
             -24.0 + 14.0 * gate_mix - 5.0 * shell_pulse,
             18.0 + 12.0 * gate_mix,
         ],
-        [0.56, 1.35],
+        [0.56, 1.30],
     );
 
     draw.pop();
@@ -535,12 +594,10 @@ impl Hooks for Mod {
     }
 
     fn client_setup(&self, host: &mut dyn ClientHost, _: &mut ClientSetupEvent) {
-        let arms = host.bake_layer("minecraft:player#main").and_then(|root| {
-            Some(PlayerArms {
-                right: LimbModel::extract(&root, "right_arm", "right_sleeve")?,
-                left: LimbModel::extract(&root, "left_arm", "left_sleeve")?,
-            })
-        });
+        let arms = host
+            .bake_layer("minecraft:player#main")
+            .and_then(|root| PlayerArms::from_baked_root(&root))
+            .unwrap_or_else(PlayerArms::fallback_wide);
         let _ = PLAYER_ARMS.set(arms);
     }
 

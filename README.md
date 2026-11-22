@@ -2,7 +2,7 @@
 
 Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), as one WebAssembly `.hmod`.
 
-**v0.8.0 — two-handed first-person rig, cocked-hammer sight alignment, 2-layer recoil & continuous reload.**
+**v0.8.1 — two-handed first-person rig (`entity/player/wide/steve` atlas fix + procedural fallback), cocked-hammer sight alignment, 2-layer recoil & continuous reload.**
 
 ## How it plays
 

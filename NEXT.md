@@ -227,6 +227,11 @@ Principais discrepâncias da v0.7.1 reveladas pela tabela:
 - **ADS & Recuo em 2 camadas (`render_frame_pre` + `compute_fov` + `calculate_player_turn` + `camera_pose`):** dinâmica de 2ª ordem por frame (`event.elapsed`), zoom `0.67`, sensibilidade escalada, subida de câmera com recuperação suave de `57%` (`set_local_rotation`), micro-jolt e coice visual pivotado na coronha.
 - **Recarga contínua & balística (`level_tick_post` + `ToClient<RifleSync>`):** ciclo `Opening 8t -> Inserting 10t/bala -> Closing 6t` com 1 aperto de `R` (interrompível por tiro com munição no tubo, corrida ou troca de slot), `should_cause_reequip_animation` desativado para variações de `damage`, velocidade `15.0` b/t, `LEVER_TICKS = 10` e dispersão dinâmica ADS/Hipfire.
 
+## Hotfix v0.8.1 (braços invisíveis em 1ª pessoa)
+
+- **Causa raiz no atlas do Horizon (`native_draw_model_part`):** `self.gui.atlas.sprites` registra sprites vanilla **sem** o prefixo `"minecraft:"` (`"entity/player/wide/steve"`, igual a `"misc/vignette"` e ao `Game::first_person_arm` em `frame_geometry.rs`), enquanto `bake_layer("minecraft:player#main")` exige o prefixo. Passar `"minecraft:entity/player/wide/steve"` fazia `draw.model_part` retornar `false` sem emitir vértices.
+- **Correção:** `LimbModel::draw_part_with_skin` passa `"entity/player/wide/steve"` (com fallback automático para `"minecraft:entity/player/wide/steve"`), `PlayerArms::fallback_wide` garante malha procedural `64x64` (`MeshDefinition` + `LayerDefinition`) caso `bake_layer` falhe ou `render_hand` rode antes de `client_setup`, e a inclinação/comprimento do antebraço direito foi refinada (`rx = 110°`, `sy = 0.82`) para aparecer mais no hipfire mantendo folga segura do near-plane (`z <= -0.065` mesmo no pico de recuo).
+
 ## Regras do projeto
 
 - **Português**, técnico e objetivo, sem encher linguiça.

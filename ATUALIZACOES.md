@@ -1,9 +1,9 @@
-# Plano de Atualizações — Blackpowder Legacy (`v0.8.0`)
+# Plano de Atualizações — Blackpowder Legacy (`v0.8.1`)
 
-Documento visual para revisão e aprovação do escopo da **v0.8.0**, baseado na
+Documento visual para revisão e aprovação do escopo da **v0.8.0 / v0.8.1**, baseado na
 análise do **TAC 0.3.10.1** cruzada com o código do **Horizon SDK** (`0a875da9`).
 
-> **Status:** Implementado na **v0.8.0** (**Opção B** aprovada — cão engatilhado no `.bbmodel`/`.json` liberando a linha de visada centralizada, ambos os braços em 1ª pessoa presos à pose da arma, ADS/recuo em 2 camadas independentes de FPS, recarga contínua por cartucho e balística Winchester 1873 calibrada).
+> **Status:** Implementado na **v0.8.0** + hotfix **v0.8.1** (**Opção B** validada em jogo com cão engatilhado no `.bbmodel`/`.json`; na `v0.8.1` corrigida a chave do sprite no atlas do Horizon de `"minecraft:entity/player/wide/steve"` para `"entity/player/wide/steve"` + fallback procedural `LayerDefinition` e enquadramento fino dos antebraços em `1080p`).
 
 ---
 
