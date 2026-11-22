@@ -2,16 +2,15 @@
 
 Blackpowder-era firearms for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust), as one WebAssembly `.hmod`.
 
-**v0.7.1 — maintenance: the first-person arm holds the rifle, and the tree is tidied.**
+**v0.8.0 — two-handed first-person rig, cocked-hammer sight alignment, 2-layer recoil & continuous reload.**
 
 ## How it plays
 
 - Craft the rifle (iron, oak, a stick and a tripwire hook) and .44-40 cartridges (gunpowder + copper + iron nugget, 6 at a time).
 - The tube magazine holds **8 rounds**; a brass bar under the icon tracks them, and the counter shows on the action bar.
-- **Hold right click** to shoulder and aim: the view zooms in, a light vignette frames it and the rifle slides onto the sights. The player's own arm is drawn holding the grip. Aiming for 0.4 s works the lever — the rifle is then ready to fire.
-- **Left click while aiming** fires one round. The shot kicks, then the lever cycles again (`LEVER_TICKS` between shots, enforced server-side) before the next round.
-- **R** loads one cartridge per press, `RELOAD_TICKS` apart, until the tube is full (remappable in **Options > Controls**, under Blackpowder Legacy). The gun dips as each round slides in.
-- Away from the aim the rifle never mines or punches; left click behaves normally.
+- **Hold right click** to shoulder and aim: the cocked hammer clears the sight line and the iron sights slide dead-center onto the screen via FPS-independent second-order dynamics, the world FOV zooms (`0.67`), mouse sensitivity scales proportionally, and a subtle vignette frames the view. Both of the player's arms (`right_arm` on the grip, `left_arm` under the wooden forestock) move with the rifle. Aiming is suppressed while sprinting or reloading.
+- **Left click** (aimed or hipfire while holding the rifle) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs `1.50` hipfire / `2.20` moving). Each live shot applies **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick) followed by the `10`-tick lever cycle (`120 RPM`). Clicking fire mid-reload immediately interrupts the reload when `>= 1` round is already in the tube.
+- **R** (a real Controls keybind, remappable in **Options > Controls**) starts a **continuous per-cartridge reload loop** on a single press (`8t` open + `10t`/round + `6t` close) until `8 / 8` or interrupted by firing, sprinting, or switching slots. The left hand slides back to push each shell into the side loading gate (`porta_B`), without triggering vanilla's item re-equip bob.
 
 ## Build and test
 
@@ -86,8 +85,8 @@ there is packaged into the `.hmod`.
 ## Design notes
 
 - **Magazine storage:** the tube count lives in the stack's vanilla `damage` component (0–8). `max_damage = 100` keeps every write valid and the rifle unstackable; nothing ever breaks. The `item_bar` hook replaces the (misleading) vanilla damage bar with a brass ammo gauge.
-- **Controls:** aiming is the item's use-over-time (`use_duration` > 0 on right click); the client flags it locally, so the zoom (`compute_fov_modifier`), the vignette (`gui_render_post`) and the sight alignment (`render_hand`) never wait on the network. Firing is `key_mapping_pre` cancelling the vanilla attack while aiming, plus a typed serverbound payload; reloading is a real Controls keybind. The server stays authoritative over the tube, the lever timing and the projectile.
-- **First-person arm:** `client_setup` bakes `minecraft:player#main` once and keeps the tree; `draw_forearm` takes the right arm out of it and poses it onto the rifle's grip, so the hand is the player's own skin. Because it draws under `render_hand`'s pose, it follows recoil, the lever and the reload dip for free. The grip's position in view space comes from the rifle's own `firstperson_righthand` display transform — note vanilla writes that translation in sixteenths of a block.
+- **Controls & Networking:** aiming is the item's use-over-time (`use_duration` > 0 on right click); `render_frame_pre` steps second-order springs per frame (`event.elapsed`), driving world FOV zoom (`compute_fov`), mouse turn scaling (`calculate_player_turn`), the vignette (`gui_render_post`), sight alignment (`render_hand`), and smooth camera recoil (`set_local_rotation`). Firing and reloading use bidirectional typed payloads (`RifleInput` client→server and `RifleSync` server→client) so recoil/lever animations only trigger on authoritative live shots, dry clicks give a subtle flinch, and `should_cause_reequip_animation` suppresses equip dips on ammo updates.
+- **First-person arms:** `client_setup` bakes `minecraft:player#main` once and extracts `right_arm` (+ `right_sleeve`) and `left_arm` (+ `left_sleeve`) with zeroed local poses; `draw_arms` replicates `render_hand`'s exact pose matrix + `HAND_BASE` on `event.draw` with `[sxz, -sy, -sxz]` scaling so both hands follow ADS, recoil, lever action, and loading-gate shell insertion in lockstep.
 - **Projectile:** `blackpowder_legacy:bullet` is a content-declared thrown type (snowball template) launched server-side with `host.spawn_projectile_from_rotation` at 6× throw power and tight spread. Bullet drop and damage falloff are future material.
 - **Sounds:** vanilla events broadcast through `LevelRef::play_sound` (`firework_rocket.blast` for the shot, crossbow clicks for the lever and the last cartridge) — no chat spam. Custom `.ogg` gunshots replace them in a later version.
 - **3D model:** `models/winchester_1873.bbmodel` (Blockbench "free" project, 336 elements, one 1024×1024 sheet) is converted by `tools/bbmodel_convert.py` into `assets/blackpowder_legacy/models/item/winchester_1873.json`. The converter scales the model ×0.48 into Horizon's [-16, 32] element bounds, divides the pixel UVs into the 0–16 space and keeps Blockbench's Euler-XYZ element rotations, which Horizon's model parser accepts natively. Run it again (`python3 tools/bbmodel_convert.py`) after editing the model in Blockbench.
