@@ -26,7 +26,7 @@
 //! chat). A shot also puffs black-powder smoke past the muzzle.
 
 use mod_api::{
-    ClientHost, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
+    ClientHost, ClientSetupEvent, ClientTickPreEvent, ComputeFovModifierEvent, GuiDraw, GuiRenderPostEvent,
     Hand, Hooks, Host, HostSide, Identifier, IPayloadContext, ItemBarEvent, ItemKey, ItemPart,
     ItemStack, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LivingRef, ModelPart,
     OnUseTickEvent, ParticleKey, ParticleOptions, PayloadId, PartPose, Registrar,
@@ -290,7 +290,7 @@ impl Hooks for Mod {
     /// Bake the player model once, so the first-person arm is the player's own
     /// (skin, sleeve and all) rather than a box of the mod's. A layer that will
     /// not bake leaves the rifle handless, as it was before.
-    fn client_setup(&self, host: &dyn ClientHost) {
+    fn client_setup(&self, host: &dyn ClientHost, _: &mut ClientSetupEvent<'_>, _: &mut dyn FnMut()) {
         let _ = PLAYER_ARM.set(host.bake_layer("minecraft:player#main"));
     }
 
