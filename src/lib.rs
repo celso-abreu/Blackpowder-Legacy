@@ -100,8 +100,12 @@ const BULLET_HOLE_LIFETIME_SECS: f32 = 35.0;
 const BULLET_HOLE_BASE_SCALE: f32 = 0.44;
 const MAX_SPENT_CASINGS: usize = 48;
 const CASING_LIFETIME_SECS: f32 = 20.0;
-const CASING_BASE_SCALE: f32 = 0.95;
-const CASING_REST_RADIUS: f64 = 0.017;
+const CASING_BASE_SCALE: f32 = 0.64;
+const CASING_REST_RADIUS: f64 = 0.012;
+const CASING_RISE_START_SECS: f32 = LEVER_DELAY_SECS + 0.06;
+const CASING_HANDOFF_SECS: f32 = LEVER_DELAY_SECS + 0.16;
+const CASING_LAST_RISE_START_SECS: f32 = 0.06;
+const CASING_LAST_HANDOFF_SECS: f32 = 0.15;
 const AMMO_BAR_RGB: u32 = 0xC9_A2_27;
 const DEFAULT_STEVE_WIDE: &str = "entity/player/wide/steve";
 
@@ -165,6 +169,14 @@ const RIFLE_DISPLAY_SCALE: f32 = 0.60;
 /// Muzzle crown (`boca_cano` center) in `[0..16]` JSON texel coordinates.
 const MUZZLE_TEXELS: [f32; 3] = [8.139, 11.68, -16.0];
 
+/// Top receiver carrier / ejection port (`trava_dorsal`: `X=[7.803..8.475]`,
+/// `Y=[12.032..12.224]`, `Z=[10.400..11.456]`) in `[0..16]` JSON texels:
+/// - `EJECTOR_START_TEXELS`: inside the carrier slot beneath `trava_dorsal`.
+/// - `EJECTOR_HANDOFF_TEXELS`: just clearing the top-right lip of `trava_dorsal` where
+///   the 1st-person shell hands off seamlessly to world-space physics.
+const EJECTOR_START_TEXELS: [f32; 3] = [8.139, 11.42, 10.93];
+const EJECTOR_HANDOFF_TEXELS: [f32; 3] = [8.42, 12.78, 11.05];
+
 /// Sub-model pivots in `[0..16]` JSON texel coordinates (`BB -> JM`: `8 + x`, `y`, `8 + z`).
 const LEVER_PIVOT_TEX: [f32; 3] = [8.139, 8.912, 13.376];
 const HAMMER_PIVOT_TEX: [f32; 3] = [8.139, 11.072, 15.488];
@@ -173,9 +185,10 @@ const GATE_PIVOT_TEX: [f32; 3] = [8.936, 10.592, 10.432];
 const RECOIL_PIVOT_TEXELS: [f32; 3] = [8.14, 8.60, 22.00];
 
 /// Hand grip anchors in `[0..16]` JSON texels (wrapping underneath `punho` stock wrist
-/// and cradling underneath `guarda_mao` wooden forestock without rising over top sights).
+/// and cradling snugly around `guarda_mao_traseiro` `[7.56..8.72, 9.86..11.74, -0.64..7.52]`
+/// with zero air gap while staying well below the `12.68` iron-sight line).
 const GRIP_WRIST_TEXELS: [f32; 3] = [9.55, 5.45, 16.50];
-const FORESTOCK_TEXELS: [f32; 3] = [7.65, 5.15, 4.60];
+const FORESTOCK_TEXELS: [f32; 3] = [8.55, 8.05, 3.60];
 
 /// First-person player arm scale compensated for `RIFLE_DISPLAY_SCALE` (`0.60`):
 /// - Cross-section `1.36 * 0.60 = 0.816` world blocks and forearm reach `1.54 * 0.60 = 0.924`
@@ -313,6 +326,9 @@ static LAST_WORLD_FOV_BITS: AtomicU32 = AtomicU32::new(0x428C_0000); // 70.0_f32
 static LAST_MUZZLE_VIEW_X: AtomicU32 = AtomicU32::new(0x3F07_1A9F); // 0.52775_f32
 static LAST_MUZZLE_VIEW_Y: AtomicU32 = AtomicU32::new(0xBEAA_0000); // -0.33203_f32
 static LAST_MUZZLE_VIEW_Z: AtomicU32 = AtomicU32::new(0xC001_47AE); // -2.02000_f32
+static LAST_EJECTOR_VIEW_X: AtomicU32 = AtomicU32::new(0x3F09_AE14); // 0.5378_f32
+static LAST_EJECTOR_VIEW_Y: AtomicU32 = AtomicU32::new(0xBE94_FDF4); // -0.2910_f32
+static LAST_EJECTOR_VIEW_Z: AtomicU32 = AtomicU32::new(0xBF80_B852); // -1.0056_f32
 
 static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
@@ -1324,11 +1340,11 @@ impl Hooks for Mod {
                     let next = elapsed + dt;
                     if keep_uncocked {
                         anim.hammer_uncocked = true;
-                        if !casing_ejected && next >= 0.11 {
+                        if !casing_ejected && next >= CASING_LAST_HANDOFF_SECS {
                             casing_ejected = true;
                             eject_casing_aim = Some(aim_y.clamp(0.0, 1.0));
                         }
-                        anim.action = if next >= 0.24 {
+                        anim.action = if next >= 0.26 {
                             ActionAnim::None
                         } else {
                             ActionAnim::FireCycle {
@@ -1344,7 +1360,7 @@ impl Hooks for Mod {
                             lever_sound_played = true;
                             triggered_foley.push((SND_LEVER, 0.86, 1.0));
                         }
-                        if !casing_ejected && next >= LEVER_DELAY_SECS + 0.06 {
+                        if !casing_ejected && next >= CASING_HANDOFF_SECS {
                             casing_ejected = true;
                             eject_casing_aim = Some(aim_y.clamp(0.0, 1.0));
                         }
@@ -1696,10 +1712,15 @@ impl Hooks for Mod {
             hammer_uncocked,
             action,
         );
-        let muzzle_view = compute_muzzle_view_pos(&pose, equip);
+        let muzzle_view = compute_gun_texel_view_pos(MUZZLE_TEXELS, &pose, equip);
         LAST_MUZZLE_VIEW_X.store(muzzle_view[0].to_bits(), Ordering::Relaxed);
         LAST_MUZZLE_VIEW_Y.store(muzzle_view[1].to_bits(), Ordering::Relaxed);
         LAST_MUZZLE_VIEW_Z.store(muzzle_view[2].to_bits(), Ordering::Relaxed);
+
+        let ejector_view = compute_gun_texel_view_pos(EJECTOR_HANDOFF_TEXELS, &pose, equip);
+        LAST_EJECTOR_VIEW_X.store(ejector_view[0].to_bits(), Ordering::Relaxed);
+        LAST_EJECTOR_VIEW_Y.store(ejector_view[1].to_bits(), Ordering::Relaxed);
+        LAST_EJECTOR_VIEW_Z.store(ejector_view[2].to_bits(), Ordering::Relaxed);
 
         let arms = PLAYER_ARMS.get_or_init(PlayerArms::procedural_both);
         let arm_pair = if skin.slim { &arms.slim } else { &arms.wide };
@@ -1731,7 +1752,7 @@ impl Hooks for Mod {
                 pose.trigger_deg,
                 pose.gate_deg,
             ) {
-                // 8. Brass `.44-40` cartridge pushed through the loading gate during reload.
+                // 8a. Brass `.44-40` cartridge pushed through the loading gate during reload.
                 if pose.show_cartridge {
                     draw.push();
                     draw.translate(tex_to_unit(pose.cartridge_tex));
@@ -1740,6 +1761,20 @@ impl Hooks for Mod {
                     draw.rotate_about([0.0, 0.0, 1.0], pose.cartridge_rot[2], [0.0; 3]);
                     draw.translate([-0.5, -0.5, -0.5]);
                     let _ = draw.model(models.cartridge, 0xFF_FF_FF_FF);
+                    draw.pop();
+                }
+
+                // 8b. Spent `.44-40` brass casing rising out of the top carrier / ejection port
+                //     (`trava_dorsal`, depth-clipped by the steel receiver walls) right before
+                //     0-pixel handoff to world-space physics.
+                if pose.show_casing {
+                    draw.push();
+                    draw.translate(tex_to_unit(pose.casing_tex));
+                    draw.rotate_about([0.0, 1.0, 0.0], pose.casing_rot[1], [0.0; 3]);
+                    draw.rotate_about([1.0, 0.0, 0.0], pose.casing_rot[0], [0.0; 3]);
+                    draw.rotate_about([0.0, 0.0, 1.0], pose.casing_rot[2], [0.0; 3]);
+                    draw.translate([-0.5, -0.5, -0.5]);
+                    let _ = draw.model(models.casing, 0xFF_FF_FF_FF);
                     draw.pop();
                 }
 
@@ -1900,6 +1935,9 @@ struct WeaponPose {
     show_cartridge: bool,
     cartridge_tex: [f32; 3],
     cartridge_rot: [f32; 3],
+    show_casing: bool,
+    casing_tex: [f32; 3],
+    casing_rot: [f32; 3],
     right_hand_tex: [f32; 3],
     right_hand_rot: [f32; 3],
     left_hand_tex: [f32; 3],
@@ -1975,6 +2013,9 @@ fn evaluate_weapon_pose(
     let mut show_cartridge = false;
     let mut cartridge_tex = [11.2, 8.2, 11.2];
     let mut cartridge_rot = [0.0, 0.0, 0.0];
+    let mut show_casing = false;
+    let mut casing_tex = EJECTOR_START_TEXELS;
+    let mut casing_rot = [0.0, 0.0, 0.0];
 
     let base_right_tex = [
         GRIP_WRIST_TEXELS[0] - 0.20 * aim_clamped,
@@ -1988,13 +2029,13 @@ fn evaluate_weapon_pose(
     ];
     let base_left_tex = [
         FORESTOCK_TEXELS[0],
-        FORESTOCK_TEXELS[1] - 0.20 * aim_clamped,
+        FORESTOCK_TEXELS[1] - 0.25 * aim_clamped,
         FORESTOCK_TEXELS[2],
     ];
     let base_left_rot = [
-        126.0 + 8.0 * aim_clamped,
-        -24.0 + 4.0 * aim_clamped,
-        32.0 - 4.0 * aim_clamped,
+        118.0 + 4.0 * aim_clamped,
+        -16.0 + 3.0 * aim_clamped,
+        14.0 - 2.0 * aim_clamped,
     ];
 
     let mut right_hand_tex = base_right_tex;
@@ -2024,7 +2065,24 @@ fn evaluate_weapon_pose(
             trigger_deg = -20.0 * (1.0 - ((elapsed - 0.06).max(0.0) / 0.14).clamp(0.0, 1.0));
             hammer_deg = -36.0 * strike;
 
-            if !keep_uncocked && elapsed >= LEVER_DELAY_SECS {
+            if keep_uncocked {
+                if (CASING_LAST_RISE_START_SECS..CASING_LAST_HANDOFF_SECS).contains(&elapsed) {
+                    let u = ((elapsed - CASING_LAST_RISE_START_SECS)
+                        / (CASING_LAST_HANDOFF_SECS - CASING_LAST_RISE_START_SECS))
+                        .clamp(0.0, 1.0);
+                    show_casing = true;
+                    casing_tex = lerp3(EJECTOR_START_TEXELS, EJECTOR_HANDOFF_TEXELS, u);
+                    casing_rot = [18.0 * u, -8.0 * u, 24.0 * u];
+                }
+            } else if elapsed >= LEVER_DELAY_SECS {
+                if (CASING_RISE_START_SECS..CASING_HANDOFF_SECS).contains(&elapsed) {
+                    let u = ((elapsed - CASING_RISE_START_SECS)
+                        / (CASING_HANDOFF_SECS - CASING_RISE_START_SECS))
+                        .clamp(0.0, 1.0);
+                    show_casing = true;
+                    casing_tex = lerp3(EJECTOR_START_TEXELS, EJECTOR_HANDOFF_TEXELS, u);
+                    casing_rot = [18.0 * u, -8.0 * u, 24.0 * u];
+                }
                 let lt = ((elapsed - LEVER_DELAY_SECS) / LEVER_DURATION_SECS).clamp(0.0, 1.0);
                 let lever_curve = if lt < 0.45 {
                     smoothstep(lt / 0.45)
@@ -2062,8 +2120,8 @@ fn evaluate_weapon_pose(
             let open_secs = (RELOAD_OPEN_TICKS as f32) * 0.05;
             let p = smoothstep((elapsed / open_secs).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
-            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], p);
-            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], p);
+            left_hand_tex = lerp3(base_left_tex, [12.10, 7.20, 12.20], p);
+            left_hand_rot = lerp3(base_left_rot, [122.0, -12.0, 24.0], p);
         }
         ActionAnim::ReloadInsert { elapsed } => {
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, 1.0);
@@ -2100,35 +2158,35 @@ fn evaluate_weapon_pose(
             gun_rot[2] -= 2.4 * seat_bump;
 
             left_hand_tex = if u < 0.32 {
-                lerp3([12.95, 4.55, 12.55], [12.25, 5.75, 12.05], smoothstep(u / 0.32))
+                lerp3([12.20, 7.10, 12.35], [11.35, 8.05, 11.75], smoothstep(u / 0.32))
             } else if u < 0.70 {
                 lerp3(
-                    [12.25, 5.75, 12.05],
-                    [11.85, 6.05, 11.45],
+                    [11.35, 8.05, 11.75],
+                    [10.85, 8.35, 11.35],
                     smoothstep((u - 0.32) / 0.38),
                 )
             } else {
                 lerp3(
-                    [11.85, 6.05, 11.45],
-                    [12.95, 4.55, 12.55],
+                    [10.85, 8.35, 11.35],
+                    [12.20, 7.10, 12.35],
                     smoothstep((u - 0.70) / 0.30),
                 )
             };
-            left_hand_rot = [124.0, -14.0 + 5.0 * seat_bump, 32.0];
+            left_hand_rot = [122.0, -12.0 + 4.0 * seat_bump, 24.0];
         }
         ActionAnim::ReloadEndNorm { elapsed } => {
             let dur = (RELOAD_CLOSE_NORM_TICKS as f32) * 0.05;
             let p = 1.0 - smoothstep((elapsed / dur).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, p);
-            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], p);
-            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], p);
+            left_hand_tex = lerp3(base_left_tex, [12.10, 7.20, 12.20], p);
+            left_hand_rot = lerp3(base_left_rot, [122.0, -12.0, 24.0], p);
         }
         ActionAnim::ReloadEndEmpty { elapsed, .. } => {
             let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
             let settle = 1.0 - smoothstep((elapsed / 0.28).clamp(0.0, 1.0));
             apply_reload_cradle(&mut gun_trans, &mut gun_rot, settle);
-            left_hand_tex = lerp3(base_left_tex, [12.85, 4.65, 12.40], settle);
-            left_hand_rot = lerp3(base_left_rot, [126.0, -10.0, 32.0], settle);
+            left_hand_tex = lerp3(base_left_tex, [12.10, 7.20, 12.20], settle);
+            left_hand_rot = lerp3(base_left_rot, [122.0, -12.0, 24.0], settle);
 
             if elapsed >= 0.15 {
                 let lt = ((elapsed - 0.15) / (dur - 0.17)).clamp(0.0, 1.0);
@@ -2219,8 +2277,8 @@ fn evaluate_weapon_pose(
             gun_rot[0] += rx;
             gun_rot[1] += ry;
             gun_rot[2] += rz;
-            left_hand_tex = lerp3(base_left_tex, [7.85, 5.45, 6.10], l_shift);
-            left_hand_rot = lerp3(base_left_rot, [128.0, -18.0, 28.0], l_shift);
+            left_hand_tex = lerp3(base_left_tex, [8.55, 8.15, 5.10], l_shift);
+            left_hand_rot = lerp3(base_left_rot, [120.0, -14.0, 16.0], l_shift);
         }
     }
 
@@ -2234,6 +2292,9 @@ fn evaluate_weapon_pose(
         show_cartridge,
         cartridge_tex,
         cartridge_rot,
+        show_casing,
+        casing_tex,
+        casing_rot,
         right_hand_tex,
         right_hand_rot,
         left_hand_tex,
@@ -2340,10 +2401,11 @@ fn model_texel_to_hand(tex: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Evaluates `boca_cano` (`MUZZLE_TEXELS`) through the exact `render_hand` transform stack
-/// (`RIFLE_DISPLAY` -> `HAND_BASE` -> `gun_rot` -> `gun_trans`) in 1st-person hand camera space.
-fn compute_muzzle_view_pos(pose: &WeaponPose, equip: f32) -> [f32; 3] {
-    let local = model_texel_to_hand(MUZZLE_TEXELS);
+/// Evaluates any `[0..16]` rifle JSON texel point (`MUZZLE_TEXELS`, `EJECTOR_HANDOFF_TEXELS`, …)
+/// through the exact `render_hand` transform stack (`RIFLE_DISPLAY` -> `HAND_BASE` -> `gun_rot`
+/// -> `gun_trans`) in 1st-person hand camera space.
+fn compute_gun_texel_view_pos(tex: [f32; 3], pose: &WeaponPose, equip: f32) -> [f32; 3] {
+    let local = model_texel_to_hand(tex);
     let mut x = HAND_BASE[0] + local[0];
     let mut y = HAND_BASE[1] - equip * 0.6 + local[1];
     let mut z = HAND_BASE[2] + local[2];
@@ -3370,7 +3432,7 @@ fn on_bullet_impact_sync(value: BulletImpactSync, cx: &mut dyn IPayloadContext) 
     Ok(())
 }
 
-fn spawn_spent_casing_from_camera(host: &dyn ClientHost, aim: f32) {
+fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
     let Some(cam) = host.camera_entity() else {
         return;
     };
@@ -3390,16 +3452,28 @@ fn spawn_spent_casing_from_camera(host: &dyn ClientHost, aim: f32) {
     let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
     let right = [-cos_y, 0.0, -sin_y];
 
-    let aim64 = f64::from(aim.clamp(0.0, 1.0));
-    let first_person = host.camera_type() == CameraType::FirstPerson;
+    let first_person = host.camera_type() == CameraType::FirstPerson && holding_rifle_recently();
     let (port_right, port_up, port_fwd) = if first_person {
+        // Exact 0-pixel handoff from `EJECTOR_HANDOFF_TEXELS` (`trava_dorsal` top carrier port):
+        // converts 1st-person 70° hand-pass view coordinates `(ex, ey, ez)` into `world_fov`
+        // world space at `target_fwd = 0.72` blocks in front of the eye.
+        let ex = f64::from(f32::from_bits(LAST_EJECTOR_VIEW_X.load(Ordering::Relaxed)));
+        let ey = f64::from(f32::from_bits(LAST_EJECTOR_VIEW_Y.load(Ordering::Relaxed)));
+        let ez = f64::from(f32::from_bits(LAST_EJECTOR_VIEW_Z.load(Ordering::Relaxed)));
+        let fwd_1p = (-ez).clamp(0.35, 2.50);
+        let world_fov =
+            f64::from(f32::from_bits(LAST_WORLD_FOV_BITS.load(Ordering::Relaxed)).clamp(20.0, 150.0));
+        let fov_ratio = (world_fov.to_radians() * 0.5).tan() / (35.0_f64.to_radians()).tan();
+        let target_fwd = 0.72_f64;
+        let ray_scale = target_fwd / fwd_1p;
         (
-            0.25 * (1.0 - aim64) + 0.02 * aim64,
-            -0.16 * (1.0 - aim64) - 0.05 * aim64,
-            0.58 * (1.0 - aim64) + 0.52 * aim64,
+            (ex * fov_ratio * ray_scale).clamp(-1.10, 1.10),
+            (ey * fov_ratio * ray_scale).clamp(-1.10, 1.10),
+            target_fwd,
         )
     } else {
-        (0.26, -0.28, 0.52)
+        // `F5` third-person held receiver top carrier position.
+        (0.26, -0.26, 0.56)
     };
 
     let origin = [
@@ -3414,10 +3488,11 @@ fn spawn_spent_casing_from_camera(host: &dyn ClientHost, aim: f32) {
     let r2 = f64::from(fx.next_unit_f32());
     let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
 
-    // Authentic Winchester 1873 top-carrier ejection: upward and slightly right/rearward arc.
-    let v_right = 1.35 + 0.55 * r0;
-    let v_up = 2.05 + 0.55 * r1;
-    let v_fwd = -0.30 + 0.42 * r2;
+    // Authentic Winchester 1873 top-carrier ejection: pops up out of `trava_dorsal` and arcs
+    // off to the right/rear away from the barrel & iron sights.
+    let v_right = 0.92 + 0.38 * r0;
+    let v_up = 1.55 + 0.38 * r1;
+    let v_fwd = -0.18 + 0.24 * r2;
     let vel = [
         right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
         right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
@@ -3435,18 +3510,21 @@ fn spawn_spent_casing_from_camera(host: &dyn ClientHost, aim: f32) {
     if fx.casings.len() >= MAX_SPENT_CASINGS {
         fx.casings.remove(0);
     }
-    let init_yaw = yaw_deg + 80.0 + (fx.next_unit_f32() * 20.0 - 10.0);
-    let pitch_vel = (520.0 + 280.0 * fx.next_unit_f32()) * spin_sign;
-    let yaw_vel = (240.0 + 180.0 * fx.next_unit_f32()) * spin_sign;
-    let roll_vel = 640.0 + 260.0 * fx.next_unit_f32();
+    // Start aligned with the barrel & carrier slot (`local -Z` hollow mouth pointing forward,
+    // tilted `+18°` upward matching Stage 1's exit angle) before tumbling end-over-end.
+    let init_yaw = 180.0 - yaw_deg - 8.0;
+    let init_pitch = -pitch_deg - 18.0;
+    let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
+    let yaw_vel = (210.0 + 160.0 * fx.next_unit_f32()) * spin_sign;
+    let roll_vel = 560.0 + 240.0 * fx.next_unit_f32();
 
     fx.casings.push(SpentCasing {
         dimension: dim,
         pos: origin,
         vel,
         yaw_deg: init_yaw,
-        pitch_deg: -pitch_deg * 0.5,
-        roll_deg: 0.0,
+        pitch_deg: init_pitch,
+        roll_deg: 24.0,
         yaw_vel,
         pitch_vel,
         roll_vel,
