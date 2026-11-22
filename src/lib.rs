@@ -45,7 +45,7 @@ use mod_api::{
     SubmitCustomGeometryEvent, Text, ToClient, ToServer, UseDurationEvent, UseItemEvent, VarInt,
     WorldDrawContext,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::f32::consts::{PI, TAU};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -93,6 +93,7 @@ const SMOKE_PARTICLE: &str = "minecraft:smoke";
 const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
 const FLAME_PARTICLE: &str = "minecraft:small_flame";
 const POOF_PARTICLE: &str = "minecraft:poof";
+const BLOCK_PARTICLE: &str = "minecraft:block";
 const DEFAULT_DIMENSION: &str = "minecraft:overworld";
 const MAX_BULLET_HOLES: usize = 96;
 const BULLET_HOLE_LIFETIME_SECS: f32 = 35.0;
@@ -317,7 +318,6 @@ static SERVER_TICKS: AtomicU64 = AtomicU64::new(0);
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
 static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
 static RELOAD_SESSIONS: Mutex<BTreeMap<u128, ReloadSession>> = Mutex::new(BTreeMap::new());
-static ONLINE_PLAYERS: Mutex<BTreeSet<u128>> = Mutex::new(BTreeSet::new());
 
 static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
 static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
@@ -328,6 +328,7 @@ static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static POOF_KEY: OnceLock<ParticleKey> = OnceLock::new();
+static BLOCK_PARTICLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
@@ -933,12 +934,14 @@ impl Hooks for Mod {
         let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
         let poof = r.particle_key(POOF_PARTICLE);
+        let block_particle = r.particle_key(BLOCK_PARTICLE);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(smoke);
         let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
         let _ = POOF_KEY.set(poof);
+        let _ = BLOCK_PARTICLE_KEY.set(block_particle);
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
@@ -2458,7 +2461,6 @@ fn recoil_envelope(t: f32) -> f32 {
 fn on_rifle_input(value: RifleInput, cx: &mut dyn IPayloadContext) -> Result<(), String> {
     let player = cx.player().map_err(|e| format!("{e:?}"))?;
     let host = cx.server_host().map_err(|e| format!("{e:?}"))?;
-    ONLINE_PLAYERS.lock().unwrap().insert(player.uuid());
     match value.action.0 {
         ACTION_FIRE => {
             if let Some(smoke) = SMOKE_KEY.get().copied() {
@@ -3209,8 +3211,9 @@ fn normalize_cardinal_face(face: [i32; 3]) -> [i32; 3] {
 }
 
 fn sample_world_light(host: &dyn ClientHost, dimension: &str, pos: [i32; 3]) -> LightCoords {
+    let default_light = LightCoords::new(0, 15).unwrap_or(LightCoords::FULL_BRIGHT);
     let Some(level) = host.level(dimension) else {
-        return LightCoords::new(0, 15);
+        return default_light;
     };
     let block = level
         .brightness(host, LightLayer::Block, pos)
@@ -3220,7 +3223,7 @@ fn sample_world_light(host: &dyn ClientHost, dimension: &str, pos: [i32; 3]) -> 
         .brightness(host, LightLayer::Sky, pos)
         .unwrap_or(15)
         .clamp(0, 15) as u8;
-    LightCoords::new(block, sky)
+    LightCoords::new(block, sky).unwrap_or(default_light)
 }
 
 fn handle_bullet_terrain_impact(host: &mut dyn ServerHost, event: &ProjectileImpactEvent<'_>) {
@@ -3231,35 +3234,54 @@ fn handle_bullet_terrain_impact(host: &mut dyn ServerHost, event: &ProjectileImp
         event.at[2] + f64::from(face[2]) * 0.055,
     ];
 
-    if let Some(level) = host.level(event.dimension) {
-        level.play_sound(
+    let Some(level) = host.level(event.dimension) else {
+        return;
+    };
+    level.play_sound(
+        host,
+        SND_IMPACT_HIT,
+        event.at,
+        SoundSource::Players,
+        0.78,
+        1.18,
+    );
+    if let Some(block_key) = BLOCK_PARTICLE_KEY.get().copied()
+        && let Some(hit_state) = level.block_state(host, event.block)
+    {
+        let chip_opts = ParticleOptions::simple(block_key);
+        level.send_particles(
             host,
-            SND_IMPACT_HIT,
-            event.at,
-            SoundSource::Players,
-            0.78,
-            1.18,
+            &chip_opts,
+            Some(hit_state),
+            impact_fx_pos,
+            [0.05, 0.05, 0.05],
+            0.14,
+            10,
         );
-        if let Some(poof) = POOF_KEY.get().copied() {
-            let _ = level.spawn_particles(
-                host,
-                ParticleOptions::simple(poof),
-                impact_fx_pos,
-                [0.035, 0.035, 0.035],
-                0.024,
-                4,
-            );
-        }
-        if let Some(smoke) = SMOKE_KEY.get().copied() {
-            let _ = level.spawn_particles(
-                host,
-                ParticleOptions::simple(smoke),
-                impact_fx_pos,
-                [0.045, 0.045, 0.045],
-                0.012,
-                5,
-            );
-        }
+    }
+    if let Some(poof) = POOF_KEY.get().copied() {
+        let poof_opts = ParticleOptions::simple(poof);
+        level.send_particles(
+            host,
+            &poof_opts,
+            None,
+            impact_fx_pos,
+            [0.035, 0.035, 0.035],
+            0.024,
+            3,
+        );
+    }
+    if let Some(smoke) = SMOKE_KEY.get().copied() {
+        let smoke_opts = ParticleOptions::simple(smoke);
+        level.send_particles(
+            host,
+            &smoke_opts,
+            None,
+            impact_fx_pos,
+            [0.045, 0.045, 0.045],
+            0.012,
+            4,
+        );
     }
 
     let Some(chan) = BULLET_IMPACT_SYNC.get() else {
@@ -3284,27 +3306,17 @@ fn handle_bullet_terrain_impact(host: &mut dyn ServerHost, event: &ProjectileImp
         rel_z_dm: to_dm(event.at[2], event.block[2]),
     };
 
-    let uuids: Vec<u128> = ONLINE_PLAYERS.lock().unwrap().iter().copied().collect();
-    let mut disconnected = Vec::new();
-    for uuid in uuids {
-        let Some(player) = host.player(uuid) else {
-            disconnected.push(uuid);
-            continue;
-        };
-        let near = player.entity().position(host).is_some_and(|p| {
-            let dx = p[0] - event.at[0];
-            let dy = p[1] - event.at[1];
-            let dz = p[2] - event.at[2];
-            dx * dx + dy * dy + dz * dz <= 80.0 * 80.0
-        });
-        if near {
-            let _ = chan.send(host, player, &payload);
-        }
-    }
-    if !disconnected.is_empty() {
-        let mut online = ONLINE_PLAYERS.lock().unwrap();
-        for uuid in disconnected {
-            online.remove(&uuid);
+    if let Some(players) = level.online_players(host) {
+        for player in players {
+            let near = player.entity().position(host).is_some_and(|p| {
+                let dx = p[0] - event.at[0];
+                let dy = p[1] - event.at[1];
+                let dz = p[2] - event.at[2];
+                dx * dx + dy * dy + dz * dz <= 80.0 * 80.0
+            });
+            if near {
+                let _ = chan.send(host, player, &payload);
+            }
         }
     }
 }
@@ -3319,7 +3331,7 @@ fn on_bullet_impact_sync(value: BulletImpactSync, cx: &mut dyn IPayloadContext) 
     ];
 
     let light_pos = [block[0] + face[0], block[1] + face[1], block[2] + face[2]];
-    let mut light = LightCoords::new(0, 15);
+    let mut light = LightCoords::new(0, 15).unwrap_or(LightCoords::FULL_BRIGHT);
     if let Ok(host) = cx.client_host() {
         if host.block_collision(block).is_empty() {
             return Ok(());
