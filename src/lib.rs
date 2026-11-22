@@ -457,7 +457,7 @@ fn draw_arms(event: &mut RenderHandEvent<'_, '_>, lever: f32, reload_blend: f32,
     draw.rotate_about([1.0, 0.0, 0.0], rotation[0], [0.0; 3]);
     draw.rotate_about([0.0, 1.0, 0.0], rotation[1], [0.0; 3]);
     draw.rotate_about([0.0, 0.0, 1.0], rotation[2], [0.0; 3]);
-    draw.scale(scale);
+    draw.scale([scale; 3]);
     draw.translate([HAND_BASE[0], HAND_BASE[1] - equip * 0.6, HAND_BASE[2]]);
 
     // Right hand holds the stock wrist and swings forward/down with the lever loop.
@@ -583,9 +583,9 @@ impl Hooks for Mod {
             return;
         }
 
-        let sneak_down = matches!(host.mapping("key.sneak"), Ok(Some(m)) if m.is_down);
-        let sprint_down = matches!(host.mapping("key.sprint"), Ok(Some(m)) if m.is_down);
-        let forward_down = matches!(host.mapping("key.forward"), Ok(Some(m)) if m.is_down);
+        let sneak_down = matches!(host.mapping("key.sneak"), Ok(Some(m)) if m.down);
+        let sprint_down = matches!(host.mapping("key.sprint"), Ok(Some(m)) if m.down);
+        let forward_down = matches!(host.mapping("key.forward"), Ok(Some(m)) if m.down);
         let sprinting = sprint_down && forward_down && !sneak_down;
         CLIENT_SNEAKING.store(sneak_down, Ordering::Relaxed);
         CLIENT_SPRINTING.store(sprinting, Ordering::Relaxed);
@@ -694,30 +694,22 @@ impl Hooks for Mod {
 
             let _ = anim.reload_dyn.step(dt, if reload_want { 1.0 } else { 0.0 });
 
-            let kick_target = if let Some(t) = &mut anim.shot_timer {
-                let cur = *t;
-                *t += dt;
-                if *t >= 0.52 {
-                    anim.shot_timer = None;
-                }
+            let kick_target = if let Some(cur) = anim.shot_timer {
+                let next = cur + dt;
+                anim.shot_timer = if next >= 0.52 { None } else { Some(next) };
                 recoil_envelope(cur)
             } else {
                 0.0
             };
             let _ = anim.recoil_dyn.step(dt, kick_target);
 
-            if let Some(t) = &mut anim.cam_recoil_timer {
-                let t0 = *t;
+            if let Some(t0) = anim.cam_recoil_timer {
                 let t1 = t0 + dt;
                 let (cp0, cy0) = cam_recoil_curve(t0);
                 let (cp1, cy1) = cam_recoil_curve(t1);
                 cam_delta_pitch = (cp1 - cp0) * anim.cam_pitch_kick;
                 cam_delta_yaw = (cy1 - cy0) * anim.cam_yaw_kick;
-                if t1 >= 0.385 {
-                    anim.cam_recoil_timer = None;
-                } else {
-                    *t = t1;
-                }
+                anim.cam_recoil_timer = if t1 >= 0.385 { None } else { Some(t1) };
             }
 
             if anim.jolt_timer > 0.0 {
@@ -887,9 +879,10 @@ impl Hooks for Mod {
         if aim < 0.02 || event.gui_hidden {
             return;
         }
-        let [w, h] = event.batch.gui_size();
-        let shade = ((1.0 - AIM_VIGNETTE) * aim * 255.0).clamp(0.0, 255.0) as u32;
-        let color = (0xFF_00_00_00u32 | (shade << 16) | (shade << 8) | shade) as i32;
+        let [w, h] = event.batch.size();
+        let brightness = ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0).clamp(0.0, 255.0) as u32;
+        let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
+        let (w, h) = (w as i32, h as i32);
         let _ = event.batch.gui_paint(&[GuiDraw::Blit {
             texture: "misc/vignette".into(),
             blend: mod_api::client::hud_layout::Blend::Vignette,
