@@ -99,16 +99,21 @@ def main() -> None:
         "credit": "Winchester 1873 3D model, converted from models/winchester_1873.bbmodel",
         "textures": {"0": TEXTURE_ID, "particle": TEXTURE_ID},
         "elements": out_elements,
-        # The barrel runs along -Z (muzzle first), the stock toward +Z, so the
-        # in-hand views need no big rotation: identity already points forward.
+        # Display poses, derived from Horizon's render chain (vanilla-faithful):
+        # third person applies arm * rotX(-90) * rotY(180) * T(1,2,-10)/16
+        # (mobs/render.rs hand_base), which maps the item axes to
+        # +X:character-right, +Y:forward, +Z:up — so rotation [90,0,0] turns
+        # the barrel (-Z) forward and the top (+Y) up, and the translation
+        # brings the grip (the stock wrist, ~(8, 7.3, 18.6) in model units)
+        # onto the hand anchor. First person is plain view space (-Z
+        # forward): identity rotation, translation pulls the grip to the
+        # hand. Left hands inherit the right's entry and mirror it.
         "display": {
-            "thirdperson_righthand": {"rotation": [0, 0, 0], "translation": [0, 1, 1], "scale": [0.4, 0.4, 0.4]},
-            "thirdperson_lefthand": {"rotation": [0, 0, 0], "translation": [0, 1, 1], "scale": [0.4, 0.4, 0.4]},
-            "firstperson_righthand": {"rotation": [0, 0, 0], "translation": [2, -2, 2], "scale": [0.4, 0.4, 0.4]},
-            "firstperson_lefthand": {"rotation": [0, 0, 0], "translation": [2, -2, 2], "scale": [0.4, 0.4, 0.4]},
+            "thirdperson_righthand": {"rotation": [90, 0, 0], "translation": [0, 4.75, 0.3], "scale": [0.45, 0.45, 0.45]},
+            "firstperson_righthand": {"rotation": [0, 0, 0], "translation": [0, 0.3, -4.75], "scale": [0.45, 0.45, 0.45]},
             "ground": {"rotation": [0, 0, 0], "translation": [0, 2, 0], "scale": [0.25, 0.25, 0.25]},
-            "gui": {"rotation": [30, 225, 0], "translation": [0, 0, 0], "scale": [0.32, 0.32, 0.32]},
-            "fixed": {"rotation": [0, 180, 0], "translation": [0, 0, 0], "scale": [0.5, 0.5, 0.5]},
+            "gui": {"rotation": [30, 225, 0], "translation": [0, 0, 0], "scale": [0.4, 0.4, 0.4]},
+            "fixed": {"rotation": [0, 90, 0], "translation": [0, 0, 0], "scale": [0.3, 0.3, 0.3]},
         },
     }
 
