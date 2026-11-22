@@ -323,7 +323,7 @@ impl Hooks for Mod {
         let (w, h) = (w as i32, h as i32);
         let _ = event.batch.gui_paint(&[GuiDraw::Blit {
             texture: "misc/vignette".into(),
-            blend: mod_api::Blend::Vignette,
+            blend: mod_api::client::hud_layout::Blend::Vignette,
             x: 0,
             y: 0,
             w,
