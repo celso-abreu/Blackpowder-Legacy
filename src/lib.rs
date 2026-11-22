@@ -1,10 +1,12 @@
 //! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod).
 //!
-//! Controls (v0.6):
+//! Controls:
 //! - Hold right click: shoulder the rifle and aim down the sights — the gun
 //!   slides to the screen's centre (`render_hand`), the view zooms in
 //!   smoothly (`compute_fov_modifier`) and a vanilla vignette frames it
 //!   (`gui_render_post`). Aiming for at least LEVER_TICKS cycles the lever.
+//!   The player's own arm is drawn from `client_setup`'s baked player layer
+//!   (`draw_forearm`), so the rifle is held rather than floating.
 //! - Left click while aiming: fire one round (`key_mapping_pre` cancels the
 //!   vanilla attack, so the rifle never mines or punches, and a typed payload
 //!   asks the server to shoot). Each shot kicks (recoil) and the lever cycles
@@ -70,7 +72,9 @@ const ADS_OFFSET: [f32; 3] = [-0.56, 0.38, 0.05];
 const SHOT_SOUND: &str = "minecraft:entity.firework_rocket.blast";
 const DRY_SOUND: &str = "minecraft:block.lever.click";
 const LOAD_SOUND: &str = "minecraft:item.crossbow.loading_middle";
-const READY_SOUND: &str = "minecraft:item.crossbow.loading_end";
+/// The crossbow's "loaded" click: the last cartridge seating, and the lever
+/// closing after a shot. Two pitches keep them told apart.
+const CLICK_SOUND: &str = "minecraft:item.crossbow.loading_end";
 
 // Volume above 1.0 extends the hearing range past 16 blocks (3.0 → ~48, as a
 // gunshot should carry); the rest stay inside the vanilla 16-block bubble.
@@ -82,7 +86,6 @@ const LOAD_PITCH: f32 = 1.2;
 const READY_PITCH: f32 = 1.0;
 /// The lever click when the post-shot cycle completes (from the aim ticker's
 /// server half, LEVER_TICKS after a shot).
-const LEVER_SOUND: &str = "minecraft:item.crossbow.loading_end";
 const LEVER_PITCH: f32 = 1.5;
 
 const SMOKE_PARTICLE: &str = "minecraft:large_smoke";
@@ -541,7 +544,7 @@ fn reload_one(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
     }
     let full = loaded + 1 == TUBE_CAPACITY;
     if full {
-        play_sound_at(host, player, READY_SOUND, UI_VOLUME, READY_PITCH);
+        play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, READY_PITCH);
     } else {
         play_sound_at(host, player, LOAD_SOUND, UI_VOLUME, LOAD_PITCH);
     }
@@ -652,7 +655,7 @@ impl ItemPart for Winchester {
                 // exactly when the lever delay ends.
                 if was == Some(0) && held >= LEVER_TICKS {
                     drop(ticks);
-                    play_sound_at(host, player, LEVER_SOUND, UI_VOLUME, LEVER_PITCH);
+                    play_sound_at(host, player, CLICK_SOUND, UI_VOLUME, LEVER_PITCH);
                 }
             }
         }

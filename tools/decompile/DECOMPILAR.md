@@ -1,5 +1,7 @@
 # Decompilar um mod .jar
 
+Ferramentas de **estudo**, não fazem parte do mod e não entram no `.hmod`.
+
 Dois scripts para Windows que baixam o decompilador e transformam `.jar` em
 código Java legível. Não precisa instalar nada além do Java.
 
@@ -19,8 +21,9 @@ Os dois podem ser usados no mesmo jar: um acerta o que o outro erra.
 3. Espere. Na primeira vez ele baixa o decompilador (~1,6 MB) e guarda em
    `%TEMP%`, então não baixa de novo.
 
-O código sai em `decompilado/<nome-do-jar>/`, e o script pergunta se você quer
-abrir a pasta.
+O código sai em `decompilado/<nome-do-jar>/`, ao lado do `.bat`, e o script
+pergunta se você quer abrir a pasta. Essa saída já está no `.gitignore` da raiz
+(`decompilado/`, `decompilado-cfr/`), então não corre risco de ir para o Git.
 
 Também funciona **arrastando** um ou mais `.jar` em cima do `.bat` — aí ele
 decompila só aqueles, mesmo que estejam em outra pasta.

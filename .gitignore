@@ -7,3 +7,7 @@ target/
 
 # Python
 __pycache__/
+
+# Decompiled reference mods (tools/decompile/, not part of the mod)
+decompilado/
+decompilado-cfr/
