@@ -88,13 +88,13 @@ jobs:
 
       - name: Registry check
         shell: bash
-        run: set -o pipefail; cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
+        run: set -o pipefail; cargo horizon-mod check target/horizon-mod/just_a_rifle.hmod 2>&1 | tee -a build-log.txt
 
       - name: Upload the .hmod
         uses: actions/upload-artifact@v4
         with:
-          name: blackpowder_legacy-hmod
-          path: target/horizon-mod/blackpowder_legacy.hmod
+          name: just_a_rifle-hmod
+          path: target/horizon-mod/just_a_rifle.hmod
           if-no-files-found: error
 
       - name: Build log to the job summary

@@ -1,10 +1,10 @@
 [package]
-name = "blackpowder-legacy"
+name = "just-a-rifle"
 version = "0.9.0"
 edition = "2024"
 publish = false
 license = "MIT"
-description = "Blackpowder-era firearms for Horizon (Winchester 1873)"
+description = "Just a Rifle — one finely crafted Winchester 1873 lever-action rifle for Horizon"
 
 # The mod API is named by the pinned SDK that `cargo horizon-mod` fetches.
 # This path form is the only one the tool and the launcher accept (E_SDK_SOURCE).

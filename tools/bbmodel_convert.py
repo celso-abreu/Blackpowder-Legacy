@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Convert the Winchester's Blockbench model (models/winchester_1873.bbmodel)
-into Horizon's full item model JSON, the 6 standalone animated sub-models
-(assets/blackpowder_legacy/models/special/winchester_*.json), and its 1024px
+into Horizon's full item model JSON, the standalone animated sub-models
+(assets/just_a_rifle/models/special/winchester_*.json), and its 1024px
 texture PNG.
 
 Horizon's model format is vanilla's with one extension: an element's
@@ -24,10 +24,10 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "models" / "winchester_1873.bbmodel"
-MODEL_OUT = ROOT / "assets" / "blackpowder_legacy" / "models" / "item" / "winchester_1873.json"
-SPECIAL_DIR = ROOT / "assets" / "blackpowder_legacy" / "models" / "special"
-TEXTURE_OUT = ROOT / "assets" / "blackpowder_legacy" / "textures" / "item" / "rifle_texture.png"
-TEXTURE_ID = "blackpowder_legacy:item/rifle_texture"
+MODEL_OUT = ROOT / "assets" / "just_a_rifle" / "models" / "item" / "winchester_1873.json"
+SPECIAL_DIR = ROOT / "assets" / "just_a_rifle" / "models" / "special"
+TEXTURE_OUT = ROOT / "assets" / "just_a_rifle" / "textures" / "item" / "rifle_texture.png"
+TEXTURE_ID = "just_a_rifle:item/rifle_texture"
 
 # Uniform scale fitting the longest span (the barrel, Z) into the vanilla
 # bounds with a small safety margin against float rounding at the edges.
@@ -94,7 +94,7 @@ CASING_ELEMENTS = [
     },
 ]
 
-BULLET_HOLE_TEXTURE_ID = "blackpowder_legacy:item/bullet_hole"
+BULLET_HOLE_TEXTURE_ID = "just_a_rifle:item/bullet_hole"
 BULLET_HOLE_ELEMENTS = [
     {
         "from": [4.5, 4.5, 7.96],
@@ -239,7 +239,7 @@ def main() -> None:
     for part_name, part_elements in parts.items():
         special_out = SPECIAL_DIR / f"winchester_{part_name}.json"
         special_doc = {
-            "credit": "Blackpowder Legacy — Winchester 1873 animated sub-model",
+            "credit": "Just a Rifle — Winchester 1873 animated sub-model",
             "texture_size": [tex_w, tex_h],
             "textures": textures_map,
             "elements": part_elements,
@@ -249,7 +249,7 @@ def main() -> None:
 
     cartridge_out = SPECIAL_DIR / "winchester_cartridge.json"
     cartridge_doc = {
-        "credit": "Blackpowder Legacy — .44-40 3D Cartridge",
+        "credit": "Just a Rifle — .44-40 3D Cartridge",
         "texture_size": [tex_w, tex_h],
         "textures": textures_map,
         "elements": CARTRIDGE_ELEMENTS,
@@ -259,7 +259,7 @@ def main() -> None:
 
     casing_out = SPECIAL_DIR / "winchester_casing.json"
     casing_doc = {
-        "credit": "Blackpowder Legacy — Spent .44-40 Brass Casing",
+        "credit": "Just a Rifle — Spent .44-40 Brass Casing",
         "texture_size": [tex_w, tex_h],
         "textures": textures_map,
         "elements": CASING_ELEMENTS,
@@ -269,7 +269,7 @@ def main() -> None:
 
     hole_out = SPECIAL_DIR / "bullet_hole.json"
     hole_doc = {
-        "credit": "Blackpowder Legacy — Terrain Bullet Impact Decal",
+        "credit": "Just a Rifle — Terrain Bullet Impact Decal",
         "textures": {"0": BULLET_HOLE_TEXTURE_ID, "particle": BULLET_HOLE_TEXTURE_ID},
         "elements": BULLET_HOLE_ELEMENTS,
     }

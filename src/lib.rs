@@ -1,4 +1,4 @@
-//! Blackpowder Legacy — Winchester 1873 lever-action rifle (wasm mod, v0.9.0).
+//! Just a Rifle — Winchester 1873 lever-action rifle for Horizon (wasm mod, v0.9.0).
 //!
 //! Clean-room Rust `v0.9.0` architecture (inspired by TAC `0.3.10.1` design & timings):
 //! - **Multi-part articulated 1st-person model (`models/special/winchester_*.json`):**
@@ -54,40 +54,40 @@ use std::sync::{Mutex, OnceLock};
 // Content & Asset Identifiers
 // ---------------------------------------------------------------------------
 
-const MOD_ID: &str = "blackpowder_legacy";
-const WINCHESTER: &str = "blackpowder_legacy:winchester_1873";
-const CARTRIDGE: &str = "blackpowder_legacy:cartridge_44";
-const BULLET: &str = "blackpowder_legacy:bullet";
+const MOD_ID: &str = "just_a_rifle";
+const WINCHESTER: &str = "just_a_rifle:winchester_1873";
+const CARTRIDGE: &str = "just_a_rifle:cartridge_44";
+const BULLET: &str = "just_a_rifle:bullet";
 
-const MODEL_BODY_ID: &str = "blackpowder_legacy:special/winchester_body";
-const MODEL_LEVER_ID: &str = "blackpowder_legacy:special/winchester_lever";
-const MODEL_HAMMER_ID: &str = "blackpowder_legacy:special/winchester_hammer";
-const MODEL_TRIGGER_ID: &str = "blackpowder_legacy:special/winchester_trigger";
-const MODEL_GATE_ID: &str = "blackpowder_legacy:special/winchester_gate";
-const MODEL_CARTRIDGE_ID: &str = "blackpowder_legacy:special/winchester_cartridge";
-const MODEL_CASING_ID: &str = "blackpowder_legacy:special/winchester_casing";
-const MODEL_BULLET_HOLE_ID: &str = "blackpowder_legacy:special/bullet_hole";
+const MODEL_BODY_ID: &str = "just_a_rifle:special/winchester_body";
+const MODEL_LEVER_ID: &str = "just_a_rifle:special/winchester_lever";
+const MODEL_HAMMER_ID: &str = "just_a_rifle:special/winchester_hammer";
+const MODEL_TRIGGER_ID: &str = "just_a_rifle:special/winchester_trigger";
+const MODEL_GATE_ID: &str = "just_a_rifle:special/winchester_gate";
+const MODEL_CARTRIDGE_ID: &str = "just_a_rifle:special/winchester_cartridge";
+const MODEL_CASING_ID: &str = "just_a_rifle:special/winchester_casing";
+const MODEL_BULLET_HOLE_ID: &str = "just_a_rifle:special/bullet_hole";
 
-const SND_FIRE: &str = "blackpowder_legacy:item.winchester_fire";
-const SND_THUMP: &str = "blackpowder_legacy:item.winchester_thump";
-const SND_LEVER: &str = "blackpowder_legacy:item.winchester_lever";
-const SND_COCK: &str = "blackpowder_legacy:item.winchester_cock";
-const SND_RELOAD_INTRO: &str = "blackpowder_legacy:animation.winchester_reload_intro";
-const SND_RELOAD_INSERT: &str = "blackpowder_legacy:animation.winchester_reload_insert";
-const SND_RELOAD_END: &str = "blackpowder_legacy:animation.winchester_reload_end";
-const SND_DRAW: &str = "blackpowder_legacy:animation.winchester_draw";
-const SND_INSPECT: &str = "blackpowder_legacy:animation.winchester_inspect";
-const SND_SHELL_DROP: &str = "blackpowder_legacy:item.winchester_shell_drop";
+const SND_FIRE: &str = "just_a_rifle:item.winchester_fire";
+const SND_THUMP: &str = "just_a_rifle:item.winchester_thump";
+const SND_LEVER: &str = "just_a_rifle:item.winchester_lever";
+const SND_COCK: &str = "just_a_rifle:item.winchester_cock";
+const SND_RELOAD_INTRO: &str = "just_a_rifle:animation.winchester_reload_intro";
+const SND_RELOAD_INSERT: &str = "just_a_rifle:animation.winchester_reload_insert";
+const SND_RELOAD_END: &str = "just_a_rifle:animation.winchester_reload_end";
+const SND_DRAW: &str = "just_a_rifle:animation.winchester_draw";
+const SND_INSPECT: &str = "just_a_rifle:animation.winchester_inspect";
+const SND_SHELL_DROP: &str = "just_a_rifle:item.winchester_shell_drop";
 const SND_IMPACT_HIT: &str = "minecraft:block.stone.hit";
 
 const RELOAD_MAPPING: &str = "reload";
 const INSPECT_MAPPING: &str = "inspect";
 const ATTACK_MAPPING: &str = "key.attack";
 
-const INPUT_CHANNEL: &str = "blackpowder_legacy:rifle_input";
-const SYNC_CHANNEL: &str = "blackpowder_legacy:rifle_sync";
-const SKIN_CHANNEL: &str = "blackpowder_legacy:rifle_skin";
-const IMPACT_CHANNEL: &str = "blackpowder_legacy:bullet_impact";
+const INPUT_CHANNEL: &str = "just_a_rifle:rifle_input";
+const SYNC_CHANNEL: &str = "just_a_rifle:rifle_sync";
+const SKIN_CHANNEL: &str = "just_a_rifle:rifle_skin";
+const IMPACT_CHANNEL: &str = "just_a_rifle:bullet_impact";
 
 const SMOKE_PARTICLE: &str = "minecraft:smoke";
 const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
@@ -961,12 +961,12 @@ impl Hooks for Mod {
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
-                .label("key.blackpowder_legacy.reload")
+                .label("key.just_a_rifle.reload")
                 .context(KeyConflictContext::InGame),
         );
         r.register_key_mapping(
             KeyRegistration::new(INSPECT_MAPPING, "key.keyboard.i")
-                .label("key.blackpowder_legacy.inspect")
+                .label("key.just_a_rifle.inspect")
                 .context(KeyConflictContext::InGame),
         );
 

@@ -96,7 +96,7 @@ jobs:
 
       - name: Registry check
         shell: bash
-        run: set -o pipefail; cargo horizon-mod check target/horizon-mod/blackpowder_legacy.hmod 2>&1 | tee -a build-log.txt
+        run: set -o pipefail; cargo horizon-mod check target/horizon-mod/just_a_rifle.hmod 2>&1 | tee -a build-log.txt
 
       # Publish the checked .hmod. A rerun of the same tag replaces the asset
       # instead of failing, so a flaky first attempt stays recoverable.
@@ -106,13 +106,13 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          HMOD=target/horizon-mod/blackpowder_legacy.hmod
+          HMOD=target/horizon-mod/just_a_rifle.hmod
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$HMOD" --clobber
           else
             gh release create "$TAG" "$HMOD" \
               --target "${{ github.sha }}" \
-              --title "Blackpowder Legacy $TAG" \
+              --title "Just a Rifle $TAG" \
               --generate-notes
           fi
           gh release view "$TAG" --json tagName,assets \

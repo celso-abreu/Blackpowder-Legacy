@@ -1,7 +1,7 @@
-id = "blackpowder_legacy"
-name = "Blackpowder Legacy"
+id = "just_a_rifle"
+name = "Just a Rifle"
 version = "0.9.0"
-description = "TAC-inspired Winchester 1873 lever-action rifle for Horizon: multi-part animated receiver/lever/hammer/gate/cartridge, real player skin & slim/wide arms, ADS zoom, per-round reload, inspect, and CC0 custom firearm audio."
+description = "Just one finely crafted Winchester 1873 lever-action rifle for Horizon: multi-part animated receiver/lever/hammer/gate/cartridge, 3D brass casings, bullet-hole decals, real player skin & slim/wide arms, ADS iron sights, per-round reload, inspect, back-sling, and CC0 firearm audio."
 authors = ["celso-abreu"]
 license = "MIT"
 api = "0.2"

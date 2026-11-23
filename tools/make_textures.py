@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate Blackpowder Legacy's 32x32 item textures (deterministic pixel art).
+"""Generate Just a Rifle's item & decal textures (deterministic pixel art).
 
 Run:  python3 tools/make_textures.py
-Writes PNGs into assets/blackpowder_legacy/textures/item/ using Python's
+Writes PNGs into assets/just_a_rifle/textures/item/ using Python's
 standard library only (no Pillow dependency required).
 All art is original, drawn here pixel by pixel — no Mojang/Microsoft assets.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 import struct
 import zlib
 
-OUT = Path(__file__).resolve().parent.parent / "assets" / "blackpowder_legacy" / "textures" / "item"
+OUT = Path(__file__).resolve().parent.parent / "assets" / "just_a_rifle" / "textures" / "item"
 
 PALETTE: dict[str, tuple[int, int, int, int]] = {
     "0": (51, 55, 61, 255),     # lead dark outline

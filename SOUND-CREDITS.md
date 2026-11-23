@@ -1,7 +1,7 @@
 # Sound Credits & License (`CC0 1.0` Public Domain)
 
 All `.ogg` firearm and weapon-handling sound files bundled in
-`assets/blackpowder_legacy/sounds/` are **CC0 1.0 Universal (Public Domain)**
+`assets/just_a_rifle/sounds/` are **CC0 1.0 Universal (Public Domain)**
 works authored by **Navaro** and **rzen1th**, distributed under the explicit
 Public Domain notice (`SOUND-LICENSE.txt`):
 

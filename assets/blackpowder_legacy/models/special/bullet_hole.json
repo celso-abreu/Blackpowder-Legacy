@@ -1,1 +1,0 @@
-{"credit":"Blackpowder Legacy \u2014 Terrain Bullet Impact Decal","textures":{"0":"blackpowder_legacy:item/bullet_hole","particle":"blackpowder_legacy:item/bullet_hole"},"elements":[{"from":[4.5,4.5,7.96],"to":[11.5,11.5,8.04],"faces":{"north":{"uv":[16,0,0,16],"texture":"#0"},"south":{"uv":[0,0,16,16],"texture":"#0"}}}]}
