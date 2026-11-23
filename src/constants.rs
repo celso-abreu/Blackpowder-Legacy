@@ -28,7 +28,10 @@ pub(crate) const SND_RELOAD_END: &str = "just_a_rifle:animation.winchester_reloa
 pub(crate) const SND_DRAW: &str = "just_a_rifle:animation.winchester_draw";
 pub(crate) const SND_INSPECT: &str = "just_a_rifle:animation.winchester_inspect";
 pub(crate) const SND_SHELL_DROP: &str = "just_a_rifle:item.winchester_shell_drop";
+pub(crate) const SND_MISFIRE_WET: &str = "just_a_rifle:item.winchester_misfire_wet";
 pub(crate) const SND_IMPACT_HIT: &str = "minecraft:block.stone.hit";
+pub(crate) const SND_WATER_SPLASH: &str = "minecraft:entity.fishing_bobber.splash";
+pub(crate) const SND_WATER_BUBBLES: &str = "minecraft:block.bubble_column.upwards_inside";
 
 pub(crate) const RELOAD_MAPPING: &str = "reload";
 pub(crate) const INSPECT_MAPPING: &str = "inspect";
@@ -44,6 +47,11 @@ pub(crate) const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
 pub(crate) const FLAME_PARTICLE: &str = "minecraft:small_flame";
 pub(crate) const POOF_PARTICLE: &str = "minecraft:poof";
 pub(crate) const BLOCK_PARTICLE: &str = "minecraft:block";
+pub(crate) const BUBBLE_PARTICLE: &str = "minecraft:bubble";
+pub(crate) const BUBBLE_POP_PARTICLE: &str = "minecraft:bubble_pop";
+pub(crate) const SPLASH_PARTICLE: &str = "minecraft:splash";
+pub(crate) const WATER_FLUID: &str = "minecraft:water";
+pub(crate) const FLOWING_WATER_FLUID: &str = "minecraft:flowing_water";
 pub(crate) const DEFAULT_DIMENSION: &str = "minecraft:overworld";
 
 pub(crate) const MAX_BULLET_HOLES: usize = 96;
@@ -53,6 +61,8 @@ pub(crate) const MAX_SPENT_CASINGS: usize = 48;
 pub(crate) const CASING_LIFETIME_SECS: f32 = 20.0;
 pub(crate) const CASING_BASE_SCALE: f32 = 0.64;
 pub(crate) const CASING_REST_RADIUS: f64 = 0.012;
+pub(crate) const CASING_WATER_GRAVITY: f64 = 3.2;
+pub(crate) const CASING_WATER_MAX_SINK: f64 = -1.15;
 pub(crate) const CASING_RISE_START_SECS: f32 = LEVER_DELAY_SECS + 0.06;
 pub(crate) const CASING_HANDOFF_SECS: f32 = LEVER_DELAY_SECS + 0.16;
 pub(crate) const CASING_LAST_RISE_START_SECS: f32 = 0.06;
@@ -76,6 +86,7 @@ pub(crate) const SYNC_SHELL_INSERTED: i32 = 4;
 pub(crate) const SYNC_RELOAD_END_NORM: i32 = 5;
 pub(crate) const SYNC_RELOAD_END_EMPTY: i32 = 6;
 pub(crate) const SYNC_RELOAD_ABORTED: i32 = 7;
+pub(crate) const SYNC_WET_MISFIRE: i32 = 8;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters
@@ -104,6 +115,11 @@ pub(crate) const INSPECT_DURATION_SECS: f32 = 3.40;
 
 /// Projectile speed (`blocks / tick` -> `300 m/s` at 20 TPS) and stance spread (`degrees`).
 pub(crate) const BULLET_SPEED: f32 = 15.0;
+/// Maximum underwater travel (`blocks`) on the tick a `300 m/s` `.44-40` lead slug crosses
+/// from air into water, followed by strong quadratic/exponential hydrodynamic drag (`~3.4m` total).
+pub(crate) const WATER_FIRST_TICK_PENETRATION: f64 = 2.10;
+pub(crate) const WATER_BULLET_DRAG: f64 = 0.42;
+pub(crate) const WATER_BULLET_STOP_SPEED: f64 = 0.18;
 pub(crate) const SPREAD_ADS_CROUCH: f32 = 0.04;
 pub(crate) const SPREAD_ADS_STAND: f32 = 0.06;
 pub(crate) const SPREAD_ADS_MOVING: f32 = 0.12;

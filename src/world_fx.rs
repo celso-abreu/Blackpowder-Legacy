@@ -9,10 +9,12 @@ use mod_api::{
 };
 
 use crate::constants::*;
+use crate::server::consume_bullet_water_splash_on_impact;
 use crate::{
-    holding_rifle_recently, play_local_foley, BulletImpactSync, BLOCK_PARTICLE_KEY,
-    BULLET_IMPACT_SYNC, LAST_EJECTOR_VIEW_X, LAST_EJECTOR_VIEW_Y, LAST_EJECTOR_VIEW_Z,
-    LAST_WORLD_FOV_BITS, POOF_KEY, RIFLE_MODELS, SMOKE_KEY,
+    holding_rifle_recently, is_point_in_water, play_local_foley, BulletImpactSync,
+    BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC, LAST_EJECTOR_VIEW_X,
+    LAST_EJECTOR_VIEW_Y, LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POOF_KEY, RIFLE_MODELS,
+    SMOKE_KEY,
 };
 
 static WORLD_EFFECTS: OnceLock<Mutex<WorldEffectsState>> = OnceLock::new();
@@ -122,14 +124,39 @@ pub(crate) fn handle_bullet_terrain_impact(
     let Some(level) = host.level(event.dimension) else {
         return;
     };
-    level.play_sound(
-        host,
-        SND_IMPACT_HIT,
-        event.at,
-        SoundSource::Players,
-        0.78,
-        1.18,
-    );
+    consume_bullet_water_splash_on_impact(host, level, event.at);
+
+    let underwater = is_point_in_water(host, level, impact_fx_pos)
+        || is_point_in_water(host, level, event.at);
+
+    if underwater {
+        level.play_sound(
+            host,
+            SND_IMPACT_HIT,
+            event.at,
+            SoundSource::Players,
+            0.48,
+            0.72,
+        );
+        level.play_sound(
+            host,
+            SND_WATER_BUBBLES,
+            event.at,
+            SoundSource::Players,
+            0.42,
+            1.35,
+        );
+    } else {
+        level.play_sound(
+            host,
+            SND_IMPACT_HIT,
+            event.at,
+            SoundSource::Players,
+            0.78,
+            1.18,
+        );
+    }
+
     if let Some(block_key) = BLOCK_PARTICLE_KEY.get().copied()
         && let Some(hit_state) = level.block_state(host, event.block)
     {
@@ -140,33 +167,61 @@ pub(crate) fn handle_bullet_terrain_impact(
             Some(hit_state),
             impact_fx_pos,
             [0.05, 0.05, 0.05],
-            0.14,
-            10,
+            if underwater { 0.08 } else { 0.14 },
+            if underwater { 7 } else { 10 },
         );
     }
-    if let Some(poof) = POOF_KEY.get().copied() {
-        let poof_opts = ParticleOptions::simple(poof);
-        level.send_particles(
-            host,
-            &poof_opts,
-            None,
-            impact_fx_pos,
-            [0.035, 0.035, 0.035],
-            0.024,
-            3,
-        );
-    }
-    if let Some(smoke) = SMOKE_KEY.get().copied() {
-        let smoke_opts = ParticleOptions::simple(smoke);
-        level.send_particles(
-            host,
-            &smoke_opts,
-            None,
-            impact_fx_pos,
-            [0.045, 0.045, 0.045],
-            0.012,
-            4,
-        );
+
+    if underwater {
+        if let Some(bubble) = BUBBLE_KEY.get().copied() {
+            let bubble_opts = ParticleOptions::simple(bubble);
+            level.send_particles(
+                host,
+                &bubble_opts,
+                None,
+                impact_fx_pos,
+                [0.05, 0.05, 0.05],
+                0.06,
+                8,
+            );
+        }
+        if let Some(pop) = BUBBLE_POP_KEY.get().copied() {
+            let pop_opts = ParticleOptions::simple(pop);
+            level.send_particles(
+                host,
+                &pop_opts,
+                None,
+                impact_fx_pos,
+                [0.04, 0.04, 0.04],
+                0.02,
+                3,
+            );
+        }
+    } else {
+        if let Some(poof) = POOF_KEY.get().copied() {
+            let poof_opts = ParticleOptions::simple(poof);
+            level.send_particles(
+                host,
+                &poof_opts,
+                None,
+                impact_fx_pos,
+                [0.035, 0.035, 0.035],
+                0.024,
+                3,
+            );
+        }
+        if let Some(smoke) = SMOKE_KEY.get().copied() {
+            let smoke_opts = ParticleOptions::simple(smoke);
+            level.send_particles(
+                host,
+                &smoke_opts,
+                None,
+                impact_fx_pos,
+                [0.045, 0.045, 0.045],
+                0.012,
+                4,
+            );
+        }
     }
 
     let Some(chan) = BULLET_IMPACT_SYNC.get() else {
@@ -450,21 +505,36 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
                 continue;
             }
 
+            let casing_level = host.level(&casing.dimension);
             for _ in 0..steps {
-                casing.vel[1] -= 15.5 * h64;
-                let drag = (1.0 - 0.85 * h64).clamp(0.90, 1.0);
-                casing.vel[0] *= drag;
-                casing.vel[2] *= drag;
+                let in_water = casing_level
+                    .is_some_and(|lvl| is_point_in_water(host, lvl, casing.pos));
+                if in_water {
+                    casing.vel[1] =
+                        (casing.vel[1] - CASING_WATER_GRAVITY * h64).max(CASING_WATER_MAX_SINK);
+                    let water_drag = (1.0 - 7.5 * h64).clamp(0.72, 1.0);
+                    casing.vel[0] *= water_drag;
+                    casing.vel[2] *= water_drag;
+                    let spin_drag = (1.0 - 5.5 * h).clamp(0.75, 1.0);
+                    casing.yaw_vel *= spin_drag;
+                    casing.pitch_vel *= spin_drag;
+                    casing.roll_vel *= spin_drag;
+                } else {
+                    casing.vel[1] -= 15.5 * h64;
+                    let drag = (1.0 - 0.85 * h64).clamp(0.90, 1.0);
+                    casing.vel[0] *= drag;
+                    casing.vel[2] *= drag;
+                }
 
                 let next_x = casing.pos[0] + casing.vel[0] * h64;
                 let next_z = casing.pos[2] + casing.vel[2] * h64;
                 if hits_solid_wall(host, next_x, casing.pos[1] + 0.03, casing.pos[2]) {
-                    casing.vel[0] = -casing.vel[0] * 0.42;
+                    casing.vel[0] = -casing.vel[0] * if in_water { 0.18 } else { 0.42 };
                 } else {
                     casing.pos[0] = next_x;
                 }
                 if hits_solid_wall(host, casing.pos[0], casing.pos[1] + 0.03, next_z) {
-                    casing.vel[2] = -casing.vel[2] * 0.42;
+                    casing.vel[2] = -casing.vel[2] * if in_water { 0.18 } else { 0.42 };
                 } else {
                     casing.pos[2] = next_z;
                 }
@@ -477,7 +547,19 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
                 {
                     casing.pos[1] = floor_y + CASING_REST_RADIUS;
                     let impact_speed = (-casing.vel[1]) as f32;
-                    if impact_speed > 0.58 && casing.bounces < 4 {
+                    if in_water {
+                        if impact_speed > 0.35 && casing.bounces == 0 {
+                            let pitch_var = 0.70 + 0.08 * fx.next_unit_f32();
+                            clink_sounds.push((0.26, pitch_var));
+                        }
+                        casing.vel = [0.0; 3];
+                        casing.pitch_deg = 0.0;
+                        casing.pitch_vel = 0.0;
+                        casing.yaw_vel = 0.0;
+                        casing.roll_vel = 0.0;
+                        casing.settled = true;
+                        break;
+                    } else if impact_speed > 0.58 && casing.bounces < 4 {
                         casing.vel[1] = -casing.vel[1] * 0.38;
                         casing.vel[0] *= 0.62;
                         casing.vel[2] *= 0.62;

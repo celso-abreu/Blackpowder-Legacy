@@ -22,13 +22,14 @@ use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
     ArmPose, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost, ClientResourcesReloadedEvent,
-    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow, GetArmPoseEvent, GuiDraw,
-    GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host, HostSide,
-    HumanoidPart, IPayloadContext, Identifier, ItemKey, KeyConflictContext, KeyMappingPreEvent,
-    KeyRegistration, LevelTickPostEvent, ModelBakingCompletedEvent, ParticleKey, PayloadId,
-    ProjectileImpactEvent, Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent,
-    RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase, SoundPlay, SoundSource,
-    StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
+    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow, FluidKey, GetArmPoseEvent,
+    GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host,
+    HostSide, HumanoidPart, IPayloadContext, Identifier, ItemKey, KeyConflictContext,
+    KeyMappingPreEvent, KeyRegistration, LevelRef, LevelTickPostEvent, ModelBakingCompletedEvent,
+    ParticleKey, PayloadId, ProjectileImpactEvent, Registrar, RegistrationContext,
+    RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent,
+    ServerTickPhase, SoundPlay, SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent,
+    ToClient, ToServer, VarInt,
 };
 
 use crate::arms::PlayerArms;
@@ -38,7 +39,9 @@ use crate::pose::{
     draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status, recoil_envelope,
     tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
 };
-use crate::server::{on_rifle_input, rounds, tick_reload_sessions, Winchester};
+use crate::server::{
+    on_rifle_input, rounds, tick_active_bullets, tick_reload_sessions, Winchester,
+};
 use crate::skin::ResolvedSkin;
 use crate::world_fx::{
     handle_bullet_terrain_impact, on_bullet_impact_sync, spawn_spent_casing_from_camera,
@@ -133,10 +136,41 @@ pub(crate) static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static POOF_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static BLOCK_PARTICLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static BUBBLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static BUBBLE_POP_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static SPLASH_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
+pub(crate) static FLOWING_WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 pub(crate) static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 static SLUNG_RIFLES: Mutex<BTreeMap<u32, SlungRifleState>> = Mutex::new(BTreeMap::new());
+
+pub(crate) fn is_water_fluid(fluid: FluidKey) -> bool {
+    WATER_FLUID_KEY.get().copied() == Some(fluid)
+        || FLOWING_WATER_FLUID_KEY.get().copied() == Some(fluid)
+}
+
+/// Checks whether an exact 3D world-space coordinate `[x, y, z]` lies below the water surface
+/// in `level` (`Side: both`, handling source water, flowing water, and waterlogged blocks).
+pub(crate) fn is_point_in_water(host: &dyn Host, level: LevelRef, pos: [f64; 3]) -> bool {
+    let bp = [
+        pos[0].floor() as i32,
+        pos[1].floor() as i32,
+        pos[2].floor() as i32,
+    ];
+    let Some(fs) = level.fluid_state(host, bp) else {
+        return false;
+    };
+    if fs.is_empty() || !is_water_fluid(fs.fluid) {
+        return false;
+    }
+    let height = level
+        .fluid_height_for_camera(host, bp)
+        .unwrap_or(f32::from(fs.amount) / 9.0)
+        .clamp(0.0, 1.0);
+    height > 0.0 && (pos[1] - f64::from(bp[1])) <= f64::from(height)
+}
 
 pub(crate) fn client_anim() -> &'static Mutex<ClientAnimState> {
     CLIENT_ANIM.get_or_init(|| Mutex::new(ClientAnimState::new()))
@@ -207,6 +241,11 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
             SYNC_DRY_CLICK => {
                 anim.on_dry_click(rounds_now);
                 foley = Some((SND_COCK, 0.72, 1.32));
+            }
+            SYNC_WET_MISFIRE => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                anim.on_dry_click(rounds_now);
+                foley = Some((SND_MISFIRE_WET, 0.76, 0.92));
             }
             SYNC_RELOAD_START => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
@@ -298,6 +337,11 @@ impl Hooks for Mod {
         let flame = r.particle_key(FLAME_PARTICLE);
         let poof = r.particle_key(POOF_PARTICLE);
         let block_particle = r.particle_key(BLOCK_PARTICLE);
+        let bubble = r.particle_key(BUBBLE_PARTICLE);
+        let bubble_pop = r.particle_key(BUBBLE_POP_PARTICLE);
+        let splash = r.particle_key(SPLASH_PARTICLE);
+        let water_fluid = r.fluid_key(WATER_FLUID);
+        let flowing_water_fluid = r.fluid_key(FLOWING_WATER_FLUID);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(smoke);
@@ -305,6 +349,11 @@ impl Hooks for Mod {
         let _ = FLAME_KEY.set(flame);
         let _ = POOF_KEY.set(poof);
         let _ = BLOCK_PARTICLE_KEY.set(block_particle);
+        let _ = BUBBLE_KEY.set(bubble);
+        let _ = BUBBLE_POP_KEY.set(bubble_pop);
+        let _ = SPLASH_KEY.set(splash);
+        let _ = WATER_FLUID_KEY.set(water_fluid);
+        let _ = FLOWING_WATER_FLUID_KEY.set(flowing_water_fluid);
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
@@ -593,6 +642,7 @@ impl Hooks for Mod {
         };
         let now = SERVER_TICKS.load(Ordering::Relaxed);
         tick_reload_sessions(host, now);
+        tick_active_bullets(host, now);
     }
 
     /// Per-frame animation stepper (`event.elapsed`) + 240Hz camera recoil climb & partial recovery.

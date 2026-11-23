@@ -106,5 +106,16 @@
         "attenuation_distance": 10
       }
     ]
+  },
+  "item.winchester_misfire_wet": {
+    "subtitle": "subtitles.just_a_rifle.winchester_misfire_wet",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_cock",
+        "volume": 0.72,
+        "pitch": 0.68,
+        "attenuation_distance": 10
+      }
+    ]
   }
 }
