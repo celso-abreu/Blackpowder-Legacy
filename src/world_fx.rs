@@ -6,8 +6,8 @@ use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
     BlockUpdateFlags, CameraType, ClientHost, GameEventContext, GameRuleValue, Host,
-    IPayloadContext, LevelRef, LightCoords, LightLayer, ModelInstance, Overlay, ParticleOptions,
-    ProjectileImpactEvent, ServerHost, SoundSource, VarInt, WorldDrawContext,
+    HostBlockStates, IPayloadContext, LevelRef, LightCoords, LightLayer, ModelInstance, Overlay,
+    ParticleOptions, ProjectileImpactEvent, ServerHost, SoundSource, VarInt, WorldDrawContext,
 };
 
 use crate::constants::*;
@@ -631,7 +631,7 @@ pub(crate) fn handle_bullet_terrain_impact(
     let hit_block = hit_state.block();
     let state_str = host.block_state_string(hit_state).unwrap_or_default();
     let block_id = parse_block_state_id(&state_str);
-    let sound_info = hit_state.sound(host);
+    let sound_info = host.block_states().sound(hit_state);
     let hit_sound = sound_info
         .as_ref()
         .map_or(SND_IMPACT_HIT, |s| s.hit.as_ref());
