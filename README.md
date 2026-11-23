@@ -19,15 +19,16 @@ Just one finely crafted lever-action rifle for [Horizon](https://github.com/hori
 You need Rust 1.95+, the Horizon launcher, and `cargo-horizon-mod`:
 
 ```sh
-cargo install --locked --git https://github.com/horizon-rust/horizon --rev 2b77287de099c9316278ba7ac4d83590fdb7ef30 cargo-horizon-mod
+cargo install --locked --git https://github.com/horizon-rust/horizon --rev f1bb66f353cf67f2aa4665293fc75c8d91186fc7 cargo-horizon-mod
 cargo horizon-mod build --wasm          # fetches the pinned SDK into .horizon/, writes mod.wasm, packs target/horizon-mod/just_a_rifle.hmod
 cargo horizon-mod check target/horizon-mod/just_a_rifle.hmod
+cargo test --lib                        # runs pure-Rust skin, kinematics & VFX unit tests
 cargo horizon-mod run                   # builds and starts the game with the mod on
 ```
 
 Or copy the `.hmod` into the game folder's `horizon-mods/` and add `mod.just_a_rifle:true` to `horizon-mods.txt`.
 
-The Horizon build this mod targets is pinned in `Cargo.toml` (`[package.metadata.horizon] sdk`, Nightly 2026-11-22, `2b77287`). `cargo horizon-mod update` moves the pin.
+The Horizon build this mod targets is pinned in `Cargo.toml` (`[package.metadata.horizon] sdk`, Nightly 2026-11-22, `f1bb66f`). `cargo horizon-mod update` moves the pin.
 
 ## Installing
 
@@ -41,19 +42,26 @@ Note: the launcher's *Add a native mod from GitHub* dialog is for **native** mod
 
 ## CI
 
-Every push builds and checks the mod on GitHub Actions (`.github/workflows/build-mod.yml`): `cargo horizon-mod build --wasm` then `cargo horizon-mod check`, with the tool binary, the pinned SDK, the wasm toolchain, and the Cargo caches reused between runs. The checked `just_a_rifle.hmod` is downloadable from the run's artifacts.
+Every push verifies manifests & assets (`python3 tools/verify_assets.py`), builds and checks the mod (`cargo horizon-mod build --wasm` + `cargo horizon-mod check`), and runs the crate's unit test suite (`cargo test --lib`) on GitHub Actions (`.github/workflows/build-mod.yml`), reusing cached tool, SDK, toolchain, and Cargo layers between runs. The checked `just_a_rifle.hmod` is downloadable from the run's artifacts.
 
-Both `build-mod.yml` and `release.yml` run build/check steps under `set -o pipefail`, so a failed compile or registry check never passes silently through `tee`.
+Both `build-mod.yml` and `release.yml` run build/check/test steps under `set -o pipefail`, so a failed compile, registry check, or unit test never passes silently through `tee`.
 
 ## Layout
 
 ```text
 horizon-mod.toml            # manifest: id = "just_a_rifle", version 0.9.0, api 0.2, capabilities
-Cargo.toml                  # wasm code crate + pinned Horizon SDK (2b77287)
+Cargo.toml                  # wasm code crate + pinned Horizon SDK (f1bb66f)
+CHANGELOG.md                # version history (v0.5.0 -> v0.9.0)
+NEXT.md                     # concise single-rifle polish roadmap
 SOUND-CREDITS.md            # CC0 / Public Domain attribution for all 9 .ogg audio files
-src/lib.rs                  # WASM mod: articulated sub-model rig, TAC state machine,
-                            #   player skin resolver, 2-layer recoil, ADS crosshair hide,
-                            #   3rd-person diagonal back-sling & server-authoritative ammo
+src/
+  lib.rs                    # entry point, shared payloads/atomics & Hooks implementation
+  constants.rs              # IDs, ballistics & exact Blockbench [0..16] texel pivots
+  skin.rs                   # Mojang Base64 + UTF-16LE SHA-1 decoder & 18-skin fallback
+  arms.rs                   # 1st-person slim (3x12x4) / wide (4x12x4) arm & sleeve meshes
+  pose.rs                   # 2nd-order springs, TAC state machine, hands & sight kinematics
+  world_fx.rs               # terrain bullet-hole decals & 3D bouncing .44-40 brass casings
+  server.rs                 # authoritative firing, spread, muzzle VFX & reload loop
 data/just_a_rifle/
   horizon/item/             # winchester_1873, cartridge_44, bullet (item declarations)
   horizon/entity_type/      # bullet: thrown projectile (snowball template, 12 damage)
@@ -69,6 +77,7 @@ assets/just_a_rifle/
   lang/                     # en_us, pt_br (items, keybinds, full audio subtitles)
 models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
 tools/
+  verify_assets.py          # fast manifest, JSON, lang, audio & cutout-alpha verifier
   make_textures.py          # deterministic pure-Python generator for item & decal PNGs
   bbmodel_convert.py        # converts the .bbmodel into item/winchester_1873.json,
                             #   models/special/winchester_*.json, and rifle_texture.png

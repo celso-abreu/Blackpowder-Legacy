@@ -8,7 +8,7 @@ name: Release
 # it with "inconsistent code declaration ([native] or [wasm]) and source".
 #
 # Two ways to release:
-#   - push a version tag:            git tag v0.1.0 <commit> && git push origin v0.1.0
+#   - push a version tag:            git tag v0.9.0 <commit> && git push origin v0.9.0
 #   - run this workflow by hand with the tag as input (the tag is created at
 #     the selected ref).
 # The tag must equal the version in horizon-mod.toml with a "v" prefix.
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version tag to release (e.g. v0.1.0); created at the selected ref"
+        description: "Version tag to release (e.g. v0.9.0); created at the selected ref"
         required: true
         type: string
 
@@ -34,7 +34,7 @@ concurrency:
 
 env:
   # Must match [package.metadata.horizon] sdk in Cargo.toml.
-  HORIZON_SDK_COMMIT: 2b77287de099c9316278ba7ac4d83590fdb7ef30
+  HORIZON_SDK_COMMIT: f1bb66f353cf67f2aa4665293fc75c8d91186fc7
   # See build-mod.yml: one wasm compile job stays under the runner's RAM.
   CARGO_BUILD_JOBS: "1"
 
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Verify the tag matches the manifest version
         env:
@@ -57,6 +57,9 @@ jobs:
           fi
           echo "tag $TAG matches manifest version $VERSION"
 
+      - name: Verify manifests and assets
+        run: python3 tools/verify_assets.py
+
       # Same cache layers as build-mod.yml; see its comments for the key
       # design (exact pins for tool/SDK/toolchain, rust-cache for Cargo).
       - name: Cache Cargo and build output
@@ -65,19 +68,19 @@ jobs:
           shared-key: horizon-sdk-${{ env.HORIZON_SDK_COMMIT }}
 
       - name: Cache the cargo-horizon-mod binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-horizon-mod
           key: cargo-horizon-mod-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
 
       - name: Cache the pinned Horizon SDK
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .horizon/sdk
           key: horizon-sdk-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
 
       - name: Cache the pinned wasm toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
           key: horizon-wasm-toolchain-${{ runner.os }}-${{ env.HORIZON_SDK_COMMIT }}
@@ -97,6 +100,17 @@ jobs:
       - name: Registry check
         shell: bash
         run: set -o pipefail; cargo horizon-mod check target/horizon-mod/just_a_rifle.hmod 2>&1 | tee -a build-log.txt
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          TC=$(ls -1 ~/.rustup/toolchains 2>/dev/null | grep -E '^[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
+          if [ -n "$TC" ]; then
+            cargo +"$TC" test --lib 2>&1 | tee -a build-log.txt
+          else
+            cargo test --lib 2>&1 | tee -a build-log.txt
+          fi
 
       # Publish the checked .hmod. A rerun of the same tag replaces the asset
       # instead of failing, so a flaky first attempt stays recoverable.
