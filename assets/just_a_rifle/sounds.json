@@ -1,0 +1,110 @@
+{
+  "item.winchester_fire": {
+    "subtitle": "subtitles.just_a_rifle.winchester_fire",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_fire",
+        "volume": 1.0,
+        "pitch": 0.96,
+        "attenuation_distance": 48
+      }
+    ]
+  },
+  "item.winchester_thump": {
+    "subtitle": "subtitles.just_a_rifle.winchester_fire",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_thump",
+        "volume": 0.65,
+        "pitch": 0.78,
+        "attenuation_distance": 36
+      }
+    ]
+  },
+  "item.winchester_lever": {
+    "subtitle": "subtitles.just_a_rifle.winchester_lever",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_lever",
+        "volume": 0.9,
+        "pitch": 1.05,
+        "attenuation_distance": 16
+      }
+    ]
+  },
+  "item.winchester_cock": {
+    "subtitle": "subtitles.just_a_rifle.winchester_cock",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_cock",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_intro": {
+    "subtitle": "subtitles.just_a_rifle.winchester_reload",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_reload_intro",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_insert": {
+    "subtitle": "subtitles.just_a_rifle.winchester_reload_insert",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_reload_insert",
+        "volume": 0.9,
+        "pitch": 1.04,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_reload_end": {
+    "subtitle": "subtitles.just_a_rifle.winchester_reload_end",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_reload_end",
+        "volume": 0.85,
+        "pitch": 1.0,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "animation.winchester_draw": {
+    "subtitle": "subtitles.just_a_rifle.winchester_draw",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_draw",
+        "volume": 0.8,
+        "pitch": 1.02
+      }
+    ]
+  },
+  "animation.winchester_inspect": {
+    "subtitle": "subtitles.just_a_rifle.winchester_inspect",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_inspect",
+        "volume": 0.85,
+        "pitch": 1.0
+      }
+    ]
+  },
+  "item.winchester_shell_drop": {
+    "subtitle": "subtitles.just_a_rifle.winchester_shell_drop",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_cock",
+        "volume": 0.36,
+        "pitch": 1.82,
+        "attenuation_distance": 10
+      }
+    ]
+  }
+}

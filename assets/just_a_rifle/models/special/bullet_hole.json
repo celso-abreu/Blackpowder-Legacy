@@ -1,0 +1,1 @@
+{"credit":"Just a Rifle \u2014 Terrain Bullet Impact Decal","textures":{"0":"just_a_rifle:item/bullet_hole","particle":"just_a_rifle:item/bullet_hole"},"elements":[{"from":[4.5,4.5,7.96],"to":[11.5,11.5,8.04],"faces":{"north":{"uv":[16,0,0,16],"texture":"#0"},"south":{"uv":[0,0,16,16],"texture":"#0"}}}]}

@@ -1,0 +1,5 @@
+{
+  "title": "itemGroup.just_a_rifle.main",
+  "icon": "just_a_rifle:winchester_1873",
+  "items": ["just_a_rifle:winchester_1873", "just_a_rifle:cartridge_44"]
+}

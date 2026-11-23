@@ -1,0 +1,18 @@
+{
+  "item.just_a_rifle.winchester_1873": "Winchester 1873",
+  "item.just_a_rifle.cartridge_44": ".44-40 Cartridge",
+  "item.just_a_rifle.bullet": "Rifle Bullet",
+  "entity.just_a_rifle.bullet": "Rifle Bullet",
+  "itemGroup.just_a_rifle.main": "Just a Rifle",
+  "key.just_a_rifle.reload": "Reload rifle",
+  "key.just_a_rifle.inspect": "Inspect rifle",
+  "subtitles.just_a_rifle.winchester_fire": "Winchester 1873 fires",
+  "subtitles.just_a_rifle.winchester_lever": "Winchester lever cycles",
+  "subtitles.just_a_rifle.winchester_cock": "Rifle dry-clicks",
+  "subtitles.just_a_rifle.winchester_reload": "Winchester reloading",
+  "subtitles.just_a_rifle.winchester_reload_insert": ".44-40 cartridge loaded",
+  "subtitles.just_a_rifle.winchester_reload_end": "Winchester ready",
+  "subtitles.just_a_rifle.winchester_draw": "Winchester drawn",
+  "subtitles.just_a_rifle.winchester_inspect": "Winchester inspected",
+  "subtitles.just_a_rifle.winchester_shell_drop": "Shell casing clinks"
+}
