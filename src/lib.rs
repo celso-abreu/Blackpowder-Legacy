@@ -5,7 +5,7 @@
 //! - `skin`      — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
 //! - `arms`      — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
 //! - `pose`      — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
-//! - `world_fx`  — Terrain bullet-hole decals & 3D bouncing `.44-40` brass shell casings.
+//! - `world_fx`  — Reactive world targets, per-material impact audio, bullet decals & casings.
 //! - `server`    — Authoritative firing, stance spread, muzzle VFX & per-shell reload loop.
 
 mod arms;
@@ -21,15 +21,15 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
-    ArmPose, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost, ClientResourcesReloadedEvent,
-    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow, FluidKey, GetArmPoseEvent,
-    GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host,
-    HostSide, HumanoidPart, IPayloadContext, Identifier, ItemKey, KeyConflictContext,
-    KeyMappingPreEvent, KeyRegistration, LevelRef, LevelTickPostEvent, ModelBakingCompletedEvent,
-    ParticleKey, PayloadId, ProjectileImpactEvent, Registrar, RegistrationContext,
-    RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent,
-    ServerTickPhase, SoundPlay, SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent,
-    ToClient, ToServer, VarInt,
+    ArmPose, BlockKey, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
+    ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow,
+    FluidKey, GetArmPoseEvent, GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand,
+    HearsProjectileImpactsEvent, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
+    ItemKey, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelRef, LevelTickPostEvent,
+    ModelBakingCompletedEvent, ParticleKey, PayloadId, ProjectileImpactEvent, Registrar,
+    RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
+    ServerTickEvent, ServerTickPhase, SoundPlay, SoundSource, StandaloneModelsEvent,
+    SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
 };
 
 use crate::arms::PlayerArms;
@@ -135,12 +135,18 @@ pub(crate) static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static POOF_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static CRIT_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static BLOCK_PARTICLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static BUBBLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static BUBBLE_POP_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static SPLASH_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
 pub(crate) static FLOWING_WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
+pub(crate) static BELL_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static TARGET_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static DECORATED_POT_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static CHORUS_FLOWER_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static POINTED_DRIPSTONE_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 pub(crate) static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
@@ -336,24 +342,36 @@ impl Hooks for Mod {
         let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
         let poof = r.particle_key(POOF_PARTICLE);
+        let crit = r.particle_key(CRIT_PARTICLE);
         let block_particle = r.particle_key(BLOCK_PARTICLE);
         let bubble = r.particle_key(BUBBLE_PARTICLE);
         let bubble_pop = r.particle_key(BUBBLE_POP_PARTICLE);
         let splash = r.particle_key(SPLASH_PARTICLE);
         let water_fluid = r.fluid_key(WATER_FLUID);
         let flowing_water_fluid = r.fluid_key(FLOWING_WATER_FLUID);
+        let bell_block = r.block_key(BELL_BLOCK);
+        let target_block = r.block_key(TARGET_BLOCK);
+        let decorated_pot_block = r.block_key(DECORATED_POT_BLOCK);
+        let chorus_flower_block = r.block_key(CHORUS_FLOWER_BLOCK);
+        let pointed_dripstone_block = r.block_key(POINTED_DRIPSTONE_BLOCK);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
         let _ = SMOKE_KEY.set(smoke);
         let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
         let _ = POOF_KEY.set(poof);
+        let _ = CRIT_KEY.set(crit);
         let _ = BLOCK_PARTICLE_KEY.set(block_particle);
         let _ = BUBBLE_KEY.set(bubble);
         let _ = BUBBLE_POP_KEY.set(bubble_pop);
         let _ = SPLASH_KEY.set(splash);
         let _ = WATER_FLUID_KEY.set(water_fluid);
         let _ = FLOWING_WATER_FLUID_KEY.set(flowing_water_fluid);
+        let _ = BELL_BLOCK_KEY.set(bell_block);
+        let _ = TARGET_BLOCK_KEY.set(target_block);
+        let _ = DECORATED_POT_BLOCK_KEY.set(decorated_pot_block);
+        let _ = CHORUS_FLOWER_BLOCK_KEY.set(chorus_flower_block);
+        let _ = POINTED_DRIPSTONE_BLOCK_KEY.set(pointed_dripstone_block);
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
