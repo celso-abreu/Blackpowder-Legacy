@@ -2,6 +2,7 @@
 //!
 //! Clean-room Rust `v0.9.0` modular architecture:
 //! - `constants` — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
+//! - `settings`  — `Options > Mods > Config` 29-setting registry & per-channel audio mixer.
 //! - `skin`      — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
 //! - `arms`      — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
 //! - `pose`      — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
@@ -12,6 +13,7 @@ mod arms;
 mod constants;
 mod pose;
 mod server;
+mod settings;
 mod skin;
 mod world_fx;
 
@@ -26,10 +28,11 @@ use mod_api::{
     FluidKey, GetArmPoseEvent, GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand,
     HearsProjectileImpactsEvent, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
     ItemKey, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelRef, LevelTickPostEvent,
-    ModelBakingCompletedEvent, ParticleKey, PayloadId, ProjectileImpactEvent, Registrar,
-    RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
-    ServerTickEvent, ServerTickPhase, SoundPlay, SoundSource, StandaloneModelsEvent,
-    SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
+    ModelBakingCompletedEvent, ParticleKey, PayloadId, PlayLevelSoundAtPositionEvent,
+    ProjectileImpactEvent, Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent,
+    RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent,
+    SoundPlay, SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer,
+    VarInt,
 };
 
 use crate::arms::PlayerArms;
@@ -41,6 +44,11 @@ use crate::pose::{
 };
 use crate::server::{
     on_rifle_input, rounds, tick_active_bullets, tick_reload_sessions, Winchester,
+};
+use crate::settings::{
+    classify_incoming_level_sound, client_settings, default_channel_for_local_sound,
+    mark_settings_dirty, mix_client_sound, refresh_client_settings, refresh_settings_if_dirty,
+    register_all_settings, AdsMode, BackSlingStyle, LevelSoundDecision, SoundChannel,
 };
 use crate::skin::ResolvedSkin;
 use crate::world_fx::{
@@ -110,12 +118,16 @@ pub(crate) static CLIENT_SPRINTING: AtomicBool = AtomicBool::new(false);
 pub(crate) static CLIENT_SNEAKING: AtomicBool = AtomicBool::new(false);
 static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
 static PENDING_RELOAD_CANCEL: AtomicBool = AtomicBool::new(false);
+static PENDING_AUTO_RELOAD: AtomicBool = AtomicBool::new(false);
+static TOGGLE_AIM_LATCH: AtomicBool = AtomicBool::new(false);
 
 pub(crate) static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+static LAST_AUTO_RELOAD_TICK: AtomicU64 = AtomicU64::new(0);
 static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
+static HITMARKER_TIMER_BITS: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_WORLD_FOV_BITS: AtomicU32 = AtomicU32::new(0x428C_0000); // 70.0_f32.to_bits()
 pub(crate) static LAST_MUZZLE_VIEW_X: AtomicU32 = AtomicU32::new(0x3F07_1A9F); // 0.52775_f32
 pub(crate) static LAST_MUZZLE_VIEW_Y: AtomicU32 = AtomicU32::new(0xBEAA_0000); // -0.33203_f32
@@ -226,15 +238,46 @@ fn refresh_rifle_models(host: &dyn ClientHost) {
     *RIFLE_MODELS.lock().unwrap() = resolve_rifle_models(host);
 }
 
-pub(crate) fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
-    let mut sound = SoundPlay::ui(event_id).with_volume(volume).with_pitch(pitch);
+pub(crate) fn play_local_foley_channel(
+    host: &dyn ClientHost,
+    channel: SoundChannel,
+    event_id: &str,
+    volume: f32,
+    pitch: f32,
+) {
+    let cfg = client_settings();
+    let Some((vol, pit)) = mix_client_sound(&cfg, channel, volume, pitch) else {
+        return;
+    };
+    let mut sound = SoundPlay::ui(event_id).with_volume(vol).with_pitch(pit);
     sound.source = SoundSource::Players;
     let _ = host.play_local_sound(&sound, 0);
 }
 
+pub(crate) fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
+    play_local_foley_channel(
+        host,
+        default_channel_for_local_sound(event_id),
+        event_id,
+        volume,
+        pitch,
+    );
+}
+
 fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
+    let cfg = client_settings();
+    if value.kind.0 == SYNC_HIT_CONFIRM {
+        HITMARKER_TIMER_BITS.store(0.14_f32.to_bits(), Ordering::Relaxed);
+        if let Some((snd, vol, pitch)) = cfg.hit_confirm_sound.sound_spec()
+            && let Ok(host) = cx.client_host()
+        {
+            play_local_foley_channel(host, SoundChannel::Feedback, snd, vol, pitch);
+        }
+        return Ok(());
+    }
+
     let rounds_now = (value.rounds.0.max(0) as u32).min(TUBE_CAPACITY);
-    let mut foley: Option<(&'static str, f32, f32)> = None;
+    let mut foley: Option<(SoundChannel, &'static str, f32, f32)> = None;
 
     {
         let mut anim = client_anim().lock().unwrap();
@@ -246,28 +289,34 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
             }
             SYNC_DRY_CLICK => {
                 anim.on_dry_click(rounds_now);
-                foley = Some((SND_COCK, 0.72, 1.32));
+                if cfg.dry_click_alert {
+                    foley = Some((SoundChannel::Feedback, SND_COCK, 0.72, 1.32));
+                }
+                if rounds_now == 0 && cfg.auto_reload {
+                    PENDING_AUTO_RELOAD.store(true, Ordering::Relaxed);
+                }
             }
             SYNC_WET_MISFIRE => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
                 anim.on_dry_click(rounds_now);
-                foley = Some((SND_MISFIRE_WET, 0.76, 0.92));
+                foley = Some((SoundChannel::Mechanism, SND_MISFIRE_WET, 0.76, 0.92));
             }
             SYNC_RELOAD_START => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 AIMING.store(false, Ordering::Relaxed);
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadIntro { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_INTRO, 0.90, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_INTRO, 0.90, 1.0));
             }
             SYNC_SHELL_INSERTED => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadInsert { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_INSERT, 0.92, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_INSERT, 0.92, 1.0));
             }
             SYNC_RELOAD_END_NORM => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadEndNorm { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_END, 0.88, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.88, 1.0));
             }
             SYNC_RELOAD_END_EMPTY => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
@@ -276,7 +325,7 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
                     lever_sound_played: false,
                     cock_sound_played: false,
                 };
-                foley = Some((SND_RELOAD_END, 0.85, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.85, 1.0));
             }
             SYNC_RELOAD_ABORTED => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
@@ -294,10 +343,10 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
         }
     }
 
-    if let Some((snd, vol, pitch)) = foley
+    if let Some((ch, snd, vol, pitch)) = foley
         && let Ok(host) = cx.client_host()
     {
-        play_local_foley(host, snd, vol, pitch);
+        play_local_foley_channel(host, ch, snd, vol, pitch);
     }
     Ok(())
 }
@@ -383,6 +432,7 @@ impl Hooks for Mod {
                 .label("key.just_a_rifle.inspect")
                 .context(KeyConflictContext::InGame),
         );
+        let _ = register_all_settings(r);
 
         let mut payloads = r.payload_handlers();
         let mut view = payloads.registrar("1");
@@ -415,10 +465,70 @@ impl Hooks for Mod {
         host: &mut dyn ServerHost,
         event: &mut ProjectileImpactEvent<'_>,
     ) -> Flow {
-        if event.kind == BULLET && event.entity.is_none() {
-            handle_bullet_terrain_impact(host, event);
+        if event.kind == BULLET {
+            if event.entity.is_none() {
+                handle_bullet_terrain_impact(host, event);
+            } else if event.owner != 0
+                && event.entity != Some(event.owner)
+                && let Some(sync) = RIFLE_SYNC.get()
+                && let Some(level) = host.level(event.dimension)
+                && let Some(players) = level.online_players(host)
+                && let Some(shooter) = players
+                    .into_iter()
+                    .find(|p| p.entity().id() == event.owner)
+            {
+                let _ = sync.send(
+                    host,
+                    shooter,
+                    &RifleSync {
+                        kind: VarInt(SYNC_HIT_CONFIRM),
+                        rounds: VarInt(0),
+                    },
+                );
+            }
         }
         Flow::Continue
+    }
+
+    fn setting_changed(&self, host: &mut dyn ClientHost, _: &mut SettingChangedEvent<'_>) {
+        refresh_client_settings(host);
+        if client_settings().ads_mode == AdsMode::Hold
+            && TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed)
+        {
+            AIMING.store(false, Ordering::Relaxed);
+            let _ = host.set_mapping_down("key.use", false);
+        }
+    }
+
+    fn play_level_sound_at_position(
+        &self,
+        host: HostSide<'_>,
+        event: &mut PlayLevelSoundAtPositionEvent,
+    ) -> Flow {
+        if !matches!(host, HostSide::Client(_)) {
+            return Flow::Continue;
+        }
+        let cfg = client_settings();
+        match classify_incoming_level_sound(
+            &cfg,
+            event.sound.namespace(),
+            event.sound.path(),
+            *event.source,
+            event.pitch,
+        ) {
+            LevelSoundDecision::Ignore => Flow::Continue,
+            LevelSoundDecision::Cancel => Flow::Cancel,
+            LevelSoundDecision::Mix(channel) => {
+                match mix_client_sound(&cfg, channel, event.volume, event.pitch) {
+                    Some((vol, pitch)) => {
+                        event.volume = vol;
+                        event.pitch = pitch;
+                        Flow::Continue
+                    }
+                    None => Flow::Cancel,
+                }
+            }
+        }
     }
 
     fn model_baking_completed(&self, host: &mut dyn ClientHost, _: &mut ModelBakingCompletedEvent) {
@@ -439,14 +549,17 @@ impl Hooks for Mod {
     }
 
     /// Left click while holding or aiming the rifle fires a round (`Flow::Cancel` suppresses
-    /// vanilla mining and melee punches).
+    /// vanilla mining and melee punches); optional Toggle-ADS mode latches iron sights on right click.
     fn key_mapping_pre(
         &self,
         host: &mut dyn ClientHost,
         event: &mut KeyMappingPreEvent<'_>,
     ) -> Flow {
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
-        if event.mapping == ATTACK_MAPPING && holding && host.playing() {
+        if !holding || !host.playing() {
+            return Flow::Continue;
+        }
+        if event.mapping == ATTACK_MAPPING {
             if event.pressed {
                 let allow_fire = {
                     let mut anim = client_anim().lock().unwrap();
@@ -468,11 +581,29 @@ impl Hooks for Mod {
             }
             return Flow::Cancel;
         }
+        if event.mapping == "key.use" && client_settings().ads_mode == AdsMode::Toggle {
+            if event.pressed {
+                if TOGGLE_AIM_LATCH.load(Ordering::Relaxed) || AIMING.load(Ordering::Relaxed) {
+                    TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+                    AIMING.store(false, Ordering::Relaxed);
+                    let _ = host.set_mapping_down("key.use", false);
+                    return Flow::Cancel;
+                } else if !CLIENT_RELOADING.load(Ordering::Relaxed)
+                    && !CLIENT_SPRINTING.load(Ordering::Relaxed)
+                {
+                    TOGGLE_AIM_LATCH.store(true, Ordering::Relaxed);
+                }
+            } else if TOGGLE_AIM_LATCH.load(Ordering::Relaxed) {
+                return Flow::Cancel;
+            }
+        }
         Flow::Continue
     }
 
     fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
         let tick = CLIENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        refresh_settings_if_dirty(host);
+        let cfg = client_settings();
         if AIMING.load(Ordering::Relaxed)
             && tick.saturating_sub(AIM_LAST_TICK.load(Ordering::Relaxed)) > 2
         {
@@ -485,6 +616,9 @@ impl Hooks for Mod {
 
         if !host.playing() {
             PENDING_FIRE.store(false, Ordering::Relaxed);
+            PENDING_AUTO_RELOAD.store(false, Ordering::Relaxed);
+            TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+            mark_settings_dirty();
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             CLIENT_RELOADING.store(false, Ordering::Relaxed);
@@ -563,6 +697,13 @@ impl Hooks for Mod {
         while host.consume_click(MOD_ID, RELOAD_MAPPING) {
             want_reload = true;
         }
+        if PENDING_AUTO_RELOAD.swap(false, Ordering::Relaxed)
+            && cfg.auto_reload
+            && tick.saturating_sub(LAST_AUTO_RELOAD_TICK.load(Ordering::Relaxed)) >= 20
+        {
+            LAST_AUTO_RELOAD_TICK.store(tick, Ordering::Relaxed);
+            want_reload = true;
+        }
         let mut want_inspect = false;
         while host.consume_click(MOD_ID, INSPECT_MAPPING) {
             want_inspect = true;
@@ -570,6 +711,9 @@ impl Hooks for Mod {
 
         if !holding {
             PENDING_FIRE.store(false, Ordering::Relaxed);
+            if TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed) {
+                let _ = host.set_mapping_down("key.use", false);
+            }
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
@@ -586,6 +730,7 @@ impl Hooks for Mod {
         CLIENT_SPRINTING.store(sprinting, Ordering::Relaxed);
 
         if sprinting {
+            TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
             if AIMING.swap(false, Ordering::Relaxed) {
                 let _ = host.set_mapping_down("key.use", false);
             }
@@ -603,6 +748,15 @@ impl Hooks for Mod {
             }
         }
 
+        if cfg.ads_mode == AdsMode::Toggle && TOGGLE_AIM_LATCH.load(Ordering::Relaxed) {
+            if CLIENT_RELOADING.load(Ordering::Relaxed) || sprinting {
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+                let _ = host.set_mapping_down("key.use", false);
+            } else {
+                let _ = host.set_mapping_down("key.use", true);
+            }
+        }
+
         if AIMING.load(Ordering::Relaxed) {
             let mut anim = client_anim().lock().unwrap();
             if matches!(anim.action, ActionAnim::Inspect { .. }) {
@@ -610,7 +764,10 @@ impl Hooks for Mod {
             }
         }
 
-        if CLIENT_RELOADING.load(Ordering::Relaxed) && AIMING.swap(false, Ordering::Relaxed) {
+        if CLIENT_RELOADING.load(Ordering::Relaxed)
+            && (AIMING.swap(false, Ordering::Relaxed)
+                || TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed))
+        {
             let _ = host.set_mapping_down("key.use", false);
         }
 
@@ -628,6 +785,7 @@ impl Hooks for Mod {
                 ActionAnim::Draw { .. }
             );
             if !busy_draw {
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
                 AIMING.store(false, Ordering::Relaxed);
                 let _ = host.set_mapping_down("key.use", false);
                 let _ = input.send(host, &RifleInput::simple(ACTION_RELOAD));
@@ -673,6 +831,12 @@ impl Hooks for Mod {
         if dt <= 0.0 {
             return;
         }
+        let cfg = client_settings();
+
+        let hit_rem = f32::from_bits(HITMARKER_TIMER_BITS.load(Ordering::Relaxed));
+        if hit_rem > 0.0 {
+            HITMARKER_TIMER_BITS.store((hit_rem - dt).max(0.0).to_bits(), Ordering::Relaxed);
+        }
 
         // Step world decals & tumbling/bouncing .44-40 brass casings even when the player switches
         // away from the rifle so airborne shells finish landing and clinking naturally.
@@ -683,7 +847,7 @@ impl Hooks for Mod {
 
         let mut cam_delta_pitch = 0.0_f32;
         let mut cam_delta_yaw = 0.0_f32;
-        let mut triggered_foley: Vec<(&'static str, f32, f32)> = Vec::new();
+        let mut triggered_foley: Vec<(SoundChannel, &'static str, f32, f32)> = Vec::new();
         let mut eject_casing_aim: Option<f32> = None;
 
         {
@@ -773,7 +937,7 @@ impl Hooks for Mod {
                     } else {
                         if !lever_sound_played && next >= LEVER_DELAY_SECS {
                             lever_sound_played = true;
-                            triggered_foley.push((SND_LEVER, 0.86, 1.0));
+                            triggered_foley.push((SoundChannel::Mechanism, SND_LEVER, 0.86, 1.0));
                         }
                         if !casing_ejected && next >= CASING_HANDOFF_SECS {
                             casing_ejected = true;
@@ -782,7 +946,7 @@ impl Hooks for Mod {
                         if !cock_sound_played && next >= LEVER_DELAY_SECS + 0.24 {
                             cock_sound_played = true;
                             anim.hammer_uncocked = false;
-                            triggered_foley.push((SND_COCK, 0.72, 1.04));
+                            triggered_foley.push((SoundChannel::Mechanism, SND_COCK, 0.72, 1.04));
                         }
                         let total = LEVER_DELAY_SECS + LEVER_DURATION_SECS;
                         anim.action = if next >= total {
@@ -841,12 +1005,12 @@ impl Hooks for Mod {
                     let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
                     if !lever_sound_played && next >= 0.15 {
                         lever_sound_played = true;
-                        triggered_foley.push((SND_LEVER, 0.90, 0.98));
+                        triggered_foley.push((SoundChannel::Reload, SND_LEVER, 0.90, 0.98));
                     }
                     if !cock_sound_played && next >= 0.40 {
                         cock_sound_played = true;
                         anim.hammer_uncocked = false;
-                        triggered_foley.push((SND_COCK, 0.78, 1.0));
+                        triggered_foley.push((SoundChannel::Reload, SND_COCK, 0.78, 1.0));
                     }
                     anim.action = if next >= dur {
                         anim.hammer_uncocked = false;
@@ -874,10 +1038,12 @@ impl Hooks for Mod {
             spawn_spent_casing_from_camera(host, aim);
         }
 
-        for (snd, vol, pitch) in triggered_foley {
-            play_local_foley(host, snd, vol, pitch);
+        for (ch, snd, vol, pitch) in triggered_foley {
+            play_local_foley_channel(host, ch, snd, vol, pitch);
         }
 
+        cam_delta_pitch *= cfg.camera_recoil_mul;
+        cam_delta_yaw *= cfg.camera_recoil_mul;
         if (cam_delta_pitch.abs() > 1e-5 || cam_delta_yaw.abs() > 1e-5)
             && let Some(cam) = host.camera_entity()
             && let Some([yaw, pitch]) = cam.rotation(host)
@@ -895,7 +1061,8 @@ impl Hooks for Mod {
     fn compute_fov(&self, _: &dyn ClientHost, event: &mut ComputeFovEvent) {
         let aim = aim_progress().clamp(0.0, 1.15);
         if aim > 0.001 {
-            let scale = 1.0 - (1.0 - AIM_FOV) * aim;
+            let zoom_strength = (1.0 - AIM_FOV) * client_settings().ads_zoom_mul;
+            let scale = (1.0 - zoom_strength * aim).clamp(0.35, 1.0);
             let scaled = (event.degrees * scale).clamp(1.0, 179.0);
             if scaled.is_finite() {
                 event.degrees = scaled;
@@ -909,19 +1076,24 @@ impl Hooks for Mod {
     fn calculate_player_turn(&self, _: &dyn ClientHost, event: &mut CalculatePlayerTurnEvent) {
         let aim = aim_progress().clamp(0.0, 1.0);
         if aim > 0.001 {
-            let sens_scale = 1.0 - (1.0 - AIM_FOV) * aim * 0.85;
+            let base_ads_sens = (1.0 - (1.0 - AIM_FOV) * 0.85) * client_settings().ads_sensitivity_mul;
+            let sens_scale = (1.0 + (base_ads_sens - 1.0) * aim).clamp(0.05, 2.0);
             event.mouse_sensitivity *= f64::from(sens_scale);
         }
     }
 
     fn camera_pose(&self, _: &dyn ClientHost, event: &mut CameraPoseEvent<'_>) {
+        let recoil_mul = client_settings().camera_recoil_mul;
+        if recoil_mul <= 0.001 {
+            return;
+        }
         let (jolt, sign) = {
             let anim = client_anim().lock().unwrap();
             (anim.jolt_timer, anim.jolt_yaw_sign)
         };
         if jolt > 0.0 {
             let u = (jolt / 0.065).clamp(0.0, 1.0);
-            let wave = (PI * (1.0 - u) * 2.0).sin() * u;
+            let wave = (PI * (1.0 - u) * 2.0).sin() * u * recoil_mul;
             event.pitch -= 0.42 * wave;
             event.yaw += 0.24 * wave * sign;
         }
@@ -977,8 +1149,17 @@ impl Hooks for Mod {
             .filter(|s| now.saturating_sub(s.last_tick) <= 4);
 
         let (hammer_uncocked, main_arm_left, back_z_tex) = if event.who.local {
+            let sling_style = client_settings().back_sling_style;
+            if sling_style == BackSlingStyle::Hidden {
+                return;
+            }
             if let Some((off_rounds, chest_armored)) = local_offhand_rifle_status(host) {
-                let left = cached.is_some_and(|s| s.main_arm_left);
+                let raw_left = cached.is_some_and(|s| s.main_arm_left);
+                let left = if sling_style == BackSlingStyle::FlipShoulder {
+                    !raw_left
+                } else {
+                    raw_left
+                };
                 let z_tex = if chest_armored {
                     BACK_SLING_ARMOR_Z_TEX
                 } else {
@@ -1113,6 +1294,7 @@ impl Hooks for Mod {
         };
 
         let equip = equip_raw.clamp(0.0, 1.0) * (1.0 - aim.clamp(0.0, 1.0));
+        let sway_mul = client_settings().weapon_sway_mul;
         let pose = evaluate_weapon_pose(
             aim,
             equip,
@@ -1124,6 +1306,7 @@ impl Hooks for Mod {
             walk_phase,
             walk_speed,
             idle_time,
+            sway_mul,
             hammer_uncocked,
             action,
         );
@@ -1261,7 +1444,8 @@ impl Hooks for Mod {
     /// Hide the vanilla HUD crosshair (`+` and crosshair attack indicator) while aiming down sights
     /// so the Winchester 1873 iron sights (`massa_lamina` + `alca_entalhe_base`) remain unobstructed.
     fn gui_layer_pre(&self, _: &dyn ClientHost, event: &mut GuiLayerPreEvent<'_>) -> Flow {
-        if (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
+        if client_settings().hide_crosshair_ads
+            && (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
             && (AIMING.load(Ordering::Relaxed)
                 || (holding_rifle_recently() && aim_progress() > 0.08))
         {
@@ -1274,13 +1458,14 @@ impl Hooks for Mod {
         if event.gui_hidden || !holding_rifle_recently() {
             return;
         }
+        let cfg = client_settings();
         let aim = aim_progress().clamp(0.0, 1.0);
         let [wf, hf] = event.batch.size();
         let (w, h) = (wf as i32, hf as i32);
 
-        if aim >= 0.02 {
-            let brightness =
-                ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0).clamp(0.0, 255.0) as u32;
+        if aim >= 0.02 && cfg.ads_vignette_mul > 0.01 {
+            let darken = ((1.0 - AIM_VIGNETTE) * cfg.ads_vignette_mul * aim).clamp(0.0, 0.85);
+            let brightness = ((1.0 - darken) * 255.0).clamp(0.0, 255.0) as u32;
             let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
             let _ = event.batch.gui_paint(&[GuiDraw::Blit {
                 texture: "misc/vignette".into(),
@@ -1296,7 +1481,28 @@ impl Hooks for Mod {
             }]);
         }
 
-        // Compact western brass ammo counter to the right of the hotbar (`8 / 8`).
+        // Optional subtle 4-tick brass hitmarker around screen center on confirmed entity hits.
+        let hit_rem = f32::from_bits(HITMARKER_TIMER_BITS.load(Ordering::Relaxed));
+        if cfg.hud_hitmarker && hit_rem > 0.001 {
+            let alpha = ((hit_rem / 0.14).clamp(0.0, 1.0) * 225.0) as u32;
+            let hm_color = (alpha << 24) | (cfg.hud_accent_color & 0xFF_FFFF);
+            let cx = wf * 0.5;
+            let cy = hf * 0.5;
+            for step in 2..=5 {
+                let d = step as f32;
+                event.batch.fill([cx - d - 0.5, cy - d - 0.5, 1.2, 1.2], hm_color);
+                event.batch.fill([cx + d - 0.7, cy - d - 0.5, 1.2, 1.2], hm_color);
+                event.batch.fill([cx - d - 0.5, cy + d - 0.7, 1.2, 1.2], hm_color);
+                event.batch.fill([cx + d - 0.7, cy + d - 0.7, 1.2, 1.2], hm_color);
+            }
+        }
+
+        // Configurable western brass ammo counter (`8 / 8`), tintable via `hud.accent_color`.
+        let box_w = 52.0_f32;
+        let box_h = 15.0_f32;
+        let Some([x0, y0]) = cfg.hud_position.layout(wf, hf, box_w, box_h) else {
+            return;
+        };
         let (rounds_now, reloading) = {
             let anim = client_anim().lock().unwrap();
             (
@@ -1304,16 +1510,13 @@ impl Hooks for Mod {
                 CLIENT_RELOADING.load(Ordering::Relaxed),
             )
         };
-        let box_w = 52.0_f32;
-        let box_h = 15.0_f32;
-        let x0 = (wf * 0.5 + 98.0).min(wf - box_w - 6.0);
-        let y0 = hf - 19.0;
+        let accent = cfg.hud_accent_color & 0xFF_FFFF;
         let border = if reloading {
-            0xCC_E3_B3_4C
+            0xDD00_0000 | accent
         } else if rounds_now == 0 {
             0xCC_C9_4A_38
         } else {
-            0xAA_8C_6D_3F
+            0xAE00_0000 | accent
         };
         event.batch.fill([x0, y0, box_w, box_h], 0x92_14_11_0E);
         event.batch.fill([x0, y0, box_w, 1.0], border);

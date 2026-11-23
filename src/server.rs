@@ -1110,7 +1110,7 @@ impl ItemPart for Winchester {
     fn item_bar(&self, _: &dyn ClientHost, event: &mut ItemBarEvent<'_>) {
         let loaded = rounds(&event.stack);
         let width = (loaded * 13 / TUBE_CAPACITY) as i32;
-        *event.bar = Some((width, AMMO_BAR_RGB));
+        *event.bar = Some((width, crate::settings::client_settings().hud_accent_color));
     }
 
     /// Suppress vanilla's equip dip whenever ammo count (`damage`) updates in the same slot.

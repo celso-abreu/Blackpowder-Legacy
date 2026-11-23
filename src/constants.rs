@@ -39,6 +39,8 @@ pub(crate) const SND_TARGET_BULLSEYE: &str = "minecraft:block.note_block.chime";
 pub(crate) const SND_CANDLE_EXTINGUISH: &str = "minecraft:block.candle.extinguish";
 pub(crate) const SND_WATER_SPLASH: &str = "minecraft:entity.fishing_bobber.splash";
 pub(crate) const SND_WATER_BUBBLES: &str = "minecraft:block.bubble_column.upwards_inside";
+pub(crate) const SND_HIT_CONFIRM_SUBTLE: &str = "minecraft:entity.arrow.hit";
+pub(crate) const SND_HIT_CONFIRM_CHIME: &str = "minecraft:block.note_block.bell";
 
 pub(crate) const RELOAD_MAPPING: &str = "reload";
 pub(crate) const INSPECT_MAPPING: &str = "inspect";
@@ -106,6 +108,7 @@ pub(crate) const SYNC_RELOAD_END_NORM: i32 = 5;
 pub(crate) const SYNC_RELOAD_END_EMPTY: i32 = 6;
 pub(crate) const SYNC_RELOAD_ABORTED: i32 = 7;
 pub(crate) const SYNC_WET_MISFIRE: i32 = 8;
+pub(crate) const SYNC_HIT_CONFIRM: i32 = 9;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters

@@ -117,6 +117,25 @@ def main() -> None:
     )
     assert tab["title"] in en, f"Missing creative tab translation {tab['title']}"
 
+    settings_rs = (ROOT / "src" / "settings.rs").read_text()
+    key_consts = dict(
+        re.findall(r'const\s+(KEY_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"', settings_rs)
+    )
+    assert len(key_consts) >= 25, f"Expected >=25 setting keys in settings.rs, got {len(key_consts)}"
+    for cname, key_val in key_consts.items():
+        lbl = f"config.{MOD_ID}.{key_val}"
+        tip = f"config.{MOD_ID}.{key_val}.tooltip"
+        assert lbl in en, f"{cname}: missing translation {lbl}"
+        assert tip in en, f"{cname}: missing tooltip translation {tip}"
+
+    for cname, opts_blob in re.findall(
+        r"choice_opt\(\s*(KEY_[A-Z0-9_]+)\s*,\s*&\[([^\]]+)\]", settings_rs, re.S
+    ):
+        key_val = key_consts[cname]
+        for suffix in re.findall(r'"([^"]+)"', opts_blob):
+            opt_key = f"config.{MOD_ID}.{key_val}.{suffix}"
+            assert opt_key in en, f"{cname}: missing choice option translation {opt_key}"
+
     alphas = parse_rgba8_png_alphas(
         ROOT / "assets" / MOD_ID / "textures" / "item" / "bullet_hole.png"
     )

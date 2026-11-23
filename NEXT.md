@@ -6,6 +6,13 @@ Roadmap ordenado por prioridade mantendo a filosofia central do **`Just a Rifle`
 
 ## Concluído recentemente
 
+- [x] **Página de Configuração Completa (`Options > Mods > Just a Rifle > Config`)**
+  - **29 opções ao vivo** (localizadas em `pt_br` e `en_us`, com *tooltips* explicativos e zero impacto de FPS via snapshot em cache atualizado em `setting_changed`):
+    - **Mixer de Áudio por Canal (`0–200%`) + Timbre:** Volume Geral, Disparos, Grave do Tiro (*sub-bass*), Timbre do Disparo (`Original` / `Grave` / `Seco`), Alavanca e Cão, Recarga, Saque e Inspeção, Cápsulas no Chão e Impactos no Mundo (filtrando tanto sons 1ª pessoa quanto sons 3D do mundo via `play_level_sound_at_position`).
+    - **Retorno Sonoro & Tático:** Volume de Retorno Sonoro dedicado, som privado de Confirmação de Acerto em Alvo (`Sutil` / `Sino` / `Estalo` / `Off`), modo do Carrilhão de Bloco-Alvo (`Centro 12+` / `Só Mosca 15` / `Off`) e Alerta de Clique Seco.
+    - **Controles & Câmera:** Modo de Mira (`Segurar` / `Alternar`), Recarga Automática ao clicar seco (`0 / 8`), Sensibilidade na Mira (`20–150%`), Zoom da Mira (`0–150%`), Recuo na Câmera (`0–200%`) e Balanço da Arma (`0–200%`).
+    - **HUD & Efeitos no Mundo:** Posição do HUD (`Hotbar Dir.` / `Hotbar Esq.` / `Canto Dir.` / `Canto Esq.` / `Oculto`), seletor RGB de Cor do HUD/Barra, Vinheta no ADS, Ocultar Mira `+` no ADS, Marcador Visual de Acerto (`×`), limites/duração de Cápsulas `.44-40` e Marcas de Tiro, e estilo da Bandoleira nas Costas (`Automático` / `Inverter Ombro` / `Oculto`).
+
 - [x] **Mundo Reativo ao Tiro + Sons de Impacto por Material**
   - Sinos (`minecraft:bell`) badalam e balançam em 3D de qualquer distância e ângulo (inclusive tiros de baixo para cima em torres de vila), com faíscas metálicas.
   - Blocos-Alvo (`minecraft:target`) mantêm o pulso nativo de Redstone (`1..=15`) e conquistas, ganhando retorno sonoro cristalino de precisão em acertos no centro (`power >= 12` e *bullseye* `15`).
@@ -35,8 +42,5 @@ Roadmap ordenado por prioridade mantendo a filosofia central do **`Just a Rifle`
 4. **Exploração Vanilla (Loot em Estruturas + Conquistas)**
    - Chance balanceada de encontrar cartuchos `.44-40` (e raramente uma Winchester descarregada) em Minas Abandonadas, Postos de Saqueadores e Mansões, além de conquistas temáticas (`pt_br` / `en_us`).
 
-5. **Configurações do Mod no Menu do Horizon (`mod_settings`)**
-   - Opções leves no menu de Mods (alternar HUD de munição, intensidade da vinheta do ADS, quantidade/tempo das cápsulas e marcas de tiro no chão).
-
-6. **Fabricação Realista de Armeiro & Recarga de Estojos `.44-40` (`v1.0.0`)**
+5. **Fabricação Realista de Armeiro & Recarga de Estojos `.44-40` (`v1.0.0`)**
    - Metalurgia de aço, fabricação das partes reais da Winchester 1873 (cano octogonal, mecanismo *toggle-link*, coronha de nogueira encerada), bancada de armeiro tátil em 3D e reaproveitamento das cápsulas de latão deflagradas com espoleta, pólvora negra e projétil `.44`.

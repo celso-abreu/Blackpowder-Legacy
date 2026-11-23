@@ -267,6 +267,7 @@ pub(crate) fn evaluate_weapon_pose(
     walk_phase: f32,
     walk_speed: f32,
     idle_time: f32,
+    sway_mul: f32,
     hammer_uncocked: bool,
     action: ActionAnim,
 ) -> WeaponPose {
@@ -282,8 +283,8 @@ pub(crate) fn evaluate_weapon_pose(
     ];
     let mut gun_rot = [0.0, 0.0, 3.2 * hip];
 
-    // Subtle idle breathing + walk Lissajous bobbing (damped 88% in ADS).
-    let sway_scale = 0.12 + 0.88 * hip;
+    // Subtle idle breathing + walk Lissajous bobbing (damped 88% in ADS, scaled by player config).
+    let sway_scale = (0.12 + 0.88 * hip) * sway_mul.clamp(0.0, 2.0);
     gun_trans[0] += walk_phase.cos() * 0.013 * walk_speed * sway_scale;
     gun_trans[1] += (idle_time * 1.75).sin() * 0.0025 * sway_scale
         - (walk_phase * 2.0).sin().abs() * 0.011 * walk_speed * sway_scale;
@@ -875,6 +876,7 @@ mod tests {
             0.0,
             0.0,
             0.0,
+            1.0,
             false,
             ActionAnim::None,
         );

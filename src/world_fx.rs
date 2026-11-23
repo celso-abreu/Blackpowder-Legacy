@@ -713,7 +713,7 @@ pub(crate) fn handle_bullet_terrain_impact(
                 host,
                 SND_TARGET_BULLSEYE,
                 event.at,
-                SoundSource::Blocks,
+                SoundSource::Players,
                 0.95,
                 1.56,
             );
@@ -721,7 +721,7 @@ pub(crate) fn handle_bullet_terrain_impact(
                 host,
                 SND_TARGET_BULLSEYE,
                 event.at,
-                SoundSource::Blocks,
+                SoundSource::Players,
                 0.65,
                 1.98,
             );
@@ -730,7 +730,7 @@ pub(crate) fn handle_bullet_terrain_impact(
                 host,
                 SND_TARGET_BULLSEYE,
                 event.at,
-                SoundSource::Blocks,
+                SoundSource::Players,
                 0.68,
                 1.24,
             );
@@ -850,7 +850,7 @@ pub(crate) fn handle_bullet_terrain_impact(
                     host,
                     SND_CRYSTAL_CHIME,
                     event.at,
-                    SoundSource::Blocks,
+                    SoundSource::Players,
                     0.72,
                     1.42 + 0.12 * jitter,
                 );
@@ -1208,13 +1208,19 @@ pub(crate) fn on_bullet_impact_sync(
         light = sample_world_light(host, &value.dimension, light_pos);
     }
 
+    let max_holes = crate::settings::client_settings().max_bullet_holes;
+    if max_holes == 0 {
+        world_effects().lock().unwrap().holes.clear();
+        return Ok(());
+    }
+
     let mut fx = world_effects().lock().unwrap();
     if !value.dimension.is_empty() && fx.active_dimension != value.dimension {
         fx.active_dimension = value.dimension.clone();
         fx.holes.clear();
         fx.casings.clear();
     }
-    if fx.holes.len() >= MAX_BULLET_HOLES {
+    while fx.holes.len() >= max_holes {
         fx.holes.remove(0);
     }
     let roll_quarter = ((fx.next_unit_f32() * 4.0) as u8) & 3;
@@ -1315,7 +1321,12 @@ pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
     ];
     let light = sample_world_light(host, &dim, block_pos);
 
-    if fx.casings.len() >= MAX_SPENT_CASINGS {
+    let max_casings = crate::settings::client_settings().max_casings;
+    if max_casings == 0 {
+        fx.casings.clear();
+        return;
+    }
+    while fx.casings.len() >= max_casings {
         fx.casings.remove(0);
     }
     // Start aligned with the barrel & carrier slot (`local -Z` hollow mouth pointing forward,
@@ -1378,6 +1389,7 @@ fn hits_solid_wall(host: &dyn ClientHost, x: f64, y: f64, z: f64) -> bool {
 }
 
 pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
+    let cfg = crate::settings::client_settings();
     let mut clink_sounds: Vec<(f32, f32)> = Vec::new();
     {
         let mut fx = world_effects().lock().unwrap();
@@ -1385,10 +1397,16 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
             return;
         }
 
+        if cfg.max_bullet_holes == 0 {
+            fx.holes.clear();
+        } else if fx.holes.len() > cfg.max_bullet_holes {
+            let drop_n = fx.holes.len() - cfg.max_bullet_holes;
+            fx.holes.drain(0..drop_n);
+        }
         for hole in &mut fx.holes {
             hole.age += dt;
         }
-        fx.holes.retain(|h| h.age < BULLET_HOLE_LIFETIME_SECS);
+        fx.holes.retain(|h| h.age < cfg.bullet_hole_lifetime_secs);
 
         fx.prune_timer += dt;
         let refresh_world = fx.prune_timer >= 0.25;
@@ -1525,7 +1543,15 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
             casing.light = sample_world_light(host, &casing.dimension, bp);
         }
 
-        casings.retain(|c| c.age < CASING_LIFETIME_SECS && c.pos[1] > -128.0);
+        if cfg.max_casings == 0 {
+            casings.clear();
+        } else {
+            casings.retain(|c| c.age < cfg.casing_lifetime_secs && c.pos[1] > -128.0);
+            if casings.len() > cfg.max_casings {
+                let drop_n = casings.len() - cfg.max_casings;
+                casings.drain(0..drop_n);
+            }
+        }
         fx.casings = casings;
     }
 
