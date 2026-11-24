@@ -662,6 +662,8 @@ pub(crate) fn handle_bullet_terrain_impact(
     let in_candles = host.block_in_tag(hit_block, TAG_CANDLES).unwrap_or(false);
 
     let (can_break, drop_items) = bullet_break_permissions(host, level, event.owner);
+    let shooter_dist =
+        crate::exploration::resolve_shooter_and_distance(host, level, event.owner, event.at);
 
     // Horizon natively shatters `decorated_pot` and `chorus_flower` right after `projectile_impact`
     // when `can_break` holds; we shatter thin window panes, flower pots, and stalactites directly.
@@ -702,6 +704,11 @@ pub(crate) fn handle_bullet_terrain_impact(
                 event.at,
                 GameEventContext::default(),
             );
+            if let Some((shooter, dist)) = shooter_dist
+                && dist >= ADV_BELL_MIN_DIST
+            {
+                crate::exploration::grant_mod_criterion(host, shooter, TRIG_BELL_RINGER);
+            }
         }
     } else if is_target {
         // Leave `minecraft:target` block state untouched so Horizon's native `target_block_hit`
@@ -725,6 +732,11 @@ pub(crate) fn handle_bullet_terrain_impact(
                 0.65,
                 1.98,
             );
+            if let Some((shooter, dist)) = shooter_dist
+                && dist >= ADV_DEADEYE_MIN_DIST
+            {
+                crate::exploration::grant_mod_criterion(host, shooter, TRIG_DEADEYE);
+            }
         } else if power >= 12 {
             level.play_sound(
                 host,
@@ -759,6 +771,9 @@ pub(crate) fn handle_bullet_terrain_impact(
             0.85,
             1.05 + 0.06 * jitter,
         );
+        if let Some((shooter, _)) = shooter_dist {
+            crate::exploration::grant_mod_criterion(host, shooter, TRIG_CANDLE_SNUFFER);
+        }
         if let Some(smoke) = SMOKE_KEY.get().copied() {
             let smoke_opts = ParticleOptions::simple(smoke);
             level.send_particles(

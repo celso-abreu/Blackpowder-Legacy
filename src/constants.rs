@@ -74,6 +74,25 @@ pub(crate) const RULE_PROJECTILES_BREAK_BLOCKS: &str = "projectiles_can_break_bl
 pub(crate) const RULE_BLOCK_DROPS: &str = "block_drops";
 pub(crate) const DEFAULT_DIMENSION: &str = "minecraft:overworld";
 
+pub(crate) const LOOT_ABANDONED_MINESHAFT: &str = "minecraft:chests/abandoned_mineshaft";
+pub(crate) const LOOT_PILLAGER_OUTPOST: &str = "minecraft:chests/pillager_outpost";
+pub(crate) const LOOT_WOODLAND_MANSION: &str = "minecraft:chests/woodland_mansion";
+pub(crate) const LOOT_SIMPLE_DUNGEON: &str = "minecraft:chests/simple_dungeon";
+pub(crate) const LOOT_DESERT_PYRAMID: &str = "minecraft:chests/desert_pyramid";
+
+pub(crate) const TRIG_FRONTIER_RELIC: &str = "just_a_rifle:frontier_relic";
+pub(crate) const TRIG_FULL_TUBE: &str = "just_a_rifle:full_tube";
+pub(crate) const TRIG_WET_POWDER: &str = "just_a_rifle:wet_powder";
+pub(crate) const TRIG_BELL_RINGER: &str = "just_a_rifle:bell_ringer";
+pub(crate) const TRIG_CANDLE_SNUFFER: &str = "just_a_rifle:candle_snuffer";
+pub(crate) const TRIG_DEADEYE: &str = "just_a_rifle:deadeye_bullseye";
+pub(crate) const TRIG_SHERIFF: &str = "just_a_rifle:sheriff";
+pub(crate) const TRIG_LONG_SHOT: &str = "just_a_rifle:long_shot";
+
+pub(crate) const ADV_BELL_MIN_DIST: f64 = 30.0;
+pub(crate) const ADV_DEADEYE_MIN_DIST: f64 = 50.0;
+pub(crate) const ADV_LONG_SHOT_MIN_DIST: f64 = 60.0;
+
 pub(crate) const MAX_BULLET_HOLES: usize = 96;
 pub(crate) const BULLET_HOLE_LIFETIME_SECS: f32 = 35.0;
 pub(crate) const BULLET_HOLE_BASE_SCALE: f32 = 0.44;

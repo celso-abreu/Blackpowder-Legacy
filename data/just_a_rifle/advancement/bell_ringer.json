@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:obtain_rifle",
+  "display": {
+    "icon": {
+      "id": "minecraft:bell",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.bell_ringer.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.bell_ringer.description"
+    },
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "rang_distant_bell": {
+      "trigger": "just_a_rifle:bell_ringer"
+    }
+  },
+  "rewards": {
+    "experience": 40
+  }
+}

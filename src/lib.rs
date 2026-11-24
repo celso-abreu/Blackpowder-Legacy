@@ -7,10 +7,12 @@
 //! - `arms`      — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
 //! - `pose`      — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
 //! - `world_fx`  — Reactive world targets, per-material impact audio, bullet decals & casings.
+//! - `exploration` — Structure chest loot (`container_loot_filled`) & mod advancement triggers.
 //! - `server`    — Authoritative firing, stance spread, muzzle VFX & per-shell reload loop.
 
 mod arms;
 mod constants;
+mod exploration;
 mod pose;
 mod server;
 mod settings;
@@ -24,19 +26,23 @@ use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
     ArmPose, BlockKey, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost,
-    ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow,
-    FluidKey, GetArmPoseEvent, GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand,
-    HearsProjectileImpactsEvent, Hooks, Host, HostSide, HumanoidPart, IPayloadContext, Identifier,
-    ItemKey, KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelRef, LevelTickPostEvent,
-    ModelBakingCompletedEvent, ParticleKey, PayloadId, PlayLevelSoundAtPositionEvent,
-    ProjectileImpactEvent, Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent,
-    RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent,
-    SoundPlay, SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer,
-    VarInt,
+    ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent,
+    ContainerLootFilledEvent, Flow, FluidKey, GetArmPoseEvent, GuiDraw, GuiLayerPreEvent,
+    GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host, HostSide, HumanoidPart,
+    IPayloadContext, Identifier, ItemKey, KeyConflictContext, KeyMappingPreEvent, KeyRegistration,
+    LevelHost, LevelRef, LevelTickPostEvent, LivingDeathEvent, ModelBakingCompletedEvent,
+    ParticleKey, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent, Registrar,
+    RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
+    ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundSource,
+    StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
 };
 
 use crate::arms::PlayerArms;
 use crate::constants::*;
+use crate::exploration::{
+    flush_pending_exploration_advancements, handle_living_death_advancements,
+    on_container_loot_filled, record_bullet_entity_hit, resolve_shooter_and_distance,
+};
 use crate::pose::{
     build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_gun_space_arm,
     draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status, recoil_envelope,
@@ -143,6 +149,7 @@ pub(crate) static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 pub(crate) static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
 pub(crate) static BULLET_IMPACT_SYNC: OnceLock<ToClient<BulletImpactSync>> = OnceLock::new();
 pub(crate) static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
+pub(crate) static CARTRIDGE_KEY: OnceLock<ItemKey> = OnceLock::new();
 pub(crate) static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
@@ -387,6 +394,7 @@ impl Hooks for Mod {
 
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let winchester = r.item_key(WINCHESTER);
+        let cartridge = r.item_key(CARTRIDGE);
         let smoke = r.particle_key(SMOKE_PARTICLE);
         let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
@@ -405,6 +413,7 @@ impl Hooks for Mod {
         let pointed_dripstone_block = r.block_key(POINTED_DRIPSTONE_BLOCK);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
+        let _ = CARTRIDGE_KEY.set(cartridge);
         let _ = SMOKE_KEY.set(smoke);
         let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
@@ -468,25 +477,41 @@ impl Hooks for Mod {
         if event.kind == BULLET {
             if event.entity.is_none() {
                 handle_bullet_terrain_impact(host, event);
-            } else if event.owner != 0
-                && event.entity != Some(event.owner)
-                && let Some(sync) = RIFLE_SYNC.get()
+            } else if let Some(victim_id) = event.entity
+                && event.owner != 0
+                && victim_id != event.owner
                 && let Some(level) = host.level(event.dimension)
-                && let Some(players) = level.online_players(host)
-                && let Some(shooter) = players
-                    .into_iter()
-                    .find(|p| p.entity().id() == event.owner)
+                && let Some((shooter, dist)) =
+                    resolve_shooter_and_distance(host, level, event.owner, event.at)
             {
-                let _ = sync.send(
-                    host,
-                    shooter,
-                    &RifleSync {
-                        kind: VarInt(SYNC_HIT_CONFIRM),
-                        rounds: VarInt(0),
-                    },
-                );
+                let now = SERVER_TICKS.load(Ordering::Relaxed);
+                record_bullet_entity_hit(victim_id, shooter.uuid(), dist, now);
+                if let Some(sync) = RIFLE_SYNC.get() {
+                    let _ = sync.send(
+                        host,
+                        shooter,
+                        &RifleSync {
+                            kind: VarInt(SYNC_HIT_CONFIRM),
+                            rounds: VarInt(0),
+                        },
+                    );
+                }
             }
         }
+        Flow::Continue
+    }
+
+    fn container_loot_filled(
+        &self,
+        level: &dyn LevelHost,
+        event: &mut ContainerLootFilledEvent<'_>,
+    ) {
+        on_container_loot_filled(level, event);
+    }
+
+    fn living_death(&self, host: &mut dyn ServerHost, event: &mut LivingDeathEvent<'_>) -> Flow {
+        let now = SERVER_TICKS.load(Ordering::Relaxed);
+        handle_living_death_advancements(host, event, now);
         Flow::Continue
     }
 
@@ -819,6 +844,7 @@ impl Hooks for Mod {
         let now = SERVER_TICKS.load(Ordering::Relaxed);
         tick_reload_sessions(host, now);
         tick_active_bullets(host, now);
+        flush_pending_exploration_advancements(host);
     }
 
     /// Per-frame animation stepper (`event.elapsed`) + 240Hz camera recoil climb & partial recovery.

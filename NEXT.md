@@ -6,24 +6,23 @@ Roadmap ordenado por prioridade mantendo a filosofia central do **`Just a Rifle`
 
 ## Concluído recentemente
 
+- [x] **Exploração Vanilla (Loot em Estruturas + Árvore de Conquistas)**
+  - **Loot balanceado em estruturas (`Hooks::container_loot_filled`):** Cartuchos `.44-40` e chance rara de encontrar uma Winchester 1873 descarregada (`0 / 8`, acompanhada de alguns cartuchos avulsos) em **Minas Abandonadas** (incluindo *chest minecarts*), **Postos de Saqueadores** e **Mansões da Floresta**, além de pequenos lotes ocasionais de munição em Masmorras subterrâneas e Pirâmides do Deserto.
+  - **12 Conquistas (`data/just_a_rifle/advancement/` em `pt_br` e `en_us`):**
+    - Desbloqueio automático das receitas de `.44-40` e `Winchester 1873` no Livro de Receitas ao obter pólvora, cobre, ferro ou munição.
+    - Aba própria **`Just a Rifle`** com **10 conquistas visíveis** (incluindo conquista secreta): *A Arma que Conquistou os Blocos*, *Relíquia de Prospector* (achar rifle em estrutura), *Oito no Tubo* (`8 / 8`), *Mantenha a Pólvora Seca* (secreta — falha submersa), *Hora do Duelo* (sino a `30+` blocos), *Tiro de Salão* (apagar vela acesa no tiro), *Olho de Águia* (mosca `15` no Bloco-Alvo a `50+` blocos), *Lei da Fronteira* (derrotar Illager) e *Atirador de Elite* (abater monstro hostil a `60+` blocos).
+
 - [x] **Página de Configuração Completa (`Options > Mods > Just a Rifle > Config`)**
   - **29 opções ao vivo** (localizadas em `pt_br` e `en_us`, com *tooltips* explicativos e zero impacto de FPS via snapshot em cache atualizado em `setting_changed`):
-    - **Mixer de Áudio por Canal (`0–200%`) + Timbre:** Volume Geral, Disparos, Grave do Tiro (*sub-bass*), Timbre do Disparo (`Original` / `Grave` / `Seco`), Alavanca e Cão, Recarga, Saque e Inspeção, Cápsulas no Chão e Impactos no Mundo (filtrando tanto sons 1ª pessoa quanto sons 3D do mundo via `play_level_sound_at_position`).
+    - **Mixer de Áudio por Canal (`0–200%`) + Timbre:** Volume Geral, Disparos, Grave do Tiro (*sub-bass*), Timbre do Disparo (`Original` / `Grave` / `Seco`), Alavanca e Cão, Recarga, Saque e Inspeção, Cápsulas no Chão e Impactos no Mundo.
     - **Retorno Sonoro & Tático:** Volume de Retorno Sonoro dedicado, som privado de Confirmação de Acerto em Alvo (`Sutil` / `Sino` / `Estalo` / `Off`), modo do Carrilhão de Bloco-Alvo (`Centro 12+` / `Só Mosca 15` / `Off`) e Alerta de Clique Seco.
-    - **Controles & Câmera:** Modo de Mira (`Segurar` / `Alternar`), Recarga Automática ao clicar seco (`0 / 8`), Sensibilidade na Mira (`20–150%`), Zoom da Mira (`0–150%`), Recuo na Câmera (`0–200%`) e Balanço da Arma (`0–200%`).
-    - **HUD & Efeitos no Mundo:** Posição do HUD (`Hotbar Dir.` / `Hotbar Esq.` / `Canto Dir.` / `Canto Esq.` / `Oculto`), seletor RGB de Cor do HUD/Barra, Vinheta no ADS, Ocultar Mira `+` no ADS, Marcador Visual de Acerto (`×`), limites/duração de Cápsulas `.44-40` e Marcas de Tiro, e estilo da Bandoleira nas Costas (`Automático` / `Inverter Ombro` / `Oculto`).
+    - **Controles, Câmera, HUD & Efeitos no Mundo:** Modo de Mira (`Segurar` / `Alternar`), Recarga Automática, Sensibilidade/Zoom/Recuo/Balanço, Posição e Cor RGB do HUD/Barra, Vinheta, Mira `+`, Hitmarker (`×`), limites/duração de Cápsulas e Marcas de Tiro, e estilo da Bandoleira nas Costas.
 
 - [x] **Mundo Reativo ao Tiro + Sons de Impacto por Material**
-  - Sinos (`minecraft:bell`) badalam e balançam em 3D de qualquer distância e ângulo (inclusive tiros de baixo para cima em torres de vila), com faíscas metálicas.
-  - Blocos-Alvo (`minecraft:target`) mantêm o pulso nativo de Redstone (`1..=15`) e conquistas, ganhando retorno sonoro cristalino de precisão em acertos no centro (`power >= 12` e *bullseye* `15`).
-  - Vidraças (`glass_pane` / `*_stained_glass_pane`), Vasos de Flores (`#minecraft:flower_pots`) e Estalactites (`pointed_dripstone`) estilhaçam ao impacto do `.44-40` (ao lado de `decorated_pot` e `chorus_flower`), respeitando `projectiles_can_break_blocks`, `block_drops` e Modo Aventura, além de apagar velas acesas (`#minecraft:candles`) sem quebrá-las.
-  - Áudio e partículas de impacto específicos por família de material via `BlockSoundType` (`Metal` com ricochete e faíscas, `Crystal`/Ametista com carrilhão, `Glass`, `Wood`, `Earth`, `Soft` e `Stone`), e filtro geométrico que impede decalques de tiro flutuando no ar em cercas, barras, correntes, sinos ou blocos estilhaçados.
+  - Sinos (`minecraft:bell`) badalam em 3D de qualquer ângulo, Blocos-Alvo (`minecraft:target`) ganham carrilhão de precisão (`12+` / `15`), vidraças/vasos/estalactites estilhaçam respeitando gamerules e Modo Aventura, velas acesas apagam no tiro, e cada família de material tem áudio/partículas próprios.
 
 - [x] **Comportamento realista na água (Pólvora Negra vs. Submersão)**
-  - Falha de ignição submersa (*clique úmido* + bolhas na culatra/cano sem desperdiçar o cartucho `.44-40`, bloqueando também recarga debaixo d'água).
-  - Tiro com a ponta do cano (`boca_cano`) tocando a lâmina d'água substitui fogo/fumaça seca por jato pressurizado de bolhas + spray.
-  - Entrada da bala na água gera splash na superfície, trilha de cavitação (`minecraft:bubble`) e forte arrasto hidrodinâmico (~3–3,5 blocos de alcance útil subaquático).
-  - Impactos no fundo do rio/mar abafados com bolhas no lugar de poeira/fumaça seca, e cápsulas `.44-40` de latão afundando suavemente com som abafado.
+  - Falha de ignição submersa (*clique úmido* sem gastar cartucho), cano na lâmina d'água com jato de bolhas, splash + cavitação + arrasto hidrodinâmico (~3–3,5m) e cápsulas afundando suavemente.
 
 ---
 
@@ -39,8 +38,5 @@ Roadmap ordenado por prioridade mantendo a filosofia central do **`Just a Rifle`
 3. **Poses Dinâmicas de Braço em 3ª Pessoa (`F5` / Multiplayer)**
    - Ajustar os dois braços do personagem em 3ª pessoa para diferenciar empunhadura no quadril/corrida e mira erguida em ADS.
 
-4. **Exploração Vanilla (Loot em Estruturas + Conquistas)**
-   - Chance balanceada de encontrar cartuchos `.44-40` (e raramente uma Winchester descarregada) em Minas Abandonadas, Postos de Saqueadores e Mansões, além de conquistas temáticas (`pt_br` / `en_us`).
-
-5. **Fabricação Realista de Armeiro & Recarga de Estojos `.44-40` (`v1.0.0`)**
+4. **Fabricação Realista de Armeiro & Recarga de Estojos `.44-40` (`v1.0.0`)**
    - Metalurgia de aço, fabricação das partes reais da Winchester 1873 (cano octogonal, mecanismo *toggle-link*, coronha de nogueira encerada), bancada de armeiro tátil em 3D e reaproveitamento das cápsulas de latão deflagradas com espoleta, pólvora negra e projétil `.44`.

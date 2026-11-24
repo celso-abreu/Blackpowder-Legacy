@@ -99,5 +99,26 @@
   "config.just_a_rifle.world.back_sling.tooltip": "Controla a exibição diagonal da Winchester nas costas do seu personagem quando equipada na mão secundária [F].",
   "config.just_a_rifle.world.back_sling.auto": "Automático",
   "config.just_a_rifle.world.back_sling.flip": "Inverter Ombro",
-  "config.just_a_rifle.world.back_sling.hidden": "Oculto"
+  "config.just_a_rifle.world.back_sling.hidden": "Oculto",
+
+  "advancements.just_a_rifle.root.title": "Just a Rifle",
+  "advancements.just_a_rifle.root.description": "Aço azulado, nogueira encerada e pólvora negra .44-40 na fronteira dos blocos",
+  "advancements.just_a_rifle.obtain_rifle.title": "A Arma que Conquistou os Blocos",
+  "advancements.just_a_rifle.obtain_rifle.description": "Obtenha uma carabina Winchester 1873 de alavanca",
+  "advancements.just_a_rifle.frontier_relic.title": "Relíquia de Prospector",
+  "advancements.just_a_rifle.frontier_relic.description": "Encontre uma Winchester 1873 esquecida em uma Mina Abandonada, Posto de Saqueadores ou Mansão",
+  "advancements.just_a_rifle.full_tube.title": "Oito no Tubo",
+  "advancements.just_a_rifle.full_tube.description": "Carregue todos os 8 cartuchos .44-40 pela janela lateral da Winchester 1873",
+  "advancements.just_a_rifle.wet_powder.title": "Mantenha a Pólvora Seca",
+  "advancements.just_a_rifle.wet_powder.description": "Descubra da pior forma que pólvora negra .44-40 não detona debaixo d'água",
+  "advancements.just_a_rifle.bell_ringer.title": "Hora do Duelo",
+  "advancements.just_a_rifle.bell_ringer.description": "Faça um sino badalar com um tiro de Winchester a pelo menos 30 blocos de distância",
+  "advancements.just_a_rifle.candle_snuffer.title": "Tiro de Salão",
+  "advancements.just_a_rifle.candle_snuffer.description": "Apague a chama de uma vela acesa com uma bala .44-40 sem quebrar a vela",
+  "advancements.just_a_rifle.deadeye_bullseye.title": "Olho de Águia",
+  "advancements.just_a_rifle.deadeye_bullseye.description": "Acerte a mosca máxima (15) de um Bloco-Alvo a pelo menos 50 blocos de distância",
+  "advancements.just_a_rifle.sheriff.title": "Lei da Fronteira",
+  "advancements.just_a_rifle.sheriff.description": "Derrote um Saqueador ou outro Illager com um disparo de Winchester 1873",
+  "advancements.just_a_rifle.long_shot.title": "Atirador de Elite",
+  "advancements.just_a_rifle.long_shot.description": "Abata um monstro hostil com a Winchester 1873 a pelo menos 60 blocos de distância"
 }

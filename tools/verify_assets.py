@@ -136,6 +136,37 @@ def main() -> None:
             opt_key = f"config.{MOD_ID}.{key_val}.{suffix}"
             assert opt_key in en, f"{cname}: missing choice option translation {opt_key}"
 
+    adv_dir = ROOT / "data" / MOD_ID / "advancement"
+    adv_files = sorted(adv_dir.rglob("*.json"))
+    assert len(adv_files) >= 10, f"Expected >=10 advancement JSONs, found {len(adv_files)}"
+    adv_ids = {
+        f"{MOD_ID}:{af.relative_to(adv_dir).with_suffix('').as_posix()}" for af in adv_files
+    }
+    used_triggers: set[str] = set()
+    for af in adv_files:
+        adv = json.loads(af.read_text())
+        assert adv.get("criteria"), f"{af}: missing criteria"
+        for crit in adv["criteria"].values():
+            used_triggers.add(crit["trigger"])
+        parent = adv.get("parent")
+        if parent is not None:
+            assert parent == "minecraft:recipes/root" or parent in adv_ids, (
+                f"{af}: unknown advancement parent {parent}"
+            )
+        disp = adv.get("display")
+        if disp is not None:
+            for field in ("title", "description"):
+                tr = disp[field]["translate"]
+                assert tr in en, f"{af}: missing advancement translation {tr}"
+
+    constants_rs = (ROOT / "src" / "constants.rs").read_text()
+    for trig_name, trig_id in re.findall(
+        r'const\s+(TRIG_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"', constants_rs
+    ):
+        assert trig_id in used_triggers, (
+            f"{trig_name} ({trig_id}) is not referenced by any advancement JSON"
+        )
+
     alphas = parse_rgba8_png_alphas(
         ROOT / "assets" / MOD_ID / "textures" / "item" / "bullet_hole.png"
     )

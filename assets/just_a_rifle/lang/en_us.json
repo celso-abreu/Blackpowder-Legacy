@@ -99,5 +99,26 @@
   "config.just_a_rifle.world.back_sling.tooltip": "Controls how your off-hand Winchester [F] is worn across your character's back.",
   "config.just_a_rifle.world.back_sling.auto": "Auto",
   "config.just_a_rifle.world.back_sling.flip": "Flip Shoulder",
-  "config.just_a_rifle.world.back_sling.hidden": "Hidden"
+  "config.just_a_rifle.world.back_sling.hidden": "Hidden",
+
+  "advancements.just_a_rifle.root.title": "Just a Rifle",
+  "advancements.just_a_rifle.root.description": "Blued steel, oiled walnut, and .44-40 black powder across the blocky frontier",
+  "advancements.just_a_rifle.obtain_rifle.title": "The Gun That Won the Blocks",
+  "advancements.just_a_rifle.obtain_rifle.description": "Obtain a lever-action Winchester 1873 rifle",
+  "advancements.just_a_rifle.frontier_relic.title": "Prospector's Relic",
+  "advancements.just_a_rifle.frontier_relic.description": "Discover a forgotten Winchester 1873 inside a Mineshaft, Pillager Outpost, or Woodland Mansion",
+  "advancements.just_a_rifle.full_tube.title": "Eight in the Tube",
+  "advancements.just_a_rifle.full_tube.description": "Load all 8 .44-40 cartridges through the Winchester's side loading gate",
+  "advancements.just_a_rifle.wet_powder.title": "Keep Your Powder Dry",
+  "advancements.just_a_rifle.wet_powder.description": "Learn the hard way that black-powder .44-40 rounds refuse to fire underwater",
+  "advancements.just_a_rifle.bell_ringer.title": "High Noon",
+  "advancements.just_a_rifle.bell_ringer.description": "Ring a bell with a Winchester shot from at least 30 blocks away",
+  "advancements.just_a_rifle.candle_snuffer.title": "Saloon Trick Shot",
+  "advancements.just_a_rifle.candle_snuffer.description": "Snuff out a lit candle flame with a .44-40 bullet without breaking the candle",
+  "advancements.just_a_rifle.deadeye_bullseye.title": "Deadeye",
+  "advancements.just_a_rifle.deadeye_bullseye.description": "Score a maximum 15-power bullseye on a Target block from at least 50 blocks away",
+  "advancements.just_a_rifle.sheriff.title": "Frontier Lawman",
+  "advancements.just_a_rifle.sheriff.description": "Defeat a Pillager or fellow Illager with a Winchester 1873 shot",
+  "advancements.just_a_rifle.long_shot.title": "Sharpshooter",
+  "advancements.just_a_rifle.long_shot.description": "Fell a hostile monster with the Winchester 1873 from at least 60 blocks away"
 }

@@ -13,6 +13,7 @@ use mod_api::{
 };
 
 use crate::constants::*;
+use crate::exploration::{grant_mod_criterion, record_bullet_shot};
 use crate::skin::{default_skin_for_uuid, parse_mojang_skin_property};
 use crate::{
     is_point_in_water, RifleInput, RifleSkinSync, RifleSync, AIMING, AIM_LAST_TICK, BUBBLE_KEY,
@@ -882,6 +883,7 @@ fn fire_rifle(
         // without wasting the round; vents small air bubbles with a damp mechanical click.
         LEVER_READY.lock().unwrap().insert(uuid, now + 7);
         emit_wet_misfire(host, player, f, loaded);
+        grant_mod_criterion(host, player, TRIG_WET_POWDER);
         return;
     }
 
@@ -907,6 +909,14 @@ fn fire_rifle(
     };
 
     register_spawned_bullet(host, shot.entity(), muzzle_in_water, now);
+    if let Some(origin) = frame
+        .as_ref()
+        .map(|f| f.eye)
+        .or_else(|| player.entity().eye_position(host))
+        .or_else(|| player.entity().position(host))
+    {
+        record_bullet_shot(shot.entity().id(), player.entity().id(), uuid, origin, now);
+    }
 
     let remaining = loaded - 1;
     let mut rifle = rifle;
@@ -1058,6 +1068,9 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                         } else {
                             session.inserted_any = true;
                             send_sync(host, player, SYNC_SHELL_INSERTED, next_loaded);
+                            if next_loaded == TUBE_CAPACITY {
+                                grant_mod_criterion(host, player, TRIG_FULL_TUBE);
+                            }
                             // Wait `RELOAD_INSERT_TICKS` so the shell-insertion animation completes
                             // before transitioning to either the next shell or `ReloadPhase::Closing`.
                             session.phase = ReloadPhase::Inserting {
