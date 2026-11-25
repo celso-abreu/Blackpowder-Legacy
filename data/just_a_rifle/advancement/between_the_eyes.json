@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:full_tube",
+  "display": {
+    "icon": {
+      "id": "just_a_rifle:bullet",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.between_the_eyes.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.between_the_eyes.description"
+    },
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "headshot_kill": {
+      "trigger": "just_a_rifle:between_the_eyes"
+    }
+  },
+  "rewards": {
+    "experience": 65
+  }
+}

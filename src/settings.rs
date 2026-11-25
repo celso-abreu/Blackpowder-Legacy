@@ -1,6 +1,6 @@
 //! Client configuration page (`Options > Mods > Just a Rifle > Config`) & per-channel audio mixer.
 //!
-//! Registers 28 typed settings (`Toggle`, `Choice`, `Range`, `Color`) via
+//! Registers 31 typed settings (`Toggle`, `Choice`, `Range`, `Color`) via
 //! `Registrar::register_setting`, caches a fast `Copy` snapshot updated on `Hooks::setting_changed`
 //! and world entry, and mixes both client-local foley and incoming world level sounds per player.
 
@@ -39,10 +39,12 @@ pub(crate) const KEY_CAMERA_RECOIL_KICK: &str = "camera.recoil_kick";
 pub(crate) const KEY_CAMERA_WEAPON_SWAY: &str = "camera.weapon_sway";
 
 pub(crate) const KEY_HUD_AMMO_POS: &str = "hud.ammo_position";
+pub(crate) const KEY_HUD_SHOW_RESERVE: &str = "hud.show_reserve";
 pub(crate) const KEY_HUD_ACCENT_COLOR: &str = "hud.accent_color";
 pub(crate) const KEY_HUD_ADS_VIGNETTE: &str = "hud.ads_vignette";
 pub(crate) const KEY_HUD_HIDE_CROSSHAIR: &str = "hud.hide_crosshair_ads";
 pub(crate) const KEY_HUD_HITMARKER: &str = "hud.hitmarker";
+pub(crate) const KEY_HUD_RICH_TOOLTIPS: &str = "hud.rich_tooltips";
 
 pub(crate) const KEY_WORLD_MAX_CASINGS: &str = "world.max_casings";
 pub(crate) const KEY_WORLD_CASING_LIFETIME: &str = "world.casing_lifetime";
@@ -239,10 +241,12 @@ pub(crate) struct ClientSettings {
     pub(crate) weapon_sway_mul: f32,
 
     pub(crate) hud_position: HudPosition,
+    pub(crate) hud_show_reserve: bool,
     pub(crate) hud_accent_color: u32,
     pub(crate) ads_vignette_mul: f32,
     pub(crate) hide_crosshair_ads: bool,
     pub(crate) hud_hitmarker: bool,
+    pub(crate) hud_rich_tooltips: bool,
 
     pub(crate) max_casings: usize,
     pub(crate) casing_lifetime_secs: f32,
@@ -278,10 +282,12 @@ impl Default for ClientSettings {
             weapon_sway_mul: 1.0,
 
             hud_position: HudPosition::HotbarRight,
+            hud_show_reserve: true,
             hud_accent_color: AMMO_BAR_RGB,
             ads_vignette_mul: 1.0,
             hide_crosshair_ads: true,
             hud_hitmarker: false,
+            hud_rich_tooltips: true,
 
             max_casings: MAX_SPENT_CASINGS,
             casing_lifetime_secs: CASING_LIFETIME_SECS,
@@ -351,6 +357,7 @@ pub(crate) fn refresh_client_settings(host: &dyn ClientHost) {
         weapon_sway_mul: pct(host, KEY_CAMERA_WEAPON_SWAY, 100.0, 0.0, 200.0),
 
         hud_position: HudPosition::from_index(host.setting_choice(KEY_HUD_AMMO_POS).unwrap_or(0)),
+        hud_show_reserve: host.setting_bool(KEY_HUD_SHOW_RESERVE).unwrap_or(true),
         hud_accent_color: host
             .setting_color(KEY_HUD_ACCENT_COLOR)
             .unwrap_or(AMMO_BAR_RGB)
@@ -358,6 +365,7 @@ pub(crate) fn refresh_client_settings(host: &dyn ClientHost) {
         ads_vignette_mul: pct(host, KEY_HUD_ADS_VIGNETTE, 100.0, 0.0, 150.0),
         hide_crosshair_ads: host.setting_bool(KEY_HUD_HIDE_CROSSHAIR).unwrap_or(true),
         hud_hitmarker: host.setting_bool(KEY_HUD_HITMARKER).unwrap_or(false),
+        hud_rich_tooltips: host.setting_bool(KEY_HUD_RICH_TOOLTIPS).unwrap_or(true),
 
         max_casings: host
             .setting_f64(KEY_WORLD_MAX_CASINGS)
@@ -544,7 +552,7 @@ pub(crate) fn setting_specs() -> Vec<SettingSpec> {
         range_pct(KEY_CAMERA_ADS_ZOOM, 0.0, 150.0, 5.0, 100.0),
         range_pct(KEY_CAMERA_RECOIL_KICK, 0.0, 200.0, 10.0, 100.0),
         range_pct(KEY_CAMERA_WEAPON_SWAY, 0.0, 200.0, 10.0, 100.0),
-        // 5. HUD & Visual Feedback
+        // 5. HUD, Tooltips & Visual Feedback
         choice_opt(
             KEY_HUD_AMMO_POS,
             &[
@@ -556,6 +564,7 @@ pub(crate) fn setting_specs() -> Vec<SettingSpec> {
             ],
             0,
         ),
+        toggle_opt(KEY_HUD_SHOW_RESERVE, true),
         SettingSpec::color(
             KEY_HUD_ACCENT_COLOR,
             label_key(KEY_HUD_ACCENT_COLOR),
@@ -565,6 +574,7 @@ pub(crate) fn setting_specs() -> Vec<SettingSpec> {
         range_pct(KEY_HUD_ADS_VIGNETTE, 0.0, 150.0, 10.0, 100.0),
         toggle_opt(KEY_HUD_HIDE_CROSSHAIR, true),
         toggle_opt(KEY_HUD_HITMARKER, false),
+        toggle_opt(KEY_HUD_RICH_TOOLTIPS, true),
         // 6. World Effects & Performance
         range_pct(
             KEY_WORLD_MAX_CASINGS,
@@ -613,7 +623,7 @@ mod tests {
     #[test]
     fn all_registered_setting_specs_validate_with_unique_keys() {
         let specs = setting_specs();
-        assert_eq!(specs.len(), 29);
+        assert_eq!(specs.len(), 31);
         let mut seen = BTreeSet::new();
         for spec in &specs {
             assert_eq!(spec.check(), Ok(()), "invalid spec: {}", spec.key);
@@ -742,12 +752,14 @@ mod tests {
 
     #[test]
     fn hud_position_layouts_stay_on_screen() {
-        for idx in 0..4 {
-            let pos = HudPosition::from_index(idx);
-            let [x, y] = pos.layout(427.0, 240.0, 52.0, 15.0).unwrap();
-            assert!(x >= 0.0 && x + 52.0 <= 427.0);
-            assert!(y >= 0.0 && y + 15.0 <= 240.0);
+        for width in [52.0_f32, 88.0_f32] {
+            for idx in 0..4 {
+                let pos = HudPosition::from_index(idx);
+                let [x, y] = pos.layout(427.0, 240.0, width, 15.0).unwrap();
+                assert!(x >= 0.0 && x + width <= 427.0);
+                assert!(y >= 0.0 && y + 15.0 <= 240.0);
+            }
+            assert_eq!(HudPosition::Hidden.layout(427.0, 240.0, width, 15.0), None);
         }
-        assert_eq!(HudPosition::Hidden.layout(427.0, 240.0, 52.0, 15.0), None);
     }
 }

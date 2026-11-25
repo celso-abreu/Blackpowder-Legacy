@@ -51,6 +51,12 @@ pub(crate) const INPUT_CHANNEL: &str = "just_a_rifle:rifle_input";
 pub(crate) const SYNC_CHANNEL: &str = "just_a_rifle:rifle_sync";
 pub(crate) const SKIN_CHANNEL: &str = "just_a_rifle:rifle_skin";
 pub(crate) const IMPACT_CHANNEL: &str = "just_a_rifle:bullet_impact";
+pub(crate) const TP_STATE_CHANNEL: &str = "just_a_rifle:rifle_tp_state";
+
+pub(crate) const POSE_HIP_READY_ID: &str = "just_a_rifle:hip_ready";
+pub(crate) const POSE_SPRINT_CARRY_ID: &str = "just_a_rifle:sprint_carry";
+pub(crate) const POSE_LEVER_CYCLE_ID: &str = "just_a_rifle:lever_cycle";
+pub(crate) const POSE_RELOAD_ID: &str = "just_a_rifle:reload";
 
 pub(crate) const SMOKE_PARTICLE: &str = "minecraft:smoke";
 pub(crate) const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
@@ -89,6 +95,7 @@ pub(crate) const TRIG_CANDLE_SNUFFER: &str = "just_a_rifle:candle_snuffer";
 pub(crate) const TRIG_DEADEYE: &str = "just_a_rifle:deadeye_bullseye";
 pub(crate) const TRIG_SHERIFF: &str = "just_a_rifle:sheriff";
 pub(crate) const TRIG_LONG_SHOT: &str = "just_a_rifle:long_shot";
+pub(crate) const TRIG_BETWEEN_THE_EYES: &str = "just_a_rifle:between_the_eyes";
 
 pub(crate) const ADV_BELL_MIN_DIST: f64 = 30.0;
 pub(crate) const ADV_DEADEYE_MIN_DIST: f64 = 50.0;
@@ -129,6 +136,12 @@ pub(crate) const SYNC_RELOAD_END_EMPTY: i32 = 6;
 pub(crate) const SYNC_RELOAD_ABORTED: i32 = 7;
 pub(crate) const SYNC_WET_MISFIRE: i32 = 8;
 pub(crate) const SYNC_HIT_CONFIRM: i32 = 9;
+pub(crate) const SYNC_HEADSHOT_CONFIRM: i32 = 10;
+
+pub(crate) const TP_STATE_IDLE: i32 = 0;
+pub(crate) const TP_STATE_RELOADING: i32 = 1;
+pub(crate) const TP_STATE_LEVER_CYCLE: i32 = 2;
+pub(crate) const TP_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters

@@ -16,9 +16,10 @@ use crate::constants::*;
 use crate::exploration::{grant_mod_criterion, record_bullet_shot};
 use crate::skin::{default_skin_for_uuid, parse_mojang_skin_property};
 use crate::{
-    is_point_in_water, RifleInput, RifleSkinSync, RifleSync, AIMING, AIM_LAST_TICK, BUBBLE_KEY,
-    BUBBLE_POP_KEY, CLIENT_RELOADING, CLIENT_SPRINTING, CLIENT_TICKS, FLAME_KEY, RIFLE_SKIN_SYNC,
-    RIFLE_SYNC, SERVER_TICKS, SMOKE_KEY, SPLASH_KEY, WHITE_SMOKE_KEY,
+    is_point_in_water, RifleInput, RifleSkinSync, RifleSync, RifleThirdPersonSync, AIMING,
+    AIM_LAST_TICK, BUBBLE_KEY, BUBBLE_POP_KEY, CLIENT_RELOADING, CLIENT_SPRINTING, CLIENT_TICKS,
+    FLAME_KEY, RIFLE_SKIN_SYNC, RIFLE_SYNC, RIFLE_TP_SYNC, SERVER_TICKS, SMOKE_KEY, SPLASH_KEY,
+    WHITE_SMOKE_KEY,
 };
 
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
@@ -74,6 +75,7 @@ fn cancel_reload_session(host: &mut dyn ServerHost, player: mod_api::PlayerRef) 
     if removed {
         let cur = held_rifle(host, player).map_or(0, |(_, r)| rounds(&r));
         send_sync(host, player, SYNC_RELOAD_ABORTED, cur);
+        broadcast_tp_state(host, player, TP_STATE_IDLE);
     }
     removed
 }
@@ -121,6 +123,67 @@ fn send_sync(host: &mut dyn ServerHost, player: mod_api::PlayerRef, kind: i32, r
             },
         );
     }
+}
+
+fn broadcast_tp_state(host: &mut dyn ServerHost, actor: mod_api::PlayerRef, state: i32) {
+    let Some(chan) = RIFLE_TP_SYNC.get() else {
+        return;
+    };
+    let actor_ent = actor.entity();
+    let Some(level) = actor_ent.level(host) else {
+        return;
+    };
+    let Some(actor_pos) = actor_ent.position(host) else {
+        return;
+    };
+    let Some(players) = level.online_players(host) else {
+        return;
+    };
+    let payload = RifleThirdPersonSync {
+        entity_id: VarInt(actor_ent.id() as i32),
+        state: VarInt(state),
+    };
+    for p in players {
+        if p == actor {
+            continue;
+        }
+        if let Some(ppos) = p.entity().position(host) {
+            let dx = ppos[0] - actor_pos[0];
+            let dy = ppos[1] - actor_pos[1];
+            let dz = ppos[2] - actor_pos[2];
+            if dx * dx + dy * dy + dz * dz <= TP_BROADCAST_RADIUS_SQ {
+                let _ = chan.send(host, p, &payload);
+            }
+        }
+    }
+}
+
+/// Returns the sub-tick `(ray_origin, ray_dir)` of the tracked in-flight `.44-40` bullet nearest
+/// to `hit_at`, enabling exact cranial ray-AABB intersection even on long curved trajectories.
+pub(crate) fn find_active_bullet_ray(
+    host: &dyn Host,
+    hit_at: [f64; 3],
+) -> Option<([f64; 3], [f64; 3])> {
+    let active = ACTIVE_BULLETS.lock().unwrap();
+    let mut best: Option<(f64, [f64; 3], [f64; 3])> = None;
+    for b in active.iter() {
+        let Some(vel) = b.entity.velocity(host) else {
+            continue;
+        };
+        let end = [
+            b.prev_pos[0] + vel[0],
+            b.prev_pos[1] + vel[1],
+            b.prev_pos[2] + vel[2],
+        ];
+        let dx = end[0] - hit_at[0];
+        let dy = end[1] - hit_at[1];
+        let dz = end[2] - hit_at[2];
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 <= 900.0 && best.is_none_or(|(best_d2, _, _)| d2 < best_d2) {
+            best = Some((d2, b.prev_pos, vel));
+        }
+    }
+    best.map(|(_, origin, dir)| (origin, dir))
 }
 
 fn sync_player_skin(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
@@ -947,6 +1010,9 @@ fn fire_rifle(
         muzzle_effects(host, f, smoke, aim_pct, muzzle_in_water);
     }
     send_sync(host, player, SYNC_SHOT, remaining);
+    if remaining > 0 {
+        broadcast_tp_state(host, player, TP_STATE_LEVER_CYCLE);
+    }
 }
 
 fn start_reload(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
@@ -994,6 +1060,7 @@ fn start_reload(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
         },
     );
     send_sync(host, player, SYNC_RELOAD_START, loaded);
+    broadcast_tp_state(host, player, TP_STATE_RELOADING);
 }
 
 pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
@@ -1017,12 +1084,14 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
         let Some((slot, rifle)) = valid_rifle else {
             RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
             send_sync(host, player, SYNC_RELOAD_ABORTED, 0);
+            broadcast_tp_state(host, player, TP_STATE_IDLE);
             continue;
         };
         let loaded = rounds(&rifle);
         if sprinting || submerged {
             RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
             send_sync(host, player, SYNC_RELOAD_ABORTED, loaded);
+            broadcast_tp_state(host, player, TP_STATE_IDLE);
             continue;
         }
 
@@ -1058,6 +1127,15 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                             },
                             loaded,
                         );
+                        broadcast_tp_state(
+                            host,
+                            player,
+                            if empty_chamber {
+                                TP_STATE_LEVER_CYCLE
+                            } else {
+                                TP_STATE_IDLE
+                            },
+                        );
                     } else {
                         let next_loaded = loaded + 1;
                         let mut rifle = rifle;
@@ -1065,6 +1143,7 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                         if player.set_inventory_slot(host, slot, Some(rifle)).is_err() {
                             remove_session = true;
                             send_sync(host, player, SYNC_RELOAD_ABORTED, loaded);
+                            broadcast_tp_state(host, player, TP_STATE_IDLE);
                         } else {
                             session.inserted_any = true;
                             send_sync(host, player, SYNC_SHELL_INSERTED, next_loaded);
@@ -1090,6 +1169,9 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                         .lock()
                         .unwrap()
                         .insert(uuid, now + if empty_chamber { 2 } else { 1 });
+                    if !empty_chamber {
+                        broadcast_tp_state(host, player, TP_STATE_IDLE);
+                    }
                 }
             }
         }

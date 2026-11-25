@@ -271,6 +271,7 @@ struct RecentEntityHit {
     victim_entity_id: u32,
     shooter_uuid: u128,
     distance_blocks: f64,
+    was_headshot: bool,
     tick: u64,
 }
 
@@ -321,13 +322,7 @@ pub(crate) fn resolve_shooter_and_distance(
         .into_iter()
         .find(|p| p.entity().id() == owner_entity_id)?;
 
-    let recorded_origin = RECENT_SHOTS
-        .lock()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|s| s.shooter_entity_id == owner_entity_id)
-        .map(|s| s.origin);
+    let recorded_origin = resolve_shot_origin_for_owner(owner_entity_id);
 
     let origin = recorded_origin
         .or_else(|| shooter.entity().eye_position(host))
@@ -336,10 +331,30 @@ pub(crate) fn resolve_shooter_and_distance(
     Some((shooter, distance_3d(origin, impact_at)))
 }
 
+pub(crate) fn resolve_shot_origin_for_owner(owner_entity_id: u32) -> Option<[f64; 3]> {
+    RECENT_SHOTS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.shooter_entity_id == owner_entity_id)
+        .map(|s| s.origin)
+}
+
+pub(crate) fn is_tracked_rifle_bullet(bullet_entity_id: u32, now: u64) -> bool {
+    RECENT_SHOTS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .any(|s| s.bullet_entity_id == bullet_entity_id && now.saturating_sub(s.tick) <= 200)
+}
+
 pub(crate) fn record_bullet_entity_hit(
     victim_entity_id: u32,
     shooter_uuid: u128,
     distance_blocks: f64,
+    was_headshot: bool,
     tick: u64,
 ) {
     let mut hits = RECENT_ENTITY_HITS.lock().unwrap();
@@ -351,6 +366,7 @@ pub(crate) fn record_bullet_entity_hit(
         victim_entity_id,
         shooter_uuid,
         distance_blocks,
+        was_headshot,
         tick,
     });
 }
@@ -414,7 +430,7 @@ pub(crate) fn handle_living_death_advancements(
 ) {
     // Match either by direct bullet entity ID (`source.direct`) or by the impact recorded in
     // the same tick on `event.entity`.
-    let matched: Option<(u128, f64)> = {
+    let matched: Option<(u128, f64, bool)> = {
         let direct_id = if event.source.direct > 0 {
             Some(event.source.direct as u32)
         } else {
@@ -426,7 +442,7 @@ pub(crate) fn handle_living_death_advancements(
             .iter()
             .rev()
             .find(|h| h.victim_entity_id == event.entity && now.saturating_sub(h.tick) <= 3)
-            .map(|h| (h.shooter_uuid, h.distance_blocks));
+            .map(|h| (h.shooter_uuid, h.distance_blocks, h.was_headshot));
 
         if from_hit.is_some() {
             from_hit
@@ -440,15 +456,18 @@ pub(crate) fn handle_living_death_advancements(
                 .copied();
             shot.and_then(|s| {
                 let shooter = host.player(s.shooter_uuid)?;
-                let victim_pos = event.source.position.or_else(|| shooter.entity().position(host))?;
-                Some((s.shooter_uuid, distance_3d(s.origin, victim_pos)))
+                let victim_pos = event
+                    .source
+                    .position
+                    .or_else(|| shooter.entity().position(host))?;
+                Some((s.shooter_uuid, distance_3d(s.origin, victim_pos), false))
             })
         } else {
             None
         }
     };
 
-    let Some((shooter_uuid, shot_dist)) = matched else {
+    let Some((shooter_uuid, shot_dist, was_headshot)) = matched else {
         return;
     };
     let Some(shooter) = host.player(shooter_uuid) else {
@@ -458,8 +477,13 @@ pub(crate) fn handle_living_death_advancements(
     if is_illager_kind(event.kind) {
         grant_mod_criterion(host, shooter, TRIG_SHERIFF);
     }
-    if is_hostile_monster_kind(event.kind) && shot_dist >= ADV_LONG_SHOT_MIN_DIST {
-        grant_mod_criterion(host, shooter, TRIG_LONG_SHOT);
+    if is_hostile_monster_kind(event.kind) {
+        if was_headshot {
+            grant_mod_criterion(host, shooter, TRIG_BETWEEN_THE_EYES);
+        }
+        if shot_dist >= ADV_LONG_SHOT_MIN_DIST {
+            grant_mod_criterion(host, shooter, TRIG_LONG_SHOT);
+        }
     }
 }
 

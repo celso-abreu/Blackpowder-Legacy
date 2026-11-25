@@ -2,17 +2,17 @@
 
 Just one finely crafted lever-action rifle for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3 in Rust) — no bloated gunpack, packaged as a single lightweight WebAssembly `.hmod`.
 
-**v0.9.0 — multi-part animated Winchester 1873 (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`), terrain bullet-hole decals, 3D bouncing `.44-40` brass shell casings, real player skin (`slim` / `wide` + 3D sleeves), clean ADS iron sights (HUD crosshair hidden), per-round side-gate reload, weapon inspect (`I`), diagonal 3rd-person back-sling (`F`), `32×32` `.44-40` art, and CC0 custom `.ogg` firearm sounds.**
+**v0.10.0 — articulated multi-part Winchester 1873 (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`, + 3D LOD meshes), `.44-40` terminal ballistics (`14` base / `21` `1.5×` sub-tick ray-AABB headshots + smooth `> 40 m` falloff), dynamic two-handed 3rd-person arm poses (`F5` & multiplayer), HUD `.44-40` reserve counter with mini cartridge icon, smart localized tooltips (`en_us` / `pt_br`) with live remapped keybinds, reactive world targets, submerged water physics, 13 advancements + structure chest loot, 31-option Mod Config, and CC0 custom `.ogg` firearm audio.**
 
 ## How it plays
 
-- Craft the **Winchester 1873** (iron ingots, oak planks, a stick, and a tripwire hook) and **.44-40 Cartridges** (gunpowder + copper ingot + iron nugget, 6 at a time).
-- The tubular magazine holds **8 rounds**; a brass bar under the item icon and a dedicated bottom-right HUD counter track loaded vs. reserve `.44-40` rounds.
-- **Hold right click** to shoulder and aim down sights: the vanilla HUD crosshair (`minecraft:crosshair`) disappears automatically, the cocked hammer clears the sight line, and the rear notch + front blade (`alca_entalhe_base` + `massa_lamina`) slide dead-center onto the screen via FPS-independent second-order dynamics while FOV zooms (`0.67`), mouse turn sensitivity scales proportionally, and a subtle vignette frames the view. Aiming is suppressed while sprinting or reloading.
-- **Left click** (aimed or hipfire while holding the rifle in the main hand) fires one `.44-40` round (`15.0` b/t velocity, `0.06` spread in ADS / `0.04` crouched vs. `1.50` hipfire / `2.20` moving). Each live shot drives **articulated sub-model animations** (trigger pull, hammer strike, `+48°` lever throw, and hammer re-cocking), **2-layer recoil** (camera pitch climb + `57%` smooth recovery + micro-jolt, plus rear-stock-pivoted 2nd-order gun kick), barrel-tip muzzle smoke/flame particles, **3D spent `.44-40` brass shell casings** that pop out of the top receiver port (`trava_dorsal`), tumble, bounce off terrain/slabs/stairs with a metallic clink, and rest on the ground, **world-lit pixel-art bullet-hole decals** on terrain blocks (auto-cleared when the block is broken), and layered CC0 gunshot + mechanical lever audio (`120 RPM`). Dry-firing on an empty chamber drops the hammer and keeps it uncocked until reloaded.
-- **R** (remappable in **Options > Controls**) starts a **continuous per-cartridge reload loop** on a single press: tilts the receiver to expose `porta_B`, depresses the side loading gate (`-23°`) as each 3D `.44-40` brass/copper cartridge slides in with the left hand, and runs a full lever rack (`ReloadEndEmpty`) when reloading from `0/8` to chamber the first round and re-cock the hammer. Clicking fire mid-reload immediately interrupts the reload when `>= 1` round is already in the tube.
-- **I** (remappable in **Options > Controls**) plays a 3.4-second **weapon inspection** sequence showing both sides of the receiver, walnut stock, and brass carrier when idle in hipfire.
-- **F** (swap to off-hand) **slings the rifle diagonally across the player's back** in 3rd-person (`44°` barrel-up / stock-down, locked to the `Body` torso pose through walking, sneaking, and armor), relaxes the off-hand arm (`ArmPose::Empty`), and prevents accidental off-hand ADS right-clicks.
+- Craft the **Winchester 1873** (iron ingots, oak planks, a stick, and a tripwire hook) and **.44-40 Cartridges** (gunpowder + copper ingot + iron nugget, 6 at a time) — or discover a forgotten unloaded rifle and `.44-40` stashes inside **Abandoned Mineshafts, Pillager Outposts, Woodland Mansions, Dungeons, and Desert Pyramids**.
+- The tubular magazine holds **8 rounds**; a brass bar under the item icon, smart item tooltips (showing loaded rounds, live reserve, ballistics, and your current keybinds while hiding raw `F3+H` durability), and a configurable western HUD counter (`8 / 8 │ 36`, or `∞` in Creative) track loaded vs. reserve `.44-40` rounds.
+- **Hold right click** (or toggle via **Options > Mods > Just a Rifle > Config**) to shoulder and aim down sights: the vanilla HUD crosshair (`minecraft:crosshair`) disappears automatically, the cocked hammer clears the sight line, and the rear notch + front blade (`alca_entalhe_base` + `massa_lamina`) slide dead-center onto the screen via FPS-independent second-order dynamics while FOV zooms (`0.67`), mouse turn sensitivity scales proportionally, and a subtle vignette frames the view.
+- **Left click** fires one `.44-40` round (`15.0` b/t = `300 m/s`, `14.0` base damage, **`1.5×` = `21.0` damage on sub-tick 3D ray-AABB headshots** with cranial crit sparks & crimson-gold hitmarker, and smooth Hermite distance falloff beyond `40 m`). Each live shot drives **articulated sub-model animations**, **2-layer recoil**, barrel-tip muzzle smoke/flame (or underwater cavitation bubbles & surface splashes; submerged receivers click wetly without wasting rounds), **3D spent `.44-40` brass shell casings**, **world-lit bullet-hole decals**, and **reactive world targets** (ringing Bells from afar, chiming `15`-power Target bullseyes, snuffing lit Candles without breaking them, and shattering glass panes, pots, and dripstone).
+- **R** (remappable in **Options > Controls**) runs a **continuous per-cartridge reload loop** through the King's side loading gate (`porta_B`), finishing with a full lever rack when reloading from `0 / 8`. Firing mid-reload immediately interrupts the reload when `>= 1` round is already chambered.
+- **I** (remappable in **Options > Controls**) plays a 3.4-second **weapon inspection** sequence showing both sides of the receiver, walnut stock, and brass carrier.
+- **F** (swap to off-hand) **slings the rifle diagonally across the player's back** in 3rd-person (`44°` barrel-up / stock-down, adapting depth automatically over chest armor), while main-hand 3rd-person (`F5` & multiplayer) transitions dynamically across **5 two-handed postures**: low-ready carry, sprinting port-arms, iron-sight ADS (`CrossbowHold`), post-shot lever throw, and side-gate shell thumbing.
 
 ## Build and test
 
@@ -22,7 +22,7 @@ You need Rust 1.95+, the Horizon launcher, and `cargo-horizon-mod`:
 cargo install --locked --git https://github.com/horizon-rust/horizon --rev f1bb66f353cf67f2aa4665293fc75c8d91186fc7 cargo-horizon-mod
 cargo horizon-mod build --wasm          # fetches the pinned SDK into .horizon/, writes mod.wasm, packs target/horizon-mod/just_a_rifle.hmod
 cargo horizon-mod check target/horizon-mod/just_a_rifle.hmod
-cargo test --lib                        # runs pure-Rust skin, kinematics & VFX unit tests
+cargo test --lib                        # runs pure-Rust ballistics, skin, settings, exploration & VFX unit tests
 cargo horizon-mod run                   # builds and starts the game with the mod on
 ```
 
@@ -34,7 +34,7 @@ The Horizon build this mod targets is pinned in `Cargo.toml` (`[package.metadata
 
 This is a **wasm** mod: install the packaged `.hmod`, no build needed.
 
-1. Download `just_a_rifle.hmod` from the [latest release](https://github.com/celso-abreu/Blackpowder-Legacy/releases/latest).
+1. Download `just_a_rifle.hmod` from the [latest release](https://github.com/celso-abreu/Just_a_Rifle/releases/latest).
 2. Drop it into the instance's **`horizon-mods/`** folder (from the launcher: open the instance and use **Open the instance folder**; create `horizon-mods` if missing).
 3. Play — wasm mods need no native-code consent.
 
@@ -42,59 +42,50 @@ Note: the launcher's *Add a native mod from GitHub* dialog is for **native** mod
 
 ## CI
 
-Every push verifies manifests & assets (`python3 tools/verify_assets.py`), builds and checks the mod (`cargo horizon-mod build --wasm` + `cargo horizon-mod check`), and runs the crate's unit test suite (`cargo test --lib`) on GitHub Actions (`.github/workflows/build-mod.yml`), reusing cached tool, SDK, toolchain, and Cargo layers between runs. The checked `just_a_rifle.hmod` is downloadable from the run's artifacts.
-
-Both `build-mod.yml` and `release.yml` run build/check/test steps under `set -o pipefail`, so a failed compile, registry check, or unit test never passes silently through `tee`.
+Every push verifies manifests, `icon.png`, LOD meshes, advancements, settings, and assets (`python3 tools/verify_assets.py`), builds and checks the mod (`cargo horizon-mod build --wasm` + `cargo horizon-mod check`), and runs the crate's unit test suite (`cargo test --lib`) on GitHub Actions (`.github/workflows/build-mod.yml`), reusing cached tool, SDK, toolchain, and Cargo layers between runs. The checked `just_a_rifle.hmod` is downloadable from the run's artifacts.
 
 ## Layout
 
 ```text
-horizon-mod.toml            # manifest: id = "just_a_rifle", version 0.9.0, api 0.2, capabilities
+horizon-mod.toml            # manifest: id = "just_a_rifle", version 0.10.0, homepage/issues/credits
+icon.png                    # 256x256 western brass package icon rendered from the 3D rifle & .44-40 art
 Cargo.toml                  # wasm code crate + pinned Horizon SDK (f1bb66f)
-CHANGELOG.md                # version history (v0.5.0 -> v0.9.0)
-NEXT.md                     # concise single-rifle polish roadmap
-SOUND-CREDITS.md            # CC0 / Public Domain attribution for all 9 .ogg audio files
+CHANGELOG.md                # version history (v0.5.0 -> v0.10.0)
+NEXT.md                     # v1.0.0 milestone roadmap (gunsmithing & brass reloading loop)
+SOUND-CREDITS.md            # CC0 / Public Domain attribution for all 11 .ogg audio files
 src/
-  lib.rs                    # entry point, shared payloads/atomics & Hooks implementation
+  lib.rs                    # entry point, payloads, HUD/tooltips, 3rd-person arm poses & Hooks
   constants.rs              # IDs, ballistics & exact Blockbench [0..16] texel pivots
+  ballistics.rs             # sub-tick 3D ray-AABB headshot geometry & smooth >40m falloff math
+  settings.rs               # Options > Mods > Config 31-setting registry & per-channel audio mixer
   skin.rs                   # Mojang Base64 + UTF-16LE SHA-1 decoder & 18-skin fallback
   arms.rs                   # 1st-person slim (3x12x4) / wide (4x12x4) arm & sleeve meshes
   pose.rs                   # 2nd-order springs, TAC state machine, hands & sight kinematics
-  world_fx.rs               # terrain bullet-hole decals & 3D bouncing .44-40 brass casings
-  server.rs                 # authoritative firing, spread, muzzle VFX & reload loop
+  world_fx.rs               # reactive targets, material audio, bullet decals & 3D brass casings
+  exploration.rs            # structure chest loot injection & 13 advancement triggers
+  server.rs                 # authoritative firing, water physics, spread, muzzle VFX & reload loop
 data/just_a_rifle/
+  advancement/              # 13 western/marksman advancements + recipe unlocks
   horizon/item/             # winchester_1873, cartridge_44, bullet (item declarations)
-  horizon/entity_type/      # bullet: thrown projectile (snowball template, 12 damage)
+  horizon/entity_type/      # bullet: thrown projectile (snowball template, 14.0 base damage)
   horizon/creative_tab/     # the mod's creative tab ("Just a Rifle")
   recipe/                   # rifle + cartridge recipes
 assets/just_a_rifle/
-  items/                    # 26.3 item definitions (selects empty model in player off-hand)
-  models/item/              # full 336-element item model (GUI, ground, 3rd-person)
-  models/special/           # 8 standalone sub-models: body, lever, hammer, trigger,
+  items/                    # 26.3 item definitions (routes GUI/ground/3rd-person to fast 3D LOD)
+  models/item/              # full 336-element first-person mesh + 40-element 3D LOD item mesh
+  models/special/           # 9 standalone sub-models: body, body_lod, lever, hammer, trigger,
                             #   gate, cartridge, spent casing, and terrain bullet-hole decal
   textures/item/            # 32x32 cartridge & bullet, 16x16 cutout bullet hole + 1024x1024 rifle sheet
-  sounds/ + sounds.json     # 9 CC0 custom .ogg firearm & Foley sound events + subtitles
-  lang/                     # en_us, pt_br (items, keybinds, full audio subtitles)
+  sounds/ + sounds.json     # 11 CC0 custom .ogg firearm & foley sound events + subtitles
+  lang/                     # en_us, pt_br (127 keys: items, tooltips, 31 settings, 13 advancements)
 models/winchester_1873.bbmodel  # Blockbench source of the rifle's 3D model
 tools/
-  verify_assets.py          # fast manifest, JSON, lang, audio & cutout-alpha verifier
-  make_textures.py          # deterministic pure-Python generator for item & decal PNGs
-  bbmodel_convert.py        # converts the .bbmodel into item/winchester_1873.json,
-                            #   models/special/winchester_*.json, and rifle_texture.png
-  decompile/                # local study scripts for reference mods, not packaged
+  verify_assets.py          # zero-dependency manifest, icon.png, JSON, lang, LOD & cutout verifier
+  make_textures.py          # deterministic pure-Python generator for item, decal & icon.png art
+  build_lod_models.py       # builds 40-element 3D LOD meshes & culls hidden internal faces
+  bbmodel_convert.py        # converts the .bbmodel into item/special JSONs and rifle_texture.png
 ```
 
-`tools/decompile/` holds local helper scripts used to study reference mods' mechanics — see [DECOMPILAR.md](tools/decompile/DECOMPILAR.md). Nothing under `models/` or `tools/` is packaged into the `.hmod`.
+## Roadmap to `v1.0.0`
 
-## Design notes
-
-- **Articulated multi-part rig (`models/special/`):** `Hooks::standalone_models` registers standalone sub-models (`body`, `lever`, `hammer`, `trigger`, `gate`, `cartridge`, `casing`, `bullet_hole`) baked into `ModelRef` handles in `model_baking_completed`. In 1st person (`render_hand`) and when slung on the back (`render_player_post`), `draw_rifle_assembly` renders each mechanical sub-group around its exact Blockbench pivot (`LEVER_PIVOT_TEX`, `HAMMER_PIVOT_TEX`, `TRIGGER_PIVOT_TEX`, `GATE_PIVOT_TEX`) while keeping the monolithic `models/item/winchester_1873.json` for GUI, ground drops, and 3rd-person main-hand holds.
-- **Real player skin & slim/wide arms:** `ServerHost::profile_by_uuid` decodes Mojang's Base64 `textures` property into Horizon's `"skins/" + sha1_utf16le(url_hash)` sprite key + `slim` (`3×12×4`) / `wide` (`4×12×4`) arm geometry (synced via `RifleSkinSync`), with deterministic frame-0 fallback to Horizon's 18 modern default skins (`default_skin_for_uuid`) and 3D outer sleeve layers (`CubeDeformation(0.25)`).
-- **Controls, HUD & Networking:** aiming uses `use_duration` on main-hand right click (`ItemPart::use_item` rejects off-hand ADS), `Hooks::gui_layer_pre` hides `minecraft:crosshair` while aiming, and `render_frame_pre` steps FPS-independent second-order springs driving FOV (`compute_fov`), mouse turn scaling (`calculate_player_turn`), vignette + ammo HUD (`gui_render_post`), and smooth camera recoil (`set_local_rotation`). Firing, reloading, and inspecting communicate over typed channels (`RifleInput`, `RifleSync`, `RifleSkinSync`) with `should_cause_reequip_animation` suppressing equip dips on magazine updates.
-- **3rd-person diagonal back-sling:** `assets/just_a_rifle/items/winchester_1873.json` uses a `minecraft:select` `display_context` switch to suppress vanilla's held off-hand model on players while `Hooks::get_arm_pose` relaxes the off-hand arm and `Hooks::render_player_post` mounts the rifle at `44°` across the player's `HumanoidPart::Body` matrix (adapting depth automatically when chest armor/elytra is worn and mirroring cleanly for left-handed players).
-- **Custom CC0 audio:** 9 `.ogg` sound assets (`winchester_fire`, `winchester_thump`, `winchester_lever`, `winchester_cock`, `winchester_reload_intro`, `winchester_reload_insert`, `winchester_reload_end`, `winchester_draw`, `winchester_inspect`) with localized `pt_br` and `en_us` accessibility subtitles (see [SOUND-CREDITS.md](SOUND-CREDITS.md)).
-- **Terrain bullet decals & 3D spent brass casings:** `Hooks::hears_projectile_impacts` + `Hooks::projectile_impact` detect `.44-40` terrain hits (`event.entity.is_none()`), spawn impact dust/smoke + stone crack audio, and broadcast `BulletImpactSync` (compact `0.1 mm` block-relative `VarInt` offsets) to nearby players. On the client, `Hooks::submit_custom_geometry` renders up to `96` world-lit cutout `special/bullet_hole` decals (sampling `LightLayer::Block` / `LightLayer::Sky` and pruning immediately when `host.block_collision(block)` empties) and up to `48` tumbling/bouncing `special/winchester_casing` `.44-40` shells (colliding against full blocks, slabs, stairs, and carpets via `host.block_collision`, clinking via `item.winchester_shell_drop`, and settling flat on the surface) in just two GPU-instanced batches (`WorldDrawContext::draw_model_instances`).
-
-## Future polish
-
-- Dynamic 3rd-person hip/ADS arm poses, structure chest loot tables, advancements, and optional client settings.
+See [NEXT.md](NEXT.md) — realistic gunsmithing crafting (` Barrel` + `Receiver & Lever` + `Walnut Stock`) and optional spent `.44-40` brass casing recovery & reloading economy.
