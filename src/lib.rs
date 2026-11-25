@@ -37,16 +37,16 @@ use mod_api::{
     StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
 };
 
-use crate::arms::PlayerArms;
+use crate::arms::{invalidate_skin_sprite_cache, PlayerArms};
 use crate::constants::*;
 use crate::exploration::{
     flush_pending_exploration_advancements, handle_living_death_advancements,
     on_container_loot_filled, record_bullet_entity_hit, resolve_shooter_and_distance,
 };
 use crate::pose::{
-    build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_gun_space_arm,
-    draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status, recoil_envelope,
-    tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
+    build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_back_sling_assembly,
+    draw_gun_space_arm, draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status,
+    recoil_envelope, tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
 };
 use crate::server::{
     on_rifle_input, rounds, tick_active_bullets, tick_reload_sessions, Winchester,
@@ -134,6 +134,10 @@ static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
 static HITMARKER_TIMER_BITS: AtomicU32 = AtomicU32::new(0);
+/// Packed 20 Hz cache of `local_offhand_rifle_status`: `0` = not slung, else
+/// `1 | ((chest_armored as u32) << 1) | (loaded_rounds << 2)` so `render_player_post` never
+/// queries entities/inventories across WASM on every `F5` or Inventory paperdoll frame.
+static LOCAL_OFFHAND_PACKED: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_WORLD_FOV_BITS: AtomicU32 = AtomicU32::new(0x428C_0000); // 70.0_f32.to_bits()
 pub(crate) static LAST_MUZZLE_VIEW_X: AtomicU32 = AtomicU32::new(0x3F07_1A9F); // 0.52775_f32
 pub(crate) static LAST_MUZZLE_VIEW_Y: AtomicU32 = AtomicU32::new(0xBEAA_0000); // -0.33203_f32
@@ -217,8 +221,13 @@ pub(crate) fn holding_rifle_recently() -> bool {
 
 fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
     let assets = host.render_assets();
+    let body = assets.model(&Identifier::parse(MODEL_BODY_ID).ok()?).ok()?;
+    let body_lod = assets
+        .model(&Identifier::parse(MODEL_BODY_LOD_ID).ok()?)
+        .unwrap_or(body);
     Some(RifleModels {
-        body: assets.model(&Identifier::parse(MODEL_BODY_ID).ok()?).ok()?,
+        body,
+        body_lod,
         lever: assets
             .model(&Identifier::parse(MODEL_LEVER_ID).ok()?)
             .ok()?,
@@ -359,6 +368,7 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
 }
 
 fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Result<(), String> {
+    invalidate_skin_sprite_cache();
     let mut anim = client_anim().lock().unwrap();
     anim.skin = ResolvedSkin {
         primary: value.sprite,
@@ -380,6 +390,7 @@ impl Hooks for Mod {
     fn standalone_models(&self, _: &RegistrationContext, event: &mut StandaloneModelsEvent<'_>) {
         for id in [
             MODEL_BODY_ID,
+            MODEL_BODY_LOD_ID,
             MODEL_LEVER_ID,
             MODEL_HAMMER_ID,
             MODEL_TRIGGER_ID,
@@ -570,6 +581,7 @@ impl Hooks for Mod {
         host: &mut dyn ClientHost,
         _: &mut ClientResourcesReloadedEvent,
     ) {
+        invalidate_skin_sprite_cache();
         refresh_rifle_models(host);
     }
 
@@ -647,6 +659,7 @@ impl Hooks for Mod {
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             CLIENT_RELOADING.store(false, Ordering::Relaxed);
+            LOCAL_OFFHAND_PACKED.store(0, Ordering::Relaxed);
             SLUNG_RIFLES.lock().unwrap().clear();
             let mut anim = client_anim().lock().unwrap();
             anim.was_holding = false;
@@ -657,7 +670,17 @@ impl Hooks for Mod {
         }
 
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
-        let is_slung = local_offhand_rifle_status(host).is_some();
+        let offhand_status = local_offhand_rifle_status(host);
+        let is_slung = offhand_status.is_some();
+        LOCAL_OFFHAND_PACKED.store(
+            match offhand_status {
+                Some((off_rounds, chest_armored)) => {
+                    1 | ((chest_armored as u32) << 1) | (off_rounds.min(0x3F_FFFF) << 2)
+                }
+                None => 0,
+            },
+            Ordering::Relaxed,
+        );
 
         // Read horizontal velocity from camera entity (`Side: both`).
         let mut horiz_speed = 0.0_f32;
@@ -1151,7 +1174,7 @@ impl Hooks for Mod {
         None
     }
 
-    fn render_player_post(&self, host: &dyn ClientHost, event: &mut RenderPlayerPostEvent<'_>) {
+    fn render_player_post(&self, _: &dyn ClientHost, event: &mut RenderPlayerPostEvent<'_>) {
         if event.player.death_time > 0 {
             return;
         }
@@ -1175,26 +1198,28 @@ impl Hooks for Mod {
             .filter(|s| now.saturating_sub(s.last_tick) <= 4);
 
         let (hammer_uncocked, main_arm_left, back_z_tex) = if event.who.local {
+            let packed = LOCAL_OFFHAND_PACKED.load(Ordering::Relaxed);
+            if packed == 0 {
+                return;
+            }
             let sling_style = client_settings().back_sling_style;
             if sling_style == BackSlingStyle::Hidden {
                 return;
             }
-            if let Some((off_rounds, chest_armored)) = local_offhand_rifle_status(host) {
-                let raw_left = cached.is_some_and(|s| s.main_arm_left);
-                let left = if sling_style == BackSlingStyle::FlipShoulder {
-                    !raw_left
-                } else {
-                    raw_left
-                };
-                let z_tex = if chest_armored {
-                    BACK_SLING_ARMOR_Z_TEX
-                } else {
-                    BACK_SLING_JACKET_Z_TEX
-                };
-                (off_rounds == 0, left, z_tex)
+            let chest_armored = (packed & 0b10) != 0;
+            let off_rounds = packed >> 2;
+            let raw_left = cached.is_some_and(|s| s.main_arm_left);
+            let left = if sling_style == BackSlingStyle::FlipShoulder {
+                !raw_left
             } else {
-                return;
-            }
+                raw_left
+            };
+            let z_tex = if chest_armored {
+                BACK_SLING_ARMOR_Z_TEX
+            } else {
+                BACK_SLING_JACKET_Z_TEX
+            };
+            (off_rounds == 0, left, z_tex)
         } else if let Some(state) = cached {
             (
                 state.hammer_uncocked,
@@ -1251,7 +1276,7 @@ impl Hooks for Mod {
         ]);
 
         let hammer_deg = if hammer_uncocked { -34.0 } else { 0.0 };
-        let _ = draw_rifle_assembly(draw, models, 0.0, hammer_deg, 0.0, 0.0);
+        let _ = draw_back_sling_assembly(draw, models, hammer_deg);
         draw.pop();
     }
 

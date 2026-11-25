@@ -174,9 +174,30 @@ def main() -> None:
         f"bullet_hole.png must have binary alpha {{0, 255}} for cutout instancing, got {sorted(alphas)}"
     )
 
+    # Guard against GUI 3D BSP polygon explosion: `items/winchester_1873.json` must route `gui`
+    # to `item/winchester_1873_lod`, and both 3D LOD meshes must stay compact (< 60 elements).
+    item_def = json.loads(
+        (ROOT / "assets" / MOD_ID / "items" / "winchester_1873.json").read_text()
+    )
+    top_model = item_def["model"]
+    assert (
+        top_model.get("property") == "minecraft:display_context"
+        and any(
+            "gui" in c.get("when", [])
+            and c.get("model", {}).get("model") == f"{MOD_ID}:item/winchester_1873_lod"
+            for c in top_model.get("cases", [])
+        )
+    ), "items/winchester_1873.json must route GUI display_context to winchester_1873_lod"
+
+    for rel_lod in ("item/winchester_1873_lod.json", "special/winchester_body_lod.json"):
+        lod_json = json.loads((ROOT / "assets" / MOD_ID / "models" / rel_lod).read_text())
+        assert 20 <= len(lod_json["elements"]) <= 60, (
+            f"{rel_lod}: expected 20..=60 elements to avoid GUI BSP splitting, got {len(lod_json['elements'])}"
+        )
+
     print(
         f"OK: {MOD_ID} v{cargo_ver.group(1)} (sdk {sdk_sha[:7]}), "
-        f"{len(json_files)} JSONs, {len(en)} lang keys, {len(sounds)} sound events, cutout decal verified."
+        f"{len(json_files)} JSONs, {len(en)} lang keys, {len(sounds)} sound events, 3D LOD & cutout decal verified."
     )
 
 

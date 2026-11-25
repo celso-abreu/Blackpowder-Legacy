@@ -10,6 +10,7 @@ pub(crate) const CARTRIDGE: &str = "just_a_rifle:cartridge_44";
 pub(crate) const BULLET: &str = "just_a_rifle:bullet";
 
 pub(crate) const MODEL_BODY_ID: &str = "just_a_rifle:special/winchester_body";
+pub(crate) const MODEL_BODY_LOD_ID: &str = "just_a_rifle:special/winchester_body_lod";
 pub(crate) const MODEL_LEVER_ID: &str = "just_a_rifle:special/winchester_lever";
 pub(crate) const MODEL_HAMMER_ID: &str = "just_a_rifle:special/winchester_hammer";
 pub(crate) const MODEL_TRIGGER_ID: &str = "just_a_rifle:special/winchester_trigger";
