@@ -1,0 +1,54 @@
+{
+  "parent": "minecraft:recipes/root",
+  "criteria": {
+    "has_gunpowder": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:gunpowder"
+          }
+        ]
+      }
+    },
+    "has_copper": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "minecraft:copper_ingot"
+          }
+        ]
+      }
+    },
+    "has_cartridge": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "just_a_rifle:cartridge_44"
+          }
+        ]
+      }
+    },
+    "has_the_recipe": {
+      "trigger": "minecraft:recipe_unlocked",
+      "conditions": {
+        "recipe": "just_a_rifle:cartridge_44"
+      }
+    }
+  },
+  "requirements": [
+    [
+      "has_the_recipe",
+      "has_gunpowder",
+      "has_copper",
+      "has_cartridge"
+    ]
+  ],
+  "rewards": {
+    "recipes": [
+      "just_a_rifle:cartridge_44"
+    ]
+  }
+}

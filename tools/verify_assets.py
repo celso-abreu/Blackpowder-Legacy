@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MOD_ID = "just_a_rifle"
 
 
-def parse_rgba8_png_alphas(path: Path) -> set[int]:
+def parse_rgba8_png_info(path: Path) -> tuple[int, int, set[int]]:
     raw = path.read_bytes()
     assert raw[:8] == b"\x89PNG\r\n\x1a\n", f"{path}: invalid PNG header"
     pos = 8
@@ -61,7 +61,7 @@ def parse_rgba8_png_alphas(path: Path) -> set[int]:
         for x in range(width):
             alphas.add(row[x * 4 + 3])
         prev = row
-    return alphas
+    return width, height, alphas
 
 
 def main() -> None:
@@ -77,6 +77,10 @@ def main() -> None:
         "Cargo.toml and horizon-mod.toml version mismatch"
     )
     assert hmod_id and hmod_id.group(1) == MOD_ID, f"Expected id = {MOD_ID}"
+    for req_field in ("homepage", "issues", "credits"):
+        assert re.search(rf'^{req_field}\s*=\s*"[^"]+"', hmod_txt, re.M), (
+            f"horizon-mod.toml missing {req_field}"
+        )
     assert sdk_pin, "Missing 40-hex [package.metadata.horizon] sdk pin in Cargo.toml"
     sdk_sha = sdk_pin.group(1)
 
@@ -117,16 +121,99 @@ def main() -> None:
     )
     assert tab["title"] in en, f"Missing creative tab translation {tab['title']}"
 
-    alphas = parse_rgba8_png_alphas(
+    settings_rs = (ROOT / "src" / "settings.rs").read_text()
+    key_consts = dict(
+        re.findall(r'const\s+(KEY_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"', settings_rs)
+    )
+    assert len(key_consts) >= 25, f"Expected >=25 setting keys in settings.rs, got {len(key_consts)}"
+    for cname, key_val in key_consts.items():
+        lbl = f"config.{MOD_ID}.{key_val}"
+        tip = f"config.{MOD_ID}.{key_val}.tooltip"
+        assert lbl in en, f"{cname}: missing translation {lbl}"
+        assert tip in en, f"{cname}: missing tooltip translation {tip}"
+
+    for cname, opts_blob in re.findall(
+        r"choice_opt\(\s*(KEY_[A-Z0-9_]+)\s*,\s*&\[([^\]]+)\]", settings_rs, re.S
+    ):
+        key_val = key_consts[cname]
+        for suffix in re.findall(r'"([^"]+)"', opts_blob):
+            opt_key = f"config.{MOD_ID}.{key_val}.{suffix}"
+            assert opt_key in en, f"{cname}: missing choice option translation {opt_key}"
+
+    adv_dir = ROOT / "data" / MOD_ID / "advancement"
+    adv_files = sorted(adv_dir.rglob("*.json"))
+    assert len(adv_files) >= 10, f"Expected >=10 advancement JSONs, found {len(adv_files)}"
+    adv_ids = {
+        f"{MOD_ID}:{af.relative_to(adv_dir).with_suffix('').as_posix()}" for af in adv_files
+    }
+    used_triggers: set[str] = set()
+    for af in adv_files:
+        adv = json.loads(af.read_text())
+        assert adv.get("criteria"), f"{af}: missing criteria"
+        for crit in adv["criteria"].values():
+            used_triggers.add(crit["trigger"])
+        parent = adv.get("parent")
+        if parent is not None:
+            assert parent == "minecraft:recipes/root" or parent in adv_ids, (
+                f"{af}: unknown advancement parent {parent}"
+            )
+        disp = adv.get("display")
+        if disp is not None:
+            for field in ("title", "description"):
+                tr = disp[field]["translate"]
+                assert tr in en, f"{af}: missing advancement translation {tr}"
+
+    constants_rs = (ROOT / "src" / "constants.rs").read_text()
+    for trig_name, trig_id in re.findall(
+        r'const\s+(TRIG_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"', constants_rs
+    ):
+        assert trig_id in used_triggers, (
+            f"{trig_name} ({trig_id}) is not referenced by any advancement JSON"
+        )
+
+    _, _, alphas = parse_rgba8_png_info(
         ROOT / "assets" / MOD_ID / "textures" / "item" / "bullet_hole.png"
     )
     assert alphas <= {0, 255}, (
         f"bullet_hole.png must have binary alpha {{0, 255}} for cutout instancing, got {sorted(alphas)}"
     )
 
+    icon_path = ROOT / "icon.png"
+    assert icon_path.is_file(), "Missing package root icon.png"
+    icon_bytes = icon_path.stat().st_size
+    assert 0 < icon_bytes <= 262_144, f"icon.png exceeds 256 KiB limit ({icon_bytes} bytes)"
+    iw, ih, icon_alphas = parse_rgba8_png_info(icon_path)
+    assert iw == ih and 1 <= iw <= 512, f"icon.png must be square 1..=512 px, got {iw}x{ih}"
+    assert icon_alphas <= {0, 255}, f"icon.png expected crisp cutout corners, got {sorted(icon_alphas)}"
+
+    lib_rs = (ROOT / "src" / "lib.rs").read_text()
+    for tkey in re.findall(r'"(tooltip\.just_a_rifle\.[^"]+)"', lib_rs):
+        assert tkey in en, f"src/lib.rs references missing tooltip translation {tkey}"
+
+    # Guard against GUI 3D BSP polygon explosion: `items/winchester_1873.json` must route `gui`
+    # to `item/winchester_1873_lod`, and both 3D LOD meshes must stay compact (< 60 elements).
+    item_def = json.loads(
+        (ROOT / "assets" / MOD_ID / "items" / "winchester_1873.json").read_text()
+    )
+    top_model = item_def["model"]
+    assert (
+        top_model.get("property") == "minecraft:display_context"
+        and any(
+            "gui" in c.get("when", [])
+            and c.get("model", {}).get("model") == f"{MOD_ID}:item/winchester_1873_lod"
+            for c in top_model.get("cases", [])
+        )
+    ), "items/winchester_1873.json must route GUI display_context to winchester_1873_lod"
+
+    for rel_lod in ("item/winchester_1873_lod.json", "special/winchester_body_lod.json"):
+        lod_json = json.loads((ROOT / "assets" / MOD_ID / "models" / rel_lod).read_text())
+        assert 20 <= len(lod_json["elements"]) <= 60, (
+            f"{rel_lod}: expected 20..=60 elements to avoid GUI BSP splitting, got {len(lod_json['elements'])}"
+        )
+
     print(
         f"OK: {MOD_ID} v{cargo_ver.group(1)} (sdk {sdk_sha[:7]}), "
-        f"{len(json_files)} JSONs, {len(en)} lang keys, {len(sounds)} sound events, cutout decal verified."
+        f"{len(json_files)} JSONs, {len(en)} lang keys, {len(sounds)} sound events, 3D LOD & cutout decal verified."
     )
 
 

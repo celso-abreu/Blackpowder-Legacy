@@ -1,5 +1,7 @@
 //! 1st-person player arm meshes (`wide` `4×12×4` + `slim` `3×12×4` + `0.25` 3D sleeves).
 
+use std::sync::Mutex;
+
 use mod_api::{
     BlockEntityDrawContext, ClientHost, CubeDeformation, CubeListBuilder, LayerDefinition,
     MeshDefinition, ModelPart, PartPose,
@@ -7,6 +9,14 @@ use mod_api::{
 
 use crate::constants::DEFAULT_STEVE_WIDE;
 use crate::skin::ResolvedSkin;
+
+/// Caches `(primary, fallback) -> active_sprite` so `draw.model_part` never serializes an entire
+/// `ModelPart` across WASM twice per arm when `skin.primary` is absent from the sprite table.
+static CACHED_SKIN_SPRITE: Mutex<Option<(String, String, String)>> = Mutex::new(None);
+
+pub(crate) fn invalidate_skin_sprite_cache() {
+    *CACHED_SKIN_SPRITE.lock().unwrap() = None;
+}
 
 pub(crate) struct LimbModel {
     limb: ModelPart,
@@ -46,11 +56,29 @@ impl LimbModel {
         part: &ModelPart,
         skin: &ResolvedSkin,
     ) {
-        if !draw.model_part(part, &skin.primary, 0xFF_FFFF)
-            && !draw.model_part(part, &skin.fallback, 0xFF_FFFF)
+        let cached = {
+            let guard = CACHED_SKIN_SPRITE.lock().unwrap();
+            guard
+                .as_ref()
+                .filter(|(p, f, _)| p == &skin.primary && f == &skin.fallback)
+                .map(|(_, _, active)| active.clone())
+        };
+        if let Some(active) = cached
+            && draw.model_part(part, &active, 0xFF_FFFF)
         {
-            let _ = draw.model_part(part, DEFAULT_STEVE_WIDE, 0xFF_FFFF);
+            return;
         }
+
+        let resolved = if draw.model_part(part, &skin.primary, 0xFF_FFFF) {
+            skin.primary.clone()
+        } else if draw.model_part(part, &skin.fallback, 0xFF_FFFF) {
+            skin.fallback.clone()
+        } else {
+            let _ = draw.model_part(part, DEFAULT_STEVE_WIDE, 0xFF_FFFF);
+            DEFAULT_STEVE_WIDE.to_string()
+        };
+        *CACHED_SKIN_SPRITE.lock().unwrap() =
+            Some((skin.primary.clone(), skin.fallback.clone(), resolved));
     }
 
     pub(crate) fn draw(&self, draw: &mut dyn BlockEntityDrawContext, skin: &ResolvedSkin) {

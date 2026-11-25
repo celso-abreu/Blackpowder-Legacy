@@ -1,17 +1,23 @@
-//! Just a Rifle — Winchester 1873 lever-action rifle for Horizon (wasm mod, v0.9.0).
+//! Just a Rifle — Winchester 1873 lever-action rifle for Horizon (wasm mod, v0.10.0).
 //!
-//! Clean-room Rust `v0.9.0` modular architecture:
-//! - `constants` — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
-//! - `skin`      — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
-//! - `arms`      — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
-//! - `pose`      — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
-//! - `world_fx`  — Terrain bullet-hole decals & 3D bouncing `.44-40` brass shell casings.
-//! - `server`    — Authoritative firing, stance spread, muzzle VFX & per-shell reload loop.
+//! Clean-room Rust `v0.10.0` modular architecture:
+//! - `constants`   — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
+//! - `ballistics`  — Sub-tick 3D ray-AABB headshot geometry & smooth `> 40 m` falloff math.
+//! - `settings`    — `Options > Mods > Config` 31-setting registry & per-channel audio mixer.
+//! - `skin`        — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
+//! - `arms`        — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
+//! - `pose`        — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
+//! - `world_fx`    — Reactive world targets, per-material impact audio, bullet decals & casings.
+//! - `exploration` — Structure chest loot (`container_loot_filled`) & 13 mod advancements.
+//! - `server`      — Authoritative firing, stance spread, muzzle VFX & per-shell reload loop.
 
 mod arms;
+mod ballistics;
 mod constants;
+mod exploration;
 mod pose;
 mod server;
+mod settings;
 mod skin;
 mod world_fx;
 
@@ -21,24 +27,45 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
-    ArmPose, CalculatePlayerTurnEvent, CameraPoseEvent, ClientHost, ClientResourcesReloadedEvent,
-    ClientSetupEvent, ClientTickPreEvent, ComputeFovEvent, Flow, GetArmPoseEvent, GuiDraw,
-    GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host, HostSide,
-    HumanoidPart, IPayloadContext, Identifier, ItemKey, KeyConflictContext, KeyMappingPreEvent,
-    KeyRegistration, LevelTickPostEvent, ModelBakingCompletedEvent, ParticleKey, PayloadId,
-    ProjectileImpactEvent, Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent,
-    RenderPlayerPostEvent, ServerHost, ServerTickEvent, ServerTickPhase, SoundPlay, SoundSource,
-    StandaloneModelsEvent, SubmitCustomGeometryEvent, ToClient, ToServer, VarInt,
+    ArmPose, ArmPoseTransformEvent, BlockKey, CalculatePlayerTurnEvent, CameraPoseEvent,
+    ClientHost, ClientResourcesReloadedEvent, ClientSetupEvent, ClientTickPreEvent,
+    ComputeFovEvent, ContainerLootFilledEvent, CustomArmPose, Flow, FluidKey, GetArmPoseEvent,
+    GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host,
+    HostSide, HumanoidPart, IPayloadContext, Identifier, ItemKey, ItemTooltipEvent,
+    KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelHost, LevelRandomHost, LevelRef,
+    LevelTickPostEvent, LivingDamagePreEvent, LivingDeathEvent, ModelBakingCompletedEvent,
+    ParticleKey, ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent,
+    Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent,
+    ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundSource,
+    StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer, VarInt,
 };
+use mod_api::text::TextContent;
 
-use crate::arms::PlayerArms;
-use crate::constants::*;
-use crate::pose::{
-    build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_gun_space_arm,
-    draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status, recoil_envelope,
-    tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
+use crate::arms::{invalidate_skin_sprite_cache, PlayerArms};
+use crate::ballistics::{
+    evaluate_ballistics, is_ray_headshot_on_box, record_pending_impact, take_pending_impact,
+    tick_pending_impacts,
 };
-use crate::server::{on_rifle_input, rounds, tick_reload_sessions, Winchester};
+use crate::constants::*;
+use crate::exploration::{
+    distance_3d, flush_pending_exploration_advancements, handle_living_death_advancements,
+    is_tracked_rifle_bullet, on_container_loot_filled, record_bullet_entity_hit,
+    resolve_shooter_and_distance, resolve_shot_origin_for_owner,
+};
+use crate::pose::{
+    build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_back_sling_assembly,
+    draw_gun_space_arm, draw_rifle_assembly, evaluate_weapon_pose, local_offhand_rifle_status,
+    recoil_envelope, tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
+};
+use crate::server::{
+    find_active_bullet_ray, on_rifle_input, rounds, tick_active_bullets, tick_reload_sessions,
+    Winchester,
+};
+use crate::settings::{
+    classify_incoming_level_sound, client_settings, default_channel_for_local_sound,
+    mark_settings_dirty, mix_client_sound, refresh_client_settings, refresh_settings_if_dirty,
+    register_all_settings, AdsMode, BackSlingStyle, LevelSoundDecision, SoundChannel,
+};
 use crate::skin::ResolvedSkin;
 use crate::world_fx::{
     handle_bullet_terrain_impact, on_bullet_impact_sync, spawn_spent_casing_from_camera,
@@ -97,6 +124,18 @@ pub(crate) struct BulletImpactSync {
     pub(crate) rel_z_dm: VarInt,
 }
 
+#[derive(horizon_mod_api_macros::PayloadCodec)]
+pub(crate) struct RifleThirdPersonSync {
+    pub(crate) entity_id: VarInt,
+    pub(crate) state: VarInt,
+}
+
+#[derive(Clone, Copy)]
+struct RemoteTpState {
+    state: i32,
+    set_tick: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Shared Client & Server Runtime State
 // ---------------------------------------------------------------------------
@@ -107,12 +146,25 @@ pub(crate) static CLIENT_SPRINTING: AtomicBool = AtomicBool::new(false);
 pub(crate) static CLIENT_SNEAKING: AtomicBool = AtomicBool::new(false);
 static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
 static PENDING_RELOAD_CANCEL: AtomicBool = AtomicBool::new(false);
+static PENDING_AUTO_RELOAD: AtomicBool = AtomicBool::new(false);
+static TOGGLE_AIM_LATCH: AtomicBool = AtomicBool::new(false);
+static HEADSHOT_HITMARKER: AtomicBool = AtomicBool::new(false);
 
 pub(crate) static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
+static LAST_AUTO_RELOAD_TICK: AtomicU64 = AtomicU64::new(0);
 static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
+static HITMARKER_TIMER_BITS: AtomicU32 = AtomicU32::new(0);
+/// 20 Hz client cache of local player entity ID (`0` when unavailable) and `.44-40` reserve
+/// (`u32::MAX` = Creative `∞`).
+static LOCAL_ENTITY_ID: AtomicU32 = AtomicU32::new(0);
+static LOCAL_RESERVE_AMMO: AtomicU32 = AtomicU32::new(0);
+/// Packed 20 Hz cache of `local_offhand_rifle_status`: `0` = not slung, else
+/// `1 | ((chest_armored as u32) << 1) | (loaded_rounds << 2)` so `render_player_post` never
+/// queries entities/inventories across WASM on every `F5` or Inventory paperdoll frame.
+static LOCAL_OFFHAND_PACKED: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_WORLD_FOV_BITS: AtomicU32 = AtomicU32::new(0x428C_0000); // 70.0_f32.to_bits()
 pub(crate) static LAST_MUZZLE_VIEW_X: AtomicU32 = AtomicU32::new(0x3F07_1A9F); // 0.52775_f32
 pub(crate) static LAST_MUZZLE_VIEW_Y: AtomicU32 = AtomicU32::new(0xBEAA_0000); // -0.33203_f32
@@ -127,16 +179,60 @@ static RIFLE_INPUT: OnceLock<ToServer<RifleInput>> = OnceLock::new();
 pub(crate) static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 pub(crate) static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
 pub(crate) static BULLET_IMPACT_SYNC: OnceLock<ToClient<BulletImpactSync>> = OnceLock::new();
+pub(crate) static RIFLE_TP_SYNC: OnceLock<ToClient<RifleThirdPersonSync>> = OnceLock::new();
+static POSE_HIP_READY: OnceLock<CustomArmPose> = OnceLock::new();
+static POSE_SPRINT_CARRY: OnceLock<CustomArmPose> = OnceLock::new();
+static POSE_LEVER_CYCLE: OnceLock<CustomArmPose> = OnceLock::new();
+static POSE_RELOAD: OnceLock<CustomArmPose> = OnceLock::new();
 pub(crate) static RIFLE_KEY: OnceLock<ItemKey> = OnceLock::new();
+pub(crate) static CARTRIDGE_KEY: OnceLock<ItemKey> = OnceLock::new();
 pub(crate) static SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static WHITE_SMOKE_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static FLAME_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static POOF_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static CRIT_KEY: OnceLock<ParticleKey> = OnceLock::new();
 pub(crate) static BLOCK_PARTICLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static BUBBLE_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static BUBBLE_POP_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static SPLASH_KEY: OnceLock<ParticleKey> = OnceLock::new();
+pub(crate) static WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
+pub(crate) static FLOWING_WATER_FLUID_KEY: OnceLock<FluidKey> = OnceLock::new();
+pub(crate) static BELL_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static TARGET_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static DECORATED_POT_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static CHORUS_FLOWER_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+pub(crate) static POINTED_DRIPSTONE_BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
 static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 pub(crate) static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 static SLUNG_RIFLES: Mutex<BTreeMap<u32, SlungRifleState>> = Mutex::new(BTreeMap::new());
+static REMOTE_TP_STATES: Mutex<BTreeMap<u32, RemoteTpState>> = Mutex::new(BTreeMap::new());
+
+pub(crate) fn is_water_fluid(fluid: FluidKey) -> bool {
+    WATER_FLUID_KEY.get().copied() == Some(fluid)
+        || FLOWING_WATER_FLUID_KEY.get().copied() == Some(fluid)
+}
+
+/// Checks whether an exact 3D world-space coordinate `[x, y, z]` lies below the water surface
+/// in `level` (`Side: both`, handling source water, flowing water, and waterlogged blocks).
+pub(crate) fn is_point_in_water(host: &dyn Host, level: LevelRef, pos: [f64; 3]) -> bool {
+    let bp = [
+        pos[0].floor() as i32,
+        pos[1].floor() as i32,
+        pos[2].floor() as i32,
+    ];
+    let Some(fs) = level.fluid_state(host, bp) else {
+        return false;
+    };
+    if fs.is_empty() || !is_water_fluid(fs.fluid) {
+        return false;
+    }
+    let height = level
+        .fluid_height_for_camera(host, bp)
+        .unwrap_or(f32::from(fs.amount) / 9.0)
+        .clamp(0.0, 1.0);
+    height > 0.0 && (pos[1] - f64::from(bp[1])) <= f64::from(height)
+}
 
 pub(crate) fn client_anim() -> &'static Mutex<ClientAnimState> {
     CLIENT_ANIM.get_or_init(|| Mutex::new(ClientAnimState::new()))
@@ -158,8 +254,13 @@ pub(crate) fn holding_rifle_recently() -> bool {
 
 fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
     let assets = host.render_assets();
+    let body = assets.model(&Identifier::parse(MODEL_BODY_ID).ok()?).ok()?;
+    let body_lod = assets
+        .model(&Identifier::parse(MODEL_BODY_LOD_ID).ok()?)
+        .unwrap_or(body);
     Some(RifleModels {
-        body: assets.model(&Identifier::parse(MODEL_BODY_ID).ok()?).ok()?,
+        body,
+        body_lod,
         lever: assets
             .model(&Identifier::parse(MODEL_LEVER_ID).ok()?)
             .ok()?,
@@ -186,15 +287,68 @@ fn refresh_rifle_models(host: &dyn ClientHost) {
     *RIFLE_MODELS.lock().unwrap() = resolve_rifle_models(host);
 }
 
-pub(crate) fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
-    let mut sound = SoundPlay::ui(event_id).with_volume(volume).with_pitch(pitch);
+pub(crate) fn play_local_foley_channel(
+    host: &dyn ClientHost,
+    channel: SoundChannel,
+    event_id: &str,
+    volume: f32,
+    pitch: f32,
+) {
+    let cfg = client_settings();
+    let Some((vol, pit)) = mix_client_sound(&cfg, channel, volume, pitch) else {
+        return;
+    };
+    let mut sound = SoundPlay::ui(event_id).with_volume(vol).with_pitch(pit);
     sound.source = SoundSource::Players;
     let _ = host.play_local_sound(&sound, 0);
 }
 
+pub(crate) fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
+    play_local_foley_channel(
+        host,
+        default_channel_for_local_sound(event_id),
+        event_id,
+        volume,
+        pitch,
+    );
+}
+
 fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
+    let cfg = client_settings();
+    if value.kind.0 == SYNC_HIT_CONFIRM || value.kind.0 == SYNC_HEADSHOT_CONFIRM {
+        let is_headshot = value.kind.0 == SYNC_HEADSHOT_CONFIRM;
+        HEADSHOT_HITMARKER.store(is_headshot, Ordering::Relaxed);
+        HITMARKER_TIMER_BITS.store(
+            (if is_headshot { 0.22_f32 } else { 0.14_f32 }).to_bits(),
+            Ordering::Relaxed,
+        );
+        if let Some((snd, vol, pitch)) = cfg.hit_confirm_sound.sound_spec()
+            && let Ok(host) = cx.client_host()
+        {
+            if is_headshot {
+                play_local_foley_channel(
+                    host,
+                    SoundChannel::Feedback,
+                    snd,
+                    (vol * 1.18).min(1.0),
+                    (pitch * 1.18).min(2.0),
+                );
+                play_local_foley_channel(
+                    host,
+                    SoundChannel::Feedback,
+                    SND_HIT_CONFIRM_CHIME,
+                    (vol * 0.85).min(0.85),
+                    1.82,
+                );
+            } else {
+                play_local_foley_channel(host, SoundChannel::Feedback, snd, vol, pitch);
+            }
+        }
+        return Ok(());
+    }
+
     let rounds_now = (value.rounds.0.max(0) as u32).min(TUBE_CAPACITY);
-    let mut foley: Option<(&'static str, f32, f32)> = None;
+    let mut foley: Option<(SoundChannel, &'static str, f32, f32)> = None;
 
     {
         let mut anim = client_anim().lock().unwrap();
@@ -206,23 +360,34 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
             }
             SYNC_DRY_CLICK => {
                 anim.on_dry_click(rounds_now);
-                foley = Some((SND_COCK, 0.72, 1.32));
+                if cfg.dry_click_alert {
+                    foley = Some((SoundChannel::Feedback, SND_COCK, 0.72, 1.32));
+                }
+                if rounds_now == 0 && cfg.auto_reload {
+                    PENDING_AUTO_RELOAD.store(true, Ordering::Relaxed);
+                }
+            }
+            SYNC_WET_MISFIRE => {
+                CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                anim.on_dry_click(rounds_now);
+                foley = Some((SoundChannel::Mechanism, SND_MISFIRE_WET, 0.76, 0.92));
             }
             SYNC_RELOAD_START => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 AIMING.store(false, Ordering::Relaxed);
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadIntro { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_INTRO, 0.90, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_INTRO, 0.90, 1.0));
             }
             SYNC_SHELL_INSERTED => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadInsert { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_INSERT, 0.92, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_INSERT, 0.92, 1.0));
             }
             SYNC_RELOAD_END_NORM => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadEndNorm { elapsed: 0.0 };
-                foley = Some((SND_RELOAD_END, 0.88, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.88, 1.0));
             }
             SYNC_RELOAD_END_EMPTY => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
@@ -231,7 +396,7 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
                     lever_sound_played: false,
                     cock_sound_played: false,
                 };
-                foley = Some((SND_RELOAD_END, 0.85, 1.0));
+                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.85, 1.0));
             }
             SYNC_RELOAD_ABORTED => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
@@ -249,15 +414,16 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
         }
     }
 
-    if let Some((snd, vol, pitch)) = foley
+    if let Some((ch, snd, vol, pitch)) = foley
         && let Ok(host) = cx.client_host()
     {
-        play_local_foley(host, snd, vol, pitch);
+        play_local_foley_channel(host, ch, snd, vol, pitch);
     }
     Ok(())
 }
 
 fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Result<(), String> {
+    invalidate_skin_sprite_cache();
     let mut anim = client_anim().lock().unwrap();
     anim.skin = ResolvedSkin {
         primary: value.sprite,
@@ -265,6 +431,125 @@ fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Resu
         slim: value.slim.0 != 0,
     };
     Ok(())
+}
+
+fn on_rifle_tp_sync(
+    value: RifleThirdPersonSync,
+    _: &mut dyn IPayloadContext,
+) -> Result<(), String> {
+    if value.entity_id.0 <= 0 {
+        return Ok(());
+    }
+    let eid = value.entity_id.0 as u32;
+    let now = CLIENT_TICKS.load(Ordering::Relaxed);
+    let mut map = REMOTE_TP_STATES.lock().unwrap();
+    if value.state.0 == TP_STATE_IDLE {
+        map.remove(&eid);
+    } else {
+        if map.len() >= 64 {
+            map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
+        }
+        map.insert(
+            eid,
+            RemoteTpState {
+                state: value.state.0,
+                set_tick: now,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn count_local_reserve_ammo(host: &dyn ClientHost) -> u32 {
+    let Some(cartridge) = CARTRIDGE_KEY.get().copied() else {
+        return 0;
+    };
+    let Some(player) = host.local_player() else {
+        return 0;
+    };
+    if player.is_creative(host).unwrap_or(false) {
+        return u32::MAX;
+    }
+    let mut total: u32 = 0;
+    if let Some(items) = player.inventory(host) {
+        for st in items {
+            if st.item() == cartridge {
+                total = total.saturating_add(st.count());
+            }
+        }
+    }
+    if let Some(liv) = host.living(player.entity())
+        && let Some(off) = liv.hand_item(host, Hand::Off)
+        && off.item() == cartridge
+    {
+        total = total.saturating_add(off.count());
+    }
+    total
+}
+
+fn styled_text(mut text: Text, color_hex: &str, italic: bool) -> Text {
+    text.style.color = Some(color_hex.into());
+    text.style.italic = Some(italic);
+    text
+}
+
+fn pretty_key_fallback(key_id: &str, default_label: &str) -> String {
+    if let Some(rest) = key_id.strip_prefix("key.keyboard.") {
+        if rest.len() == 1 {
+            return rest.to_ascii_uppercase();
+        }
+        return rest.replace('.', " ").to_ascii_uppercase();
+    }
+    if let Some(rest) = key_id.strip_prefix("key.mouse.") {
+        return format!("M:{}", rest.to_ascii_uppercase());
+    }
+    default_label.into()
+}
+
+fn mod_key_component(host: &dyn ClientHost, mapping: &str, fallback_label: &str) -> Text {
+    let base = match host.mod_key(MOD_ID, mapping) {
+        Some((key_id, _)) if !key_id.is_empty() && key_id != "key.keyboard.unknown" => {
+            Text::new(TextContent::Translatable {
+                key: key_id.clone(),
+                fallback: Some(pretty_key_fallback(&key_id, fallback_label)),
+                arguments: Vec::new(),
+            })
+        }
+        _ => Text::literal(fallback_label),
+    };
+    styled_text(base, "#F2D56F", false)
+}
+
+fn vanilla_key_component(mapping: &str) -> Text {
+    styled_text(
+        Text::new(TextContent::Keybind(mapping.into())),
+        "#F2D56F",
+        false,
+    )
+}
+
+fn text_contains_durability(text: &Text) -> bool {
+    if let TextContent::Translatable { key, .. } = &text.content
+        && key == "item.durability"
+    {
+        return true;
+    }
+    text.children.iter().any(text_contains_durability)
+}
+
+/// Draws a crisp pixel-perfect mini `.44-40` brass/copper cartridge icon (`3×9` GUI px) inside
+/// the HUD reserve counter box with zero texture state switches.
+fn draw_hud_mini_cartridge(event: &mut GuiRenderPostEvent<'_>, x: f32, y: f32) {
+    // Copper jacketed soft-lead nose (top 3px)
+    event.batch.fill([x + 0.5, y, 2.0, 1.0], 0xFF_F2_AD_72);
+    event.batch.fill([x, y + 1.0, 3.0, 2.0], 0xFF_DB_89_48);
+    event.batch.fill([x, y + 1.0, 1.0, 2.0], 0xFF_F2_AD_72);
+    // Polished .44-40 bottleneck brass case (middle 5px)
+    event.batch.fill([x, y + 3.0, 3.0, 5.0], 0xFF_BF_95_28);
+    event.batch.fill([x + 0.5, y + 3.0, 1.2, 5.0], 0xFF_F2_D5_6F);
+    // Rimmed centerfire base (bottom 1px, slightly wider)
+    event.batch.fill([x - 0.5, y + 8.0, 4.0, 1.0], 0xFF_99_73_1C);
+    event.batch.fill([x, y + 8.0, 2.0, 1.0], 0xFF_E6_C0_4C);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +564,7 @@ impl Hooks for Mod {
     fn standalone_models(&self, _: &RegistrationContext, event: &mut StandaloneModelsEvent<'_>) {
         for id in [
             MODEL_BODY_ID,
+            MODEL_BODY_LOD_ID,
             MODEL_LEVER_ID,
             MODEL_HAMMER_ID,
             MODEL_TRIGGER_ID,
@@ -293,18 +579,42 @@ impl Hooks for Mod {
 
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let winchester = r.item_key(WINCHESTER);
+        let cartridge = r.item_key(CARTRIDGE);
         let smoke = r.particle_key(SMOKE_PARTICLE);
         let white_smoke = r.particle_key(WHITE_SMOKE_PARTICLE);
         let flame = r.particle_key(FLAME_PARTICLE);
         let poof = r.particle_key(POOF_PARTICLE);
+        let crit = r.particle_key(CRIT_PARTICLE);
         let block_particle = r.particle_key(BLOCK_PARTICLE);
+        let bubble = r.particle_key(BUBBLE_PARTICLE);
+        let bubble_pop = r.particle_key(BUBBLE_POP_PARTICLE);
+        let splash = r.particle_key(SPLASH_PARTICLE);
+        let water_fluid = r.fluid_key(WATER_FLUID);
+        let flowing_water_fluid = r.fluid_key(FLOWING_WATER_FLUID);
+        let bell_block = r.block_key(BELL_BLOCK);
+        let target_block = r.block_key(TARGET_BLOCK);
+        let decorated_pot_block = r.block_key(DECORATED_POT_BLOCK);
+        let chorus_flower_block = r.block_key(CHORUS_FLOWER_BLOCK);
+        let pointed_dripstone_block = r.block_key(POINTED_DRIPSTONE_BLOCK);
         r.item_part(winchester, Winchester);
         let _ = RIFLE_KEY.set(winchester);
+        let _ = CARTRIDGE_KEY.set(cartridge);
         let _ = SMOKE_KEY.set(smoke);
         let _ = WHITE_SMOKE_KEY.set(white_smoke);
         let _ = FLAME_KEY.set(flame);
         let _ = POOF_KEY.set(poof);
+        let _ = CRIT_KEY.set(crit);
         let _ = BLOCK_PARTICLE_KEY.set(block_particle);
+        let _ = BUBBLE_KEY.set(bubble);
+        let _ = BUBBLE_POP_KEY.set(bubble_pop);
+        let _ = SPLASH_KEY.set(splash);
+        let _ = WATER_FLUID_KEY.set(water_fluid);
+        let _ = FLOWING_WATER_FLUID_KEY.set(flowing_water_fluid);
+        let _ = BELL_BLOCK_KEY.set(bell_block);
+        let _ = TARGET_BLOCK_KEY.set(target_block);
+        let _ = DECORATED_POT_BLOCK_KEY.set(decorated_pot_block);
+        let _ = CHORUS_FLOWER_BLOCK_KEY.set(chorus_flower_block);
+        let _ = POINTED_DRIPSTONE_BLOCK_KEY.set(pointed_dripstone_block);
 
         r.register_key_mapping(
             KeyRegistration::new(RELOAD_MAPPING, "key.keyboard.r")
@@ -316,6 +626,11 @@ impl Hooks for Mod {
                 .label("key.just_a_rifle.inspect")
                 .context(KeyConflictContext::InGame),
         );
+        let _ = POSE_HIP_READY.set(r.register_arm_pose(POSE_HIP_READY_ID, true, true));
+        let _ = POSE_SPRINT_CARRY.set(r.register_arm_pose(POSE_SPRINT_CARRY_ID, true, true));
+        let _ = POSE_LEVER_CYCLE.set(r.register_arm_pose(POSE_LEVER_CYCLE_ID, true, true));
+        let _ = POSE_RELOAD.set(r.register_arm_pose(POSE_RELOAD_ID, true, true));
+        let _ = register_all_settings(r);
 
         let mut payloads = r.payload_handlers();
         let mut view = payloads.registrar("1");
@@ -333,10 +648,15 @@ impl Hooks for Mod {
             PayloadId(IMPACT_CHANNEL.into()),
             on_bullet_impact_sync,
         );
+        let tp_sync = view.play_to_client_typed::<RifleThirdPersonSync>(
+            PayloadId(TP_STATE_CHANNEL.into()),
+            on_rifle_tp_sync,
+        );
         let _ = RIFLE_INPUT.set(input);
         let _ = RIFLE_SYNC.set(sync);
         let _ = RIFLE_SKIN_SYNC.set(skin);
         let _ = BULLET_IMPACT_SYNC.set(impact);
+        let _ = RIFLE_TP_SYNC.set(tp_sync);
     }
 
     fn hears_projectile_impacts(&self, _: &dyn Host, event: &mut HearsProjectileImpactsEvent) {
@@ -348,10 +668,276 @@ impl Hooks for Mod {
         host: &mut dyn ServerHost,
         event: &mut ProjectileImpactEvent<'_>,
     ) -> Flow {
-        if event.kind == BULLET && event.entity.is_none() {
-            handle_bullet_terrain_impact(host, event);
+        if event.kind == BULLET {
+            if event.entity.is_none() {
+                handle_bullet_terrain_impact(host, event);
+            } else if let Some(victim_id) = event.entity
+                && event.owner != 0
+                && victim_id != event.owner
+                && let Some(level) = host.level(event.dimension)
+                && let Some((shooter, dist)) =
+                    resolve_shooter_and_distance(host, level, event.owner, event.at)
+            {
+                let now = SERVER_TICKS.load(Ordering::Relaxed);
+                let victim_ent = host.entity(victim_id);
+                let aabb = victim_ent.and_then(|e| e.bounding_box(host));
+                let eye_h = victim_ent.and_then(|e| e.eye_height(host));
+
+                let (ray_origin, ray_dir) = find_active_bullet_ray(host, event.at).unwrap_or_else(
+                    || {
+                        let orig = resolve_shot_origin_for_owner(event.owner)
+                            .or_else(|| shooter.entity().eye_position(host))
+                            .unwrap_or(event.at);
+                        (
+                            orig,
+                            [
+                                event.at[0] - orig[0],
+                                event.at[1] - orig[1],
+                                event.at[2] - orig[2],
+                            ],
+                        )
+                    },
+                );
+
+                let is_headshot = aabb.is_some_and(|bounds| {
+                    is_ray_headshot_on_box(ray_origin, ray_dir, event.at, bounds, eye_h)
+                });
+                let eval = evaluate_ballistics(dist, is_headshot);
+                record_pending_impact(event.owner as i32, victim_id as i32, eval);
+                record_bullet_entity_hit(victim_id, shooter.uuid(), dist, eval.is_headshot, now);
+
+                if eval.is_headshot && let Some(crit) = CRIT_KEY.get().copied() {
+                    let head_y = aabb.map_or(event.at[1], |b| {
+                        (b[0][1] + eye_h.unwrap_or((b[1][1] - b[0][1]) * 0.85)).min(b[1][1])
+                    });
+                    let crit_opts = ParticleOptions::simple(crit);
+                    level.send_particles(
+                        host,
+                        &crit_opts,
+                        None,
+                        [event.at[0], head_y, event.at[2]],
+                        [0.14, 0.14, 0.14],
+                        0.18,
+                        7,
+                    );
+                }
+
+                if let Some(sync) = RIFLE_SYNC.get() {
+                    let _ = sync.send(
+                        host,
+                        shooter,
+                        &RifleSync {
+                            kind: VarInt(if is_headshot {
+                                SYNC_HEADSHOT_CONFIRM
+                            } else {
+                                SYNC_HIT_CONFIRM
+                            }),
+                            rounds: VarInt(0),
+                        },
+                    );
+                }
+            }
         }
         Flow::Continue
+    }
+
+    fn living_damage_pre(
+        &self,
+        _level: &mut dyn LevelRandomHost,
+        event: &mut LivingDamagePreEvent<'_>,
+    ) {
+        if event.source.direct <= 0 {
+            return;
+        }
+        let now = SERVER_TICKS.load(Ordering::Relaxed);
+        let bullet_u32 = event.source.direct as u32;
+
+        // Fast path: consume the exact sub-tick ray-AABB evaluation recorded moments earlier in
+        // `projectile_impact` for `(owner = source.causing, target = event.entity)`.
+        let eval = if let Some(pending) = take_pending_impact(event.source.causing, event.entity) {
+            Some(pending)
+        } else if is_tracked_rifle_bullet(bullet_u32, now) {
+            // Defensive fallback if `living_damage_pre` ever fires without a prior cached entry.
+            let dist = if event.source.causing > 0 {
+                let orig = resolve_shot_origin_for_owner(event.source.causing as u32);
+                match (orig, event.source.position) {
+                    (Some(a), Some(b)) => distance_3d(a, b),
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            Some(evaluate_ballistics(dist, false))
+        } else {
+            None
+        };
+
+        if let Some(ev) = eval {
+            let base = event.container.new_damage();
+            if base > 0.0 && (ev.total_multiplier - 1.0).abs() > 1e-4 {
+                event.container.set_new_damage(base * ev.total_multiplier);
+            }
+        }
+    }
+
+    fn item_tooltip(&self, host: &dyn ClientHost, event: &mut ItemTooltipEvent<'_>) {
+        let rifle = RIFLE_KEY.get().copied();
+        let cartridge = CARTRIDGE_KEY.get().copied();
+        let item = event.stack.item();
+        let is_rifle = rifle == Some(item);
+        let is_cartridge = cartridge == Some(item);
+        if !is_rifle && !is_cartridge {
+            return;
+        }
+
+        // Always hide Vanilla's internal `"item.durability"` line on the Winchester (`F3+H`),
+        // because stack `damage` encodes loaded `.44-40` rounds (`0..=8`), not wear & tear.
+        if is_rifle {
+            event.lines.retain(|(line, _)| !text_contains_durability(line));
+        }
+
+        if !client_settings().hud_rich_tooltips {
+            return;
+        }
+
+        let insert_at = if event.lines.is_empty() { 0 } else { 1 };
+        let mut extra: Vec<(Text, u32)> = Vec::with_capacity(4);
+
+        if is_rifle {
+            let loaded = rounds(event.stack);
+            let reserve = LOCAL_RESERVE_AMMO.load(Ordering::Relaxed);
+            let loaded_color = if loaded == 0 { "#FF6E59" } else { "#F2D56F" };
+            let loaded_arg = styled_text(Text::literal(loaded.to_string()), loaded_color, false);
+            let cap_arg = styled_text(Text::literal(TUBE_CAPACITY.to_string()), "#E6D6B8", false);
+            let reserve_arg = if reserve == u32::MAX {
+                styled_text(Text::literal("∞"), "#FFE082", false)
+            } else if reserve == 0 {
+                styled_text(Text::literal("0"), "#D96B59", false)
+            } else {
+                styled_text(Text::literal(reserve.to_string()), "#E6D6B8", false)
+            };
+
+            extra.push((
+                styled_text(
+                    Text::translate("tooltip.just_a_rifle.winchester.subtitle", Vec::new()),
+                    "#B8A88A",
+                    true,
+                ),
+                u32::MAX,
+            ));
+            extra.push((
+                styled_text(
+                    Text::translate(
+                        "tooltip.just_a_rifle.winchester.ammo",
+                        vec![loaded_arg, cap_arg, reserve_arg],
+                    ),
+                    "#C8BEA8",
+                    false,
+                ),
+                u32::MAX,
+            ));
+            extra.push((
+                styled_text(
+                    Text::translate("tooltip.just_a_rifle.winchester.stats", Vec::new()),
+                    "#969CA6",
+                    false,
+                ),
+                u32::MAX,
+            ));
+            extra.push((
+                styled_text(
+                    Text::translate(
+                        "tooltip.just_a_rifle.winchester.controls",
+                        vec![
+                            vanilla_key_component("key.use"),
+                            mod_key_component(host, RELOAD_MAPPING, "R"),
+                            mod_key_component(host, INSPECT_MAPPING, "I"),
+                            vanilla_key_component("key.swapOffhand"),
+                        ],
+                    ),
+                    "#857E72",
+                    false,
+                ),
+                u32::MAX,
+            ));
+        } else if is_cartridge {
+            extra.push((
+                styled_text(
+                    Text::translate("tooltip.just_a_rifle.cartridge.caliber", Vec::new()),
+                    "#D9B038",
+                    true,
+                ),
+                u32::MAX,
+            ));
+            extra.push((
+                styled_text(
+                    Text::translate(
+                        "tooltip.just_a_rifle.cartridge.usage",
+                        vec![mod_key_component(host, RELOAD_MAPPING, "R")],
+                    ),
+                    "#A89F8D",
+                    false,
+                ),
+                u32::MAX,
+            ));
+        }
+
+        event.lines.splice(insert_at..insert_at, extra);
+    }
+
+    fn container_loot_filled(
+        &self,
+        level: &dyn LevelHost,
+        event: &mut ContainerLootFilledEvent<'_>,
+    ) {
+        on_container_loot_filled(level, event);
+    }
+
+    fn living_death(&self, host: &mut dyn ServerHost, event: &mut LivingDeathEvent<'_>) -> Flow {
+        let now = SERVER_TICKS.load(Ordering::Relaxed);
+        handle_living_death_advancements(host, event, now);
+        Flow::Continue
+    }
+
+    fn setting_changed(&self, host: &mut dyn ClientHost, _: &mut SettingChangedEvent<'_>) {
+        refresh_client_settings(host);
+        if client_settings().ads_mode == AdsMode::Hold
+            && TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed)
+        {
+            AIMING.store(false, Ordering::Relaxed);
+            let _ = host.set_mapping_down("key.use", false);
+        }
+    }
+
+    fn play_level_sound_at_position(
+        &self,
+        host: HostSide<'_>,
+        event: &mut PlayLevelSoundAtPositionEvent,
+    ) -> Flow {
+        if !matches!(host, HostSide::Client(_)) {
+            return Flow::Continue;
+        }
+        let cfg = client_settings();
+        match classify_incoming_level_sound(
+            &cfg,
+            event.sound.namespace(),
+            event.sound.path(),
+            *event.source,
+            event.pitch,
+        ) {
+            LevelSoundDecision::Ignore => Flow::Continue,
+            LevelSoundDecision::Cancel => Flow::Cancel,
+            LevelSoundDecision::Mix(channel) => {
+                match mix_client_sound(&cfg, channel, event.volume, event.pitch) {
+                    Some((vol, pitch)) => {
+                        event.volume = vol;
+                        event.pitch = pitch;
+                        Flow::Continue
+                    }
+                    None => Flow::Cancel,
+                }
+            }
+        }
     }
 
     fn model_baking_completed(&self, host: &mut dyn ClientHost, _: &mut ModelBakingCompletedEvent) {
@@ -368,18 +954,22 @@ impl Hooks for Mod {
         host: &mut dyn ClientHost,
         _: &mut ClientResourcesReloadedEvent,
     ) {
+        invalidate_skin_sprite_cache();
         refresh_rifle_models(host);
     }
 
     /// Left click while holding or aiming the rifle fires a round (`Flow::Cancel` suppresses
-    /// vanilla mining and melee punches).
+    /// vanilla mining and melee punches); optional Toggle-ADS mode latches iron sights on right click.
     fn key_mapping_pre(
         &self,
         host: &mut dyn ClientHost,
         event: &mut KeyMappingPreEvent<'_>,
     ) -> Flow {
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
-        if event.mapping == ATTACK_MAPPING && holding && host.playing() {
+        if !holding || !host.playing() {
+            return Flow::Continue;
+        }
+        if event.mapping == ATTACK_MAPPING {
             if event.pressed {
                 let allow_fire = {
                     let mut anim = client_anim().lock().unwrap();
@@ -401,11 +991,29 @@ impl Hooks for Mod {
             }
             return Flow::Cancel;
         }
+        if event.mapping == "key.use" && client_settings().ads_mode == AdsMode::Toggle {
+            if event.pressed {
+                if TOGGLE_AIM_LATCH.load(Ordering::Relaxed) || AIMING.load(Ordering::Relaxed) {
+                    TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+                    AIMING.store(false, Ordering::Relaxed);
+                    let _ = host.set_mapping_down("key.use", false);
+                    return Flow::Cancel;
+                } else if !CLIENT_RELOADING.load(Ordering::Relaxed)
+                    && !CLIENT_SPRINTING.load(Ordering::Relaxed)
+                {
+                    TOGGLE_AIM_LATCH.store(true, Ordering::Relaxed);
+                }
+            } else if TOGGLE_AIM_LATCH.load(Ordering::Relaxed) {
+                return Flow::Cancel;
+            }
+        }
         Flow::Continue
     }
 
     fn client_tick_pre(&self, host: &mut dyn ClientHost, _: &mut ClientTickPreEvent) {
         let tick = CLIENT_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        refresh_settings_if_dirty(host);
+        let cfg = client_settings();
         if AIMING.load(Ordering::Relaxed)
             && tick.saturating_sub(AIM_LAST_TICK.load(Ordering::Relaxed)) > 2
         {
@@ -418,10 +1026,19 @@ impl Hooks for Mod {
 
         if !host.playing() {
             PENDING_FIRE.store(false, Ordering::Relaxed);
+            PENDING_AUTO_RELOAD.store(false, Ordering::Relaxed);
+            TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+            HEADSHOT_HITMARKER.store(false, Ordering::Relaxed);
+            mark_settings_dirty();
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             CLIENT_RELOADING.store(false, Ordering::Relaxed);
+            LOCAL_ENTITY_ID.store(0, Ordering::Relaxed);
+            LOCAL_RESERVE_AMMO.store(0, Ordering::Relaxed);
+            LOCAL_OFFHAND_PACKED.store(0, Ordering::Relaxed);
             SLUNG_RIFLES.lock().unwrap().clear();
+            REMOTE_TP_STATES.lock().unwrap().clear();
+            crate::ballistics::clear_all_pending_impacts();
             let mut anim = client_anim().lock().unwrap();
             anim.was_holding = false;
             anim.was_slung = false;
@@ -431,7 +1048,30 @@ impl Hooks for Mod {
         }
 
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
-        let is_slung = local_offhand_rifle_status(host).is_some();
+        let local_eid = host
+            .local_player()
+            .map(|p| p.entity().id())
+            .or_else(|| host.camera_entity().map(|e| e.id()))
+            .unwrap_or(0);
+        LOCAL_ENTITY_ID.store(local_eid, Ordering::Relaxed);
+        LOCAL_RESERVE_AMMO.store(count_local_reserve_ammo(host), Ordering::Relaxed);
+        if tick % 20 == 0 {
+            REMOTE_TP_STATES
+                .lock()
+                .unwrap()
+                .retain(|_, v| tick.saturating_sub(v.set_tick) <= 120);
+        }
+        let offhand_status = local_offhand_rifle_status(host);
+        let is_slung = offhand_status.is_some();
+        LOCAL_OFFHAND_PACKED.store(
+            match offhand_status {
+                Some((off_rounds, chest_armored)) => {
+                    1 | ((chest_armored as u32) << 1) | (off_rounds.min(0x3F_FFFF) << 2)
+                }
+                None => 0,
+            },
+            Ordering::Relaxed,
+        );
 
         // Read horizontal velocity from camera entity (`Side: both`).
         let mut horiz_speed = 0.0_f32;
@@ -496,6 +1136,13 @@ impl Hooks for Mod {
         while host.consume_click(MOD_ID, RELOAD_MAPPING) {
             want_reload = true;
         }
+        if PENDING_AUTO_RELOAD.swap(false, Ordering::Relaxed)
+            && cfg.auto_reload
+            && tick.saturating_sub(LAST_AUTO_RELOAD_TICK.load(Ordering::Relaxed)) >= 20
+        {
+            LAST_AUTO_RELOAD_TICK.store(tick, Ordering::Relaxed);
+            want_reload = true;
+        }
         let mut want_inspect = false;
         while host.consume_click(MOD_ID, INSPECT_MAPPING) {
             want_inspect = true;
@@ -503,6 +1150,9 @@ impl Hooks for Mod {
 
         if !holding {
             PENDING_FIRE.store(false, Ordering::Relaxed);
+            if TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed) {
+                let _ = host.set_mapping_down("key.use", false);
+            }
             CLIENT_SPRINTING.store(false, Ordering::Relaxed);
             CLIENT_SNEAKING.store(false, Ordering::Relaxed);
             if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
@@ -519,6 +1169,7 @@ impl Hooks for Mod {
         CLIENT_SPRINTING.store(sprinting, Ordering::Relaxed);
 
         if sprinting {
+            TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
             if AIMING.swap(false, Ordering::Relaxed) {
                 let _ = host.set_mapping_down("key.use", false);
             }
@@ -536,6 +1187,15 @@ impl Hooks for Mod {
             }
         }
 
+        if cfg.ads_mode == AdsMode::Toggle && TOGGLE_AIM_LATCH.load(Ordering::Relaxed) {
+            if CLIENT_RELOADING.load(Ordering::Relaxed) || sprinting {
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
+                let _ = host.set_mapping_down("key.use", false);
+            } else {
+                let _ = host.set_mapping_down("key.use", true);
+            }
+        }
+
         if AIMING.load(Ordering::Relaxed) {
             let mut anim = client_anim().lock().unwrap();
             if matches!(anim.action, ActionAnim::Inspect { .. }) {
@@ -543,7 +1203,10 @@ impl Hooks for Mod {
             }
         }
 
-        if CLIENT_RELOADING.load(Ordering::Relaxed) && AIMING.swap(false, Ordering::Relaxed) {
+        if CLIENT_RELOADING.load(Ordering::Relaxed)
+            && (AIMING.swap(false, Ordering::Relaxed)
+                || TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed))
+        {
             let _ = host.set_mapping_down("key.use", false);
         }
 
@@ -561,6 +1224,7 @@ impl Hooks for Mod {
                 ActionAnim::Draw { .. }
             );
             if !busy_draw {
+                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
                 AIMING.store(false, Ordering::Relaxed);
                 let _ = host.set_mapping_down("key.use", false);
                 let _ = input.send(host, &RifleInput::simple(ACTION_RELOAD));
@@ -592,7 +1256,10 @@ impl Hooks for Mod {
             return;
         };
         let now = SERVER_TICKS.load(Ordering::Relaxed);
+        tick_pending_impacts();
         tick_reload_sessions(host, now);
+        tick_active_bullets(host, now);
+        flush_pending_exploration_advancements(host);
     }
 
     /// Per-frame animation stepper (`event.elapsed`) + 240Hz camera recoil climb & partial recovery.
@@ -605,6 +1272,12 @@ impl Hooks for Mod {
         if dt <= 0.0 {
             return;
         }
+        let cfg = client_settings();
+
+        let hit_rem = f32::from_bits(HITMARKER_TIMER_BITS.load(Ordering::Relaxed));
+        if hit_rem > 0.0 {
+            HITMARKER_TIMER_BITS.store((hit_rem - dt).max(0.0).to_bits(), Ordering::Relaxed);
+        }
 
         // Step world decals & tumbling/bouncing .44-40 brass casings even when the player switches
         // away from the rifle so airborne shells finish landing and clinking naturally.
@@ -615,7 +1288,7 @@ impl Hooks for Mod {
 
         let mut cam_delta_pitch = 0.0_f32;
         let mut cam_delta_yaw = 0.0_f32;
-        let mut triggered_foley: Vec<(&'static str, f32, f32)> = Vec::new();
+        let mut triggered_foley: Vec<(SoundChannel, &'static str, f32, f32)> = Vec::new();
         let mut eject_casing_aim: Option<f32> = None;
 
         {
@@ -705,7 +1378,7 @@ impl Hooks for Mod {
                     } else {
                         if !lever_sound_played && next >= LEVER_DELAY_SECS {
                             lever_sound_played = true;
-                            triggered_foley.push((SND_LEVER, 0.86, 1.0));
+                            triggered_foley.push((SoundChannel::Mechanism, SND_LEVER, 0.86, 1.0));
                         }
                         if !casing_ejected && next >= CASING_HANDOFF_SECS {
                             casing_ejected = true;
@@ -714,7 +1387,7 @@ impl Hooks for Mod {
                         if !cock_sound_played && next >= LEVER_DELAY_SECS + 0.24 {
                             cock_sound_played = true;
                             anim.hammer_uncocked = false;
-                            triggered_foley.push((SND_COCK, 0.72, 1.04));
+                            triggered_foley.push((SoundChannel::Mechanism, SND_COCK, 0.72, 1.04));
                         }
                         let total = LEVER_DELAY_SECS + LEVER_DURATION_SECS;
                         anim.action = if next >= total {
@@ -773,12 +1446,12 @@ impl Hooks for Mod {
                     let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
                     if !lever_sound_played && next >= 0.15 {
                         lever_sound_played = true;
-                        triggered_foley.push((SND_LEVER, 0.90, 0.98));
+                        triggered_foley.push((SoundChannel::Reload, SND_LEVER, 0.90, 0.98));
                     }
                     if !cock_sound_played && next >= 0.40 {
                         cock_sound_played = true;
                         anim.hammer_uncocked = false;
-                        triggered_foley.push((SND_COCK, 0.78, 1.0));
+                        triggered_foley.push((SoundChannel::Reload, SND_COCK, 0.78, 1.0));
                     }
                     anim.action = if next >= dur {
                         anim.hammer_uncocked = false;
@@ -806,10 +1479,12 @@ impl Hooks for Mod {
             spawn_spent_casing_from_camera(host, aim);
         }
 
-        for (snd, vol, pitch) in triggered_foley {
-            play_local_foley(host, snd, vol, pitch);
+        for (ch, snd, vol, pitch) in triggered_foley {
+            play_local_foley_channel(host, ch, snd, vol, pitch);
         }
 
+        cam_delta_pitch *= cfg.camera_recoil_mul;
+        cam_delta_yaw *= cfg.camera_recoil_mul;
         if (cam_delta_pitch.abs() > 1e-5 || cam_delta_yaw.abs() > 1e-5)
             && let Some(cam) = host.camera_entity()
             && let Some([yaw, pitch]) = cam.rotation(host)
@@ -827,7 +1502,8 @@ impl Hooks for Mod {
     fn compute_fov(&self, _: &dyn ClientHost, event: &mut ComputeFovEvent) {
         let aim = aim_progress().clamp(0.0, 1.15);
         if aim > 0.001 {
-            let scale = 1.0 - (1.0 - AIM_FOV) * aim;
+            let zoom_strength = (1.0 - AIM_FOV) * client_settings().ads_zoom_mul;
+            let scale = (1.0 - zoom_strength * aim).clamp(0.35, 1.0);
             let scaled = (event.degrees * scale).clamp(1.0, 179.0);
             if scaled.is_finite() {
                 event.degrees = scaled;
@@ -841,25 +1517,34 @@ impl Hooks for Mod {
     fn calculate_player_turn(&self, _: &dyn ClientHost, event: &mut CalculatePlayerTurnEvent) {
         let aim = aim_progress().clamp(0.0, 1.0);
         if aim > 0.001 {
-            let sens_scale = 1.0 - (1.0 - AIM_FOV) * aim * 0.85;
+            let base_ads_sens = (1.0 - (1.0 - AIM_FOV) * 0.85) * client_settings().ads_sensitivity_mul;
+            let sens_scale = (1.0 + (base_ads_sens - 1.0) * aim).clamp(0.05, 2.0);
             event.mouse_sensitivity *= f64::from(sens_scale);
         }
     }
 
     fn camera_pose(&self, _: &dyn ClientHost, event: &mut CameraPoseEvent<'_>) {
+        let recoil_mul = client_settings().camera_recoil_mul;
+        if recoil_mul <= 0.001 {
+            return;
+        }
         let (jolt, sign) = {
             let anim = client_anim().lock().unwrap();
             (anim.jolt_timer, anim.jolt_yaw_sign)
         };
         if jolt > 0.0 {
             let u = (jolt / 0.065).clamp(0.0, 1.0);
-            let wave = (PI * (1.0 - u) * 2.0).sin() * u;
+            let wave = (PI * (1.0 - u) * 2.0).sin() * u * recoil_mul;
             event.pitch -= 0.42 * wave;
             event.yaw += 0.24 * wave * sign;
         }
     }
 
-    fn get_arm_pose(&self, _: &dyn ClientHost, event: &mut GetArmPoseEvent<'_>) -> Option<ArmPose> {
+    fn get_arm_pose(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut GetArmPoseEvent<'_>,
+    ) -> Option<ArmPose> {
         let rifle = RIFLE_KEY.get().copied()?;
         let now = CLIENT_TICKS.load(Ordering::Relaxed);
         {
@@ -882,10 +1567,123 @@ impl Hooks for Mod {
             // Keep the off-hand arm relaxed at the player's side while the rifle is slung on the back.
             return Some(ArmPose::Empty);
         }
+
+        if event.hand == Hand::Main && event.stack.item() == rifle {
+            let local_id = LOCAL_ENTITY_ID.load(Ordering::Relaxed);
+            let is_local = local_id != 0 && event.entity_id == local_id;
+
+            let (reloading, lever_cycling, aiming_ads, sprinting) = if is_local {
+                let action = client_anim().lock().unwrap().action;
+                let rel = CLIENT_RELOADING.load(Ordering::Relaxed)
+                    || matches!(
+                        action,
+                        ActionAnim::ReloadIntro { .. }
+                            | ActionAnim::ReloadInsert { .. }
+                            | ActionAnim::ReloadEndNorm { .. }
+                            | ActionAnim::ReloadEndEmpty { .. }
+                    );
+                let cyc = matches!(
+                    action,
+                    ActionAnim::FireCycle {
+                        keep_uncocked: false,
+                        elapsed,
+                        ..
+                    } if elapsed >= LEVER_DELAY_SECS * 0.6
+                );
+                let ads = (AIMING.load(Ordering::Relaxed)
+                    || aim_progress() > 0.35
+                    || event.humanoid.use_hand == Some(Hand::Main))
+                    && !rel
+                    && !cyc;
+                let spr = CLIENT_SPRINTING.load(Ordering::Relaxed) && !ads && !rel;
+                (rel, cyc, ads, spr)
+            } else {
+                let remote = REMOTE_TP_STATES
+                    .lock()
+                    .unwrap()
+                    .get(&event.entity_id)
+                    .copied();
+                let rel = matches!(
+                    remote,
+                    Some(r) if r.state == TP_STATE_RELOADING && now.saturating_sub(r.set_tick) <= 120
+                );
+                let cyc = matches!(
+                    remote,
+                    Some(r) if r.state == TP_STATE_LEVER_CYCLE && now.saturating_sub(r.set_tick) <= 11
+                );
+                let ads = event.humanoid.use_hand == Some(Hand::Main) && !rel && !cyc;
+                let spr = !ads
+                    && !rel
+                    && host
+                        .entity(event.entity_id)
+                        .and_then(|e| e.velocity(host))
+                        .is_some_and(|[vx, _, vz]| vx * vx + vz * vz > 0.055);
+                (rel, cyc, ads, spr)
+            };
+
+            if reloading {
+                return POSE_RELOAD.get().copied().map(ArmPose::Custom);
+            }
+            if lever_cycling {
+                return POSE_LEVER_CYCLE.get().copied().map(ArmPose::Custom);
+            }
+            if aiming_ads {
+                return Some(ArmPose::CrossbowHold);
+            }
+            if sprinting {
+                return POSE_SPRINT_CARRY.get().copied().map(ArmPose::Custom);
+            }
+            return POSE_HIP_READY.get().copied().map(ArmPose::Custom);
+        }
         None
     }
 
-    fn render_player_post(&self, host: &dyn ClientHost, event: &mut RenderPlayerPostEvent<'_>) {
+    fn arm_pose_transform(&self, _: &dyn ClientHost, event: &mut ArmPoseTransformEvent<'_>) {
+        let left_handed = event.humanoid.main_arm_left;
+        let base_swing = if left_handed {
+            event.angles.left[0]
+        } else {
+            event.angles.right[0]
+        };
+        let stride = (base_swing * 0.14).clamp(-0.10, 0.10);
+        let t = (CLIENT_TICKS.load(Ordering::Relaxed) as f32) * 0.05;
+
+        let (main_rh, support_rh) = if POSE_RELOAD.get().copied() == Some(event.pose) {
+            let thumb = (t * 12.0).sin();
+            (
+                [-1.06 + 0.15 * thumb, -0.44 - 0.08 * thumb, -0.18],
+                [-1.14 + stride * 0.4, 0.58, -0.16],
+            )
+        } else if POSE_LEVER_CYCLE.get().copied() == Some(event.pose) {
+            let cycle = (t * 10.5).sin() * 0.5 + 0.5;
+            (
+                [-0.46 + 0.22 * cycle + stride * 0.5, -0.14, 0.12],
+                [-1.08 + stride * 0.5, 0.56, -0.10],
+            )
+        } else if POSE_SPRINT_CARRY.get().copied() == Some(event.pose) {
+            (
+                [-0.92 + stride * 1.4, -0.36, 0.14],
+                [-1.20 + stride * 1.4, 0.68, -0.14],
+            )
+        } else if POSE_HIP_READY.get().copied() == Some(event.pose) {
+            (
+                [-0.66 + stride, -0.16, 0.06],
+                [-1.00 + stride, 0.52, -0.08],
+            )
+        } else {
+            return;
+        };
+
+        if left_handed {
+            event.angles.left = [main_rh[0], -main_rh[1], -main_rh[2]];
+            event.angles.right = [support_rh[0], -support_rh[1], -support_rh[2]];
+        } else {
+            event.angles.right = main_rh;
+            event.angles.left = support_rh;
+        }
+    }
+
+    fn render_player_post(&self, _: &dyn ClientHost, event: &mut RenderPlayerPostEvent<'_>) {
         if event.player.death_time > 0 {
             return;
         }
@@ -909,17 +1707,28 @@ impl Hooks for Mod {
             .filter(|s| now.saturating_sub(s.last_tick) <= 4);
 
         let (hammer_uncocked, main_arm_left, back_z_tex) = if event.who.local {
-            if let Some((off_rounds, chest_armored)) = local_offhand_rifle_status(host) {
-                let left = cached.is_some_and(|s| s.main_arm_left);
-                let z_tex = if chest_armored {
-                    BACK_SLING_ARMOR_Z_TEX
-                } else {
-                    BACK_SLING_JACKET_Z_TEX
-                };
-                (off_rounds == 0, left, z_tex)
-            } else {
+            let packed = LOCAL_OFFHAND_PACKED.load(Ordering::Relaxed);
+            if packed == 0 {
                 return;
             }
+            let sling_style = client_settings().back_sling_style;
+            if sling_style == BackSlingStyle::Hidden {
+                return;
+            }
+            let chest_armored = (packed & 0b10) != 0;
+            let off_rounds = packed >> 2;
+            let raw_left = cached.is_some_and(|s| s.main_arm_left);
+            let left = if sling_style == BackSlingStyle::FlipShoulder {
+                !raw_left
+            } else {
+                raw_left
+            };
+            let z_tex = if chest_armored {
+                BACK_SLING_ARMOR_Z_TEX
+            } else {
+                BACK_SLING_JACKET_Z_TEX
+            };
+            (off_rounds == 0, left, z_tex)
         } else if let Some(state) = cached {
             (
                 state.hammer_uncocked,
@@ -976,7 +1785,7 @@ impl Hooks for Mod {
         ]);
 
         let hammer_deg = if hammer_uncocked { -34.0 } else { 0.0 };
-        let _ = draw_rifle_assembly(draw, models, 0.0, hammer_deg, 0.0, 0.0);
+        let _ = draw_back_sling_assembly(draw, models, hammer_deg);
         draw.pop();
     }
 
@@ -1045,6 +1854,7 @@ impl Hooks for Mod {
         };
 
         let equip = equip_raw.clamp(0.0, 1.0) * (1.0 - aim.clamp(0.0, 1.0));
+        let sway_mul = client_settings().weapon_sway_mul;
         let pose = evaluate_weapon_pose(
             aim,
             equip,
@@ -1056,6 +1866,7 @@ impl Hooks for Mod {
             walk_phase,
             walk_speed,
             idle_time,
+            sway_mul,
             hammer_uncocked,
             action,
         );
@@ -1193,7 +2004,8 @@ impl Hooks for Mod {
     /// Hide the vanilla HUD crosshair (`+` and crosshair attack indicator) while aiming down sights
     /// so the Winchester 1873 iron sights (`massa_lamina` + `alca_entalhe_base`) remain unobstructed.
     fn gui_layer_pre(&self, _: &dyn ClientHost, event: &mut GuiLayerPreEvent<'_>) -> Flow {
-        if (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
+        if client_settings().hide_crosshair_ads
+            && (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
             && (AIMING.load(Ordering::Relaxed)
                 || (holding_rifle_recently() && aim_progress() > 0.08))
         {
@@ -1206,13 +2018,14 @@ impl Hooks for Mod {
         if event.gui_hidden || !holding_rifle_recently() {
             return;
         }
+        let cfg = client_settings();
         let aim = aim_progress().clamp(0.0, 1.0);
         let [wf, hf] = event.batch.size();
         let (w, h) = (wf as i32, hf as i32);
 
-        if aim >= 0.02 {
-            let brightness =
-                ((1.0 - (1.0 - AIM_VIGNETTE) * aim) * 255.0).clamp(0.0, 255.0) as u32;
+        if aim >= 0.02 && cfg.ads_vignette_mul > 0.01 {
+            let darken = ((1.0 - AIM_VIGNETTE) * cfg.ads_vignette_mul * aim).clamp(0.0, 0.85);
+            let brightness = ((1.0 - darken) * 255.0).clamp(0.0, 255.0) as u32;
             let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
             let _ = event.batch.gui_paint(&[GuiDraw::Blit {
                 texture: "misc/vignette".into(),
@@ -1228,7 +2041,48 @@ impl Hooks for Mod {
             }]);
         }
 
-        // Compact western brass ammo counter to the right of the hotbar (`8 / 8`).
+        // Optional subtle brass hitmarker (or crimson-gold double tick on 1.5x headshots!).
+        let hit_rem = f32::from_bits(HITMARKER_TIMER_BITS.load(Ordering::Relaxed));
+        if cfg.hud_hitmarker && hit_rem > 0.001 {
+            let is_headshot = HEADSHOT_HITMARKER.load(Ordering::Relaxed);
+            let dur = if is_headshot { 0.22_f32 } else { 0.14_f32 };
+            let alpha = ((hit_rem / dur).clamp(0.0, 1.0) * 235.0) as u32;
+            let rgb = if is_headshot {
+                0xFF_6A_4D
+            } else {
+                cfg.hud_accent_color & 0xFF_FFFF
+            };
+            let hm_color = (alpha << 24) | rgb;
+            let cx = wf * 0.5;
+            let cy = hf * 0.5;
+            for step in 2..=5 {
+                let d = step as f32;
+                event.batch.fill([cx - d - 0.5, cy - d - 0.5, 1.2, 1.2], hm_color);
+                event.batch.fill([cx + d - 0.7, cy - d - 0.5, 1.2, 1.2], hm_color);
+                event.batch.fill([cx - d - 0.5, cy + d - 0.7, 1.2, 1.2], hm_color);
+                event.batch.fill([cx + d - 0.7, cy + d - 0.7, 1.2, 1.2], hm_color);
+            }
+            if is_headshot {
+                let gold_color = ((alpha * 4 / 5) << 24) | 0xFF_DF_78;
+                for step in 6..=7 {
+                    let d = step as f32;
+                    event
+                        .batch
+                        .fill([cx - d - 0.5, cy - d - 0.5, 1.3, 1.3], gold_color);
+                    event
+                        .batch
+                        .fill([cx + d - 0.8, cy - d - 0.5, 1.3, 1.3], gold_color);
+                    event
+                        .batch
+                        .fill([cx - d - 0.5, cy + d - 0.8, 1.3, 1.3], gold_color);
+                    event
+                        .batch
+                        .fill([cx + d - 0.8, cy + d - 0.8, 1.3, 1.3], gold_color);
+                }
+            }
+        }
+
+        // Configurable western brass ammo counter (`8 / 8` + optional `.44-40` reserve with mini icon).
         let (rounds_now, reloading) = {
             let anim = client_anim().lock().unwrap();
             (
@@ -1236,34 +2090,87 @@ impl Hooks for Mod {
                 CLIENT_RELOADING.load(Ordering::Relaxed),
             )
         };
-        let box_w = 52.0_f32;
-        let box_h = 15.0_f32;
-        let x0 = (wf * 0.5 + 98.0).min(wf - box_w - 6.0);
-        let y0 = hf - 19.0;
-        let border = if reloading {
-            0xCC_E3_B3_4C
-        } else if rounds_now == 0 {
-            0xCC_C9_4A_38
-        } else {
-            0xAA_8C_6D_3F
-        };
-        event.batch.fill([x0, y0, box_w, box_h], 0x92_14_11_0E);
-        event.batch.fill([x0, y0, box_w, 1.0], border);
-        event.batch.fill([x0, y0 + box_h - 1.0, box_w, 1.0], border);
-
         let label = if reloading {
             format!("{rounds_now}/{TUBE_CAPACITY}+")
         } else {
             format!("{rounds_now} / {TUBE_CAPACITY}")
         };
-        let tw = event.batch.text_width(&label);
+        let mag_tw = event.batch.text_width(&label);
+
+        let show_res = cfg.hud_show_reserve;
+        let reserve = LOCAL_RESERVE_AMMO.load(Ordering::Relaxed);
+        let res_label = if show_res {
+            if reserve == u32::MAX {
+                "∞".to_string()
+            } else {
+                reserve.min(9999).to_string()
+            }
+        } else {
+            String::new()
+        };
+        let res_tw = if show_res {
+            event.batch.text_width(&res_label)
+        } else {
+            0.0
+        };
+
+        let left_w = (mag_tw + 12.0).max(46.0);
+        let right_w = if show_res {
+            (13.0 + res_tw + 6.0).max(26.0)
+        } else {
+            0.0
+        };
+        let box_w = if show_res {
+            left_w + 1.0 + right_w
+        } else {
+            52.0_f32.max(left_w)
+        };
+        let box_h = 15.0_f32;
+        let Some([x0, y0]) = cfg.hud_position.layout(wf, hf, box_w, box_h) else {
+            return;
+        };
+
+        let accent = cfg.hud_accent_color & 0xFF_FFFF;
+        let border = if reloading {
+            0xDD00_0000 | accent
+        } else if rounds_now == 0 {
+            0xCC_C9_4A_38
+        } else {
+            0xAE00_0000 | accent
+        };
+        event.batch.fill([x0, y0, box_w, box_h], 0x92_14_11_0E);
+        event.batch.fill([x0, y0, box_w, 1.0], border);
+        event.batch.fill([x0, y0 + box_h - 1.0, box_w, 1.0], border);
+
         let text_color = if rounds_now == 0 && !reloading {
             0xFF_FF_6E_59
         } else {
             0xFF_F5_E6_C8
         };
-        event
-            .batch
-            .text(&label, [x0 + (box_w - tw) * 0.5, y0 + 4.0], text_color, true);
+        let mag_area_w = if show_res { left_w } else { box_w };
+        event.batch.text(
+            &label,
+            [x0 + (mag_area_w - mag_tw) * 0.5, y0 + 4.0],
+            text_color,
+            true,
+        );
+
+        if show_res {
+            let div_x = x0 + left_w;
+            event
+                .batch
+                .fill([div_x, y0 + 2.5, 1.0, box_h - 5.0], 0x6600_0000 | accent);
+            draw_hud_mini_cartridge(event, div_x + 5.0, y0 + 3.0);
+            let res_color = if reserve == u32::MAX {
+                0xFF_FF_E0_82
+            } else if reserve == 0 {
+                0xFF_D9_6B_59
+            } else {
+                0xFF_D8_CB_B2
+            };
+            event
+                .batch
+                .text(&res_label, [div_x + 12.0, y0 + 4.0], res_color, true);
+        }
     }
 }

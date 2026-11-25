@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:bell_ringer",
+  "display": {
+    "icon": {
+      "id": "minecraft:target",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.deadeye_bullseye.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.deadeye_bullseye.description"
+    },
+    "frame": "challenge",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "bullseye_50m": {
+      "trigger": "just_a_rifle:deadeye_bullseye"
+    }
+  },
+  "rewards": {
+    "experience": 100
+  }
+}

@@ -10,6 +10,7 @@ pub(crate) const CARTRIDGE: &str = "just_a_rifle:cartridge_44";
 pub(crate) const BULLET: &str = "just_a_rifle:bullet";
 
 pub(crate) const MODEL_BODY_ID: &str = "just_a_rifle:special/winchester_body";
+pub(crate) const MODEL_BODY_LOD_ID: &str = "just_a_rifle:special/winchester_body_lod";
 pub(crate) const MODEL_LEVER_ID: &str = "just_a_rifle:special/winchester_lever";
 pub(crate) const MODEL_HAMMER_ID: &str = "just_a_rifle:special/winchester_hammer";
 pub(crate) const MODEL_TRIGGER_ID: &str = "just_a_rifle:special/winchester_trigger";
@@ -28,7 +29,19 @@ pub(crate) const SND_RELOAD_END: &str = "just_a_rifle:animation.winchester_reloa
 pub(crate) const SND_DRAW: &str = "just_a_rifle:animation.winchester_draw";
 pub(crate) const SND_INSPECT: &str = "just_a_rifle:animation.winchester_inspect";
 pub(crate) const SND_SHELL_DROP: &str = "just_a_rifle:item.winchester_shell_drop";
+pub(crate) const SND_MISFIRE_WET: &str = "just_a_rifle:item.winchester_misfire_wet";
 pub(crate) const SND_IMPACT_HIT: &str = "minecraft:block.stone.hit";
+pub(crate) const SND_RICOCHET_METAL_HEAVY: &str = "minecraft:block.chain.break";
+pub(crate) const SND_RICOCHET_METAL_SHEET: &str = "minecraft:block.lantern.break";
+pub(crate) const SND_RICOCHET_STONE_CHIP: &str = "minecraft:block.chain.hit";
+pub(crate) const SND_CRYSTAL_CHIME: &str = "minecraft:block.amethyst_block.chime";
+pub(crate) const SND_BELL_USE: &str = "minecraft:block.bell.use";
+pub(crate) const SND_TARGET_BULLSEYE: &str = "minecraft:block.note_block.chime";
+pub(crate) const SND_CANDLE_EXTINGUISH: &str = "minecraft:block.candle.extinguish";
+pub(crate) const SND_WATER_SPLASH: &str = "minecraft:entity.fishing_bobber.splash";
+pub(crate) const SND_WATER_BUBBLES: &str = "minecraft:block.bubble_column.upwards_inside";
+pub(crate) const SND_HIT_CONFIRM_SUBTLE: &str = "minecraft:entity.arrow.hit";
+pub(crate) const SND_HIT_CONFIRM_CHIME: &str = "minecraft:block.note_block.bell";
 
 pub(crate) const RELOAD_MAPPING: &str = "reload";
 pub(crate) const INSPECT_MAPPING: &str = "inspect";
@@ -38,21 +51,66 @@ pub(crate) const INPUT_CHANNEL: &str = "just_a_rifle:rifle_input";
 pub(crate) const SYNC_CHANNEL: &str = "just_a_rifle:rifle_sync";
 pub(crate) const SKIN_CHANNEL: &str = "just_a_rifle:rifle_skin";
 pub(crate) const IMPACT_CHANNEL: &str = "just_a_rifle:bullet_impact";
+pub(crate) const TP_STATE_CHANNEL: &str = "just_a_rifle:rifle_tp_state";
+
+pub(crate) const POSE_HIP_READY_ID: &str = "just_a_rifle:hip_ready";
+pub(crate) const POSE_SPRINT_CARRY_ID: &str = "just_a_rifle:sprint_carry";
+pub(crate) const POSE_LEVER_CYCLE_ID: &str = "just_a_rifle:lever_cycle";
+pub(crate) const POSE_RELOAD_ID: &str = "just_a_rifle:reload";
 
 pub(crate) const SMOKE_PARTICLE: &str = "minecraft:smoke";
 pub(crate) const WHITE_SMOKE_PARTICLE: &str = "minecraft:white_smoke";
 pub(crate) const FLAME_PARTICLE: &str = "minecraft:small_flame";
 pub(crate) const POOF_PARTICLE: &str = "minecraft:poof";
+pub(crate) const CRIT_PARTICLE: &str = "minecraft:crit";
 pub(crate) const BLOCK_PARTICLE: &str = "minecraft:block";
+pub(crate) const BUBBLE_PARTICLE: &str = "minecraft:bubble";
+pub(crate) const BUBBLE_POP_PARTICLE: &str = "minecraft:bubble_pop";
+pub(crate) const SPLASH_PARTICLE: &str = "minecraft:splash";
+pub(crate) const WATER_FLUID: &str = "minecraft:water";
+pub(crate) const FLOWING_WATER_FLUID: &str = "minecraft:flowing_water";
+pub(crate) const BELL_BLOCK: &str = "minecraft:bell";
+pub(crate) const TARGET_BLOCK: &str = "minecraft:target";
+pub(crate) const DECORATED_POT_BLOCK: &str = "minecraft:decorated_pot";
+pub(crate) const CHORUS_FLOWER_BLOCK: &str = "minecraft:chorus_flower";
+pub(crate) const POINTED_DRIPSTONE_BLOCK: &str = "minecraft:pointed_dripstone";
+pub(crate) const TAG_FLOWER_POTS: &str = "minecraft:flower_pots";
+pub(crate) const TAG_CANDLES: &str = "minecraft:candles";
+pub(crate) const GAME_EVENT_BLOCK_CHANGE: &str = "minecraft:block_change";
+pub(crate) const RULE_PROJECTILES_BREAK_BLOCKS: &str = "projectiles_can_break_blocks";
+pub(crate) const RULE_BLOCK_DROPS: &str = "block_drops";
 pub(crate) const DEFAULT_DIMENSION: &str = "minecraft:overworld";
+
+pub(crate) const LOOT_ABANDONED_MINESHAFT: &str = "minecraft:chests/abandoned_mineshaft";
+pub(crate) const LOOT_PILLAGER_OUTPOST: &str = "minecraft:chests/pillager_outpost";
+pub(crate) const LOOT_WOODLAND_MANSION: &str = "minecraft:chests/woodland_mansion";
+pub(crate) const LOOT_SIMPLE_DUNGEON: &str = "minecraft:chests/simple_dungeon";
+pub(crate) const LOOT_DESERT_PYRAMID: &str = "minecraft:chests/desert_pyramid";
+
+pub(crate) const TRIG_FRONTIER_RELIC: &str = "just_a_rifle:frontier_relic";
+pub(crate) const TRIG_FULL_TUBE: &str = "just_a_rifle:full_tube";
+pub(crate) const TRIG_WET_POWDER: &str = "just_a_rifle:wet_powder";
+pub(crate) const TRIG_BELL_RINGER: &str = "just_a_rifle:bell_ringer";
+pub(crate) const TRIG_CANDLE_SNUFFER: &str = "just_a_rifle:candle_snuffer";
+pub(crate) const TRIG_DEADEYE: &str = "just_a_rifle:deadeye_bullseye";
+pub(crate) const TRIG_SHERIFF: &str = "just_a_rifle:sheriff";
+pub(crate) const TRIG_LONG_SHOT: &str = "just_a_rifle:long_shot";
+pub(crate) const TRIG_BETWEEN_THE_EYES: &str = "just_a_rifle:between_the_eyes";
+
+pub(crate) const ADV_BELL_MIN_DIST: f64 = 30.0;
+pub(crate) const ADV_DEADEYE_MIN_DIST: f64 = 50.0;
+pub(crate) const ADV_LONG_SHOT_MIN_DIST: f64 = 60.0;
 
 pub(crate) const MAX_BULLET_HOLES: usize = 96;
 pub(crate) const BULLET_HOLE_LIFETIME_SECS: f32 = 35.0;
 pub(crate) const BULLET_HOLE_BASE_SCALE: f32 = 0.44;
+pub(crate) const BULLET_HOLE_MIN_FACE_SPAN: f64 = 0.36;
 pub(crate) const MAX_SPENT_CASINGS: usize = 48;
 pub(crate) const CASING_LIFETIME_SECS: f32 = 20.0;
 pub(crate) const CASING_BASE_SCALE: f32 = 0.64;
 pub(crate) const CASING_REST_RADIUS: f64 = 0.012;
+pub(crate) const CASING_WATER_GRAVITY: f64 = 3.2;
+pub(crate) const CASING_WATER_MAX_SINK: f64 = -1.15;
 pub(crate) const CASING_RISE_START_SECS: f32 = LEVER_DELAY_SECS + 0.06;
 pub(crate) const CASING_HANDOFF_SECS: f32 = LEVER_DELAY_SECS + 0.16;
 pub(crate) const CASING_LAST_RISE_START_SECS: f32 = 0.06;
@@ -76,6 +134,14 @@ pub(crate) const SYNC_SHELL_INSERTED: i32 = 4;
 pub(crate) const SYNC_RELOAD_END_NORM: i32 = 5;
 pub(crate) const SYNC_RELOAD_END_EMPTY: i32 = 6;
 pub(crate) const SYNC_RELOAD_ABORTED: i32 = 7;
+pub(crate) const SYNC_WET_MISFIRE: i32 = 8;
+pub(crate) const SYNC_HIT_CONFIRM: i32 = 9;
+pub(crate) const SYNC_HEADSHOT_CONFIRM: i32 = 10;
+
+pub(crate) const TP_STATE_IDLE: i32 = 0;
+pub(crate) const TP_STATE_RELOADING: i32 = 1;
+pub(crate) const TP_STATE_LEVER_CYCLE: i32 = 2;
+pub(crate) const TP_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters
@@ -104,6 +170,11 @@ pub(crate) const INSPECT_DURATION_SECS: f32 = 3.40;
 
 /// Projectile speed (`blocks / tick` -> `300 m/s` at 20 TPS) and stance spread (`degrees`).
 pub(crate) const BULLET_SPEED: f32 = 15.0;
+/// Maximum underwater travel (`blocks`) on the tick a `300 m/s` `.44-40` lead slug crosses
+/// from air into water, followed by strong quadratic/exponential hydrodynamic drag (`~3.4m` total).
+pub(crate) const WATER_FIRST_TICK_PENETRATION: f64 = 2.10;
+pub(crate) const WATER_BULLET_DRAG: f64 = 0.42;
+pub(crate) const WATER_BULLET_STOP_SPEED: f64 = 0.18;
 pub(crate) const SPREAD_ADS_CROUCH: f32 = 0.04;
 pub(crate) const SPREAD_ADS_STAND: f32 = 0.06;
 pub(crate) const SPREAD_ADS_MOVING: f32 = 0.12;

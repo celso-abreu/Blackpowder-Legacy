@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:root",
+  "display": {
+    "icon": {
+      "id": "minecraft:chest_minecart",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.frontier_relic.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.frontier_relic.description"
+    },
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "found_relic": {
+      "trigger": "just_a_rifle:frontier_relic"
+    }
+  },
+  "rewards": {
+    "experience": 50
+  }
+}

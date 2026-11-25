@@ -25,6 +25,7 @@ pub(crate) struct SlungRifleState {
 #[derive(Clone, Copy)]
 pub(crate) struct RifleModels {
     pub(crate) body: ModelRef,
+    pub(crate) body_lod: ModelRef,
     pub(crate) lever: ModelRef,
     pub(crate) hammer: ModelRef,
     pub(crate) trigger: ModelRef,
@@ -267,6 +268,7 @@ pub(crate) fn evaluate_weapon_pose(
     walk_phase: f32,
     walk_speed: f32,
     idle_time: f32,
+    sway_mul: f32,
     hammer_uncocked: bool,
     action: ActionAnim,
 ) -> WeaponPose {
@@ -282,8 +284,8 @@ pub(crate) fn evaluate_weapon_pose(
     ];
     let mut gun_rot = [0.0, 0.0, 3.2 * hip];
 
-    // Subtle idle breathing + walk Lissajous bobbing (damped 88% in ADS).
-    let sway_scale = 0.12 + 0.88 * hip;
+    // Subtle idle breathing + walk Lissajous bobbing (damped 88% in ADS, scaled by player config).
+    let sway_scale = (0.12 + 0.88 * hip) * sway_mul.clamp(0.0, 2.0);
     gun_trans[0] += walk_phase.cos() * 0.013 * walk_speed * sway_scale;
     gun_trans[1] += (idle_time * 1.75).sin() * 0.0025 * sway_scale
         - (walk_phase * 2.0).sin().abs() * 0.011 * walk_speed * sway_scale;
@@ -655,8 +657,8 @@ pub(crate) fn draw_gun_space_arm(
 }
 
 /// Draws the 5-part articulated Winchester 1873 (`body` + `lever` + `hammer` + `trigger` + `gate`)
-/// inside `[0..1]` unit-block rifle model space (`1` unit = `16` JSON texels). Shared by both
-/// 1st-person `render_hand` and 3rd-person diagonal back-sling `render_player_post`.
+/// inside `[0..1]` unit-block rifle model space (`1` unit = `16` JSON texels) for 1st-person
+/// `render_hand`. Skips `push` / `rotate_about` / `pop` WASM calls for parts at rest (`0°`).
 pub(crate) fn draw_rifle_assembly(
     draw: &mut dyn BlockEntityDrawContext,
     models: RifleModels,
@@ -669,26 +671,63 @@ pub(crate) fn draw_rifle_assembly(
         return false;
     }
 
-    draw.push();
-    draw.rotate_about([1.0, 0.0, 0.0], lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
-    let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
-    draw.pop();
+    if lever_deg.abs() < 1e-4 {
+        let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
+    } else {
+        draw.push();
+        draw.rotate_about([1.0, 0.0, 0.0], lever_deg, tex_to_unit(LEVER_PIVOT_TEX));
+        let _ = draw.model(models.lever, 0xFF_FF_FF_FF);
+        draw.pop();
+    }
 
-    draw.push();
-    draw.rotate_about([1.0, 0.0, 0.0], hammer_deg, tex_to_unit(HAMMER_PIVOT_TEX));
-    let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
-    draw.pop();
+    if hammer_deg.abs() < 1e-4 {
+        let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+    } else {
+        draw.push();
+        draw.rotate_about([1.0, 0.0, 0.0], hammer_deg, tex_to_unit(HAMMER_PIVOT_TEX));
+        let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+        draw.pop();
+    }
 
-    draw.push();
-    draw.rotate_about([1.0, 0.0, 0.0], trigger_deg, tex_to_unit(TRIGGER_PIVOT_TEX));
-    let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
-    draw.pop();
+    if trigger_deg.abs() < 1e-4 {
+        let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
+    } else {
+        draw.push();
+        draw.rotate_about([1.0, 0.0, 0.0], trigger_deg, tex_to_unit(TRIGGER_PIVOT_TEX));
+        let _ = draw.model(models.trigger, 0xFF_FF_FF_FF);
+        draw.pop();
+    }
 
-    draw.push();
-    draw.rotate_about([0.0, 1.0, 0.0], gate_deg, tex_to_unit(GATE_PIVOT_TEX));
-    let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
-    draw.pop();
+    if gate_deg.abs() < 1e-4 {
+        let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
+    } else {
+        draw.push();
+        draw.rotate_about([0.0, 1.0, 0.0], gate_deg, tex_to_unit(GATE_PIVOT_TEX));
+        let _ = draw.model(models.gate, 0xFF_FF_FF_FF);
+        draw.pop();
+    }
 
+    true
+}
+
+/// Lightweight 3rd-person / multiplayer back-sling assembly (`247` faces vs `2,016`, `8.2×` lighter)
+/// preserving exact silhouette, wood/steel UVs, lever loop, sights, and cocked/uncocked hammer pose.
+pub(crate) fn draw_back_sling_assembly(
+    draw: &mut dyn BlockEntityDrawContext,
+    models: RifleModels,
+    hammer_deg: f32,
+) -> bool {
+    if draw.model(models.body_lod, 0xFF_FF_FF_FF).is_err() {
+        return false;
+    }
+    if hammer_deg.abs() < 1e-4 {
+        let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+    } else {
+        draw.push();
+        draw.rotate_about([1.0, 0.0, 0.0], hammer_deg, tex_to_unit(HAMMER_PIVOT_TEX));
+        let _ = draw.model(models.hammer, 0xFF_FF_FF_FF);
+        draw.pop();
+    }
     true
 }
 
@@ -875,6 +914,7 @@ mod tests {
             0.0,
             0.0,
             0.0,
+            1.0,
             false,
             ActionAnim::None,
         );

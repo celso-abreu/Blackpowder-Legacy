@@ -4,6 +4,29 @@ Histórico consolidado de evolução do mod (anteriormente *Blackpowder Legacy*,
 
 ---
 
+## `v0.10.0` — Balística `.44-40` & Headshots, Poses 3D em `F5`/Multiplayer, HUD de Reserva, Tooltips Inteligentes, LOD 3D, Água, Alvos Reativos, Config (31 Opções) e Conquistas
+
+### Balística Terminal `.44-40` & Headshots (`src/ballistics.rs`)
+- **Dano base `.44-40` elevado para `14.0` (`7` corações) + Headshot `1,5×` (`21.0` = `10,5` corações):** interseção geométrica 3D sub-tick raio-AABB (`is_ray_headshot_on_box`) compensa projéteis rápidos (`15,0` blocos/tick = `300 m/s`), garantindo abate limpo em 1 disparo na cabeça em Esqueletos, Zumbis, Creepers e Aranhas (`20 HP`) mesmo a `50 m`.
+- **Queda suave de dano em longo alcance (`> 40 m`):** curva Hermite (`smoothstep`) aplicada em `Hooks::living_damage_pre`, mantendo `1,00×` até `40 m` e decaindo suavemente até `0,72×` acima de `110 m`.
+- **Feedback de Headshot & 13ª Conquista:** explosão cranial de partículas `minecraft:crit`, confirmação harmônica dupla no cliente (`SYNC_HEADSHOT_CONFIRM`), marcador visual duplo carmesim-dourado no HUD e conquista **`Bem Entre os Olhos` / `Between the Eyes`** (`just_a_rifle:between_the_eyes`, `goal`, `65 XP`).
+
+### HUD de Reserva `.44-40` & Tooltips Inteligentes (`Hooks::item_tooltip`)
+- **Contador de reserva com mini-ícone `.44-40`:** o painel ocidental no HUD (`8 / 8 │ [ícone .44-40] 36`) contabiliza em cache de `20 Hz` todos os cartuchos `.44-40` no inventário principal + mão secundária, exibindo **`∞`** dourado no modo Criativo (configurável em `hud.show_reserve`).
+- **Tooltips dinâmicos (`en_us` / `pt_br`) sem durabilidade crua:** `Hooks::item_tooltip` oculta a linha enganosa `"item.durability"` (`92 / 100`) do `F3+H` em qualquer idioma e exibe munição no tubo + reserva, dados balísticos (`14 Dano / 21 Cabeça · 120 DPM · Queda >40m`) e **as teclas atuais remapeadas ao vivo** (`[Botão Direito]`, `[R]`, `[I]`, `[F]`) via `host.mod_key` e `TextContent::Keybind` (configurável em `hud.rich_tooltips`).
+
+### Poses Dinâmicas de Braços em 3ª Pessoa (`F5` & Multiplayer)
+- **4 poses customizadas de duas mãos (`ArmPosesRegistrar`) + sincronização `RifleThirdPersonSync`:** jogadores em `F5` e jogadores remotos no multiplayer alternam naturalmente entre porte baixo de duas mãos em repouso (`hip_ready`), guarda cruzada ao correr (`sprint_carry`), mira alinhada à cabeça `[head.xRot, head.yRot]` no ADS (`CrossbowHold`), acionamento da alavanca pós-disparo (`lever_cycle`), recarga tiro a tiro na janela lateral (`reload`) e braço livre com rifle na bandoleira das costas (`ArmPose::Empty`), com espelhamento completo para canhotos.
+
+### Identidade do Pacote, Config de 31 Opções, Exploração, Água, Alvos Reativos & Performance LOD 3D
+- **Ícone oficial `icon.png` (`256×256`) & Manifesto completo:** emblema ocidental em latão renderizado deterministicamente (`tools/make_textures.py`, `< 35 KiB`) a partir do modelo 3D real da Winchester 1873 + cartucho `.44-40`, além de `homepage`, `issues` e `credits` preenchidos em `horizon-mod.toml`.
+- **Página `Options > Mods > Just a Rifle > Config` com 31 opções categorizadas:** organizada visualmente em `[Áudio]`, `[Retorno]`, `[Controles]`, `[Câmera]`, `[HUD]` e `[Mundo]`.
+- **Exploração & 13 Conquistas:** injeção determinística via `Hooks::container_loot_filled` (zero conflito com outros mods) em Minas Abandonadas, Postos de Saqueadores, Mansões, Dungeons e Pirâmides, acompanhada de árvore completa com **13 conquistas** e recompensas de XP.
+- **Comportamento na Água & Alvos Reativos no Mundo:** falha úmida de pólvora negra submersa (`winchester_misfire_wet`) sem gastar munição, arrasto hidrodinâmico + rastro de bolhas em projéteis, sinos badalando à distância, carrilhão musical na mosca (`15`) do `minecraft:target`, apagamento de velas acesas no tiro e estilhaçamento de vidraças, vasos e estalactites.
+- **LOD 3D & Otimização WASM:** malhas dedicadas de 40 elementos (`winchester_1873_lod` e `winchester_body_lod`) eliminando travamentos de BSP na GUI/inventário, remoção lossless de faces internas ocultas (`-22%` quads em 1ª pessoa) e caches `20 Hz` na fronteira WASM.
+
+---
+
 ## `v0.9.0` — Rebrand para *Just a Rifle*, Rig Articulado, Efeitos Físicos e Modularização
 
 ### Identidade & Arquitetura

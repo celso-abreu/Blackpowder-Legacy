@@ -1,0 +1,47 @@
+{
+  "display": {
+    "icon": {
+      "id": "just_a_rifle:cartridge_44",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.root.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.root.description"
+    },
+    "background": "minecraft:gui/advancements/backgrounds/adventure",
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false,
+    "hidden": false
+  },
+  "criteria": {
+    "has_cartridge": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "just_a_rifle:cartridge_44"
+          }
+        ]
+      }
+    },
+    "has_rifle": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": "just_a_rifle:winchester_1873"
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "has_cartridge",
+      "has_rifle"
+    ]
+  ]
+}

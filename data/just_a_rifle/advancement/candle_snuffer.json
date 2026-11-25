@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:bell_ringer",
+  "display": {
+    "icon": {
+      "id": "minecraft:candle",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.candle_snuffer.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.candle_snuffer.description"
+    },
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "snuffed_candle": {
+      "trigger": "just_a_rifle:candle_snuffer"
+    }
+  },
+  "rewards": {
+    "experience": 50
+  }
+}

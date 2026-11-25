@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:full_tube",
+  "display": {
+    "icon": {
+      "id": "minecraft:spyglass",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.long_shot.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.long_shot.description"
+    },
+    "frame": "challenge",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "long_range_kill": {
+      "trigger": "just_a_rifle:long_shot"
+    }
+  },
+  "rewards": {
+    "experience": 100
+  }
+}
