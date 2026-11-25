@@ -36,8 +36,9 @@ use mod_api::{
     LevelTickPostEvent, LivingDamagePreEvent, LivingDeathEvent, ModelBakingCompletedEvent,
     ParticleKey, ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent,
     Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent,
-    ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundSource,
-    StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer, VarInt,
+    ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundRef,
+    SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer,
+    VarInt,
 };
 use mod_api::text::TextContent;
 
@@ -134,6 +135,13 @@ pub(crate) struct RifleThirdPersonSync {
 struct RemoteTpState {
     state: i32,
     set_tick: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionSoundTag {
+    Draw,
+    Inspect,
+    Reload,
 }
 
 // ---------------------------------------------------------------------------
@@ -287,30 +295,131 @@ fn refresh_rifle_models(host: &dyn ClientHost) {
     *RIFLE_MODELS.lock().unwrap() = resolve_rifle_models(host);
 }
 
+static ACTIVE_ACTION_SOUND: Mutex<Option<(ActionSoundTag, SoundRef)>> = Mutex::new(None);
+static REMOTE_ACTION_SOUNDS: Mutex<BTreeMap<u32, SoundRef>> = Mutex::new(BTreeMap::new());
+
+fn stop_or_fade_sound(host: &dyn ClientHost, sound: SoundRef, fade_ticks: u32) {
+    if fade_ticks == 0 {
+        let _ = sound.stop(host);
+    } else {
+        let _ = sound.fade(host, 0.0, fade_ticks);
+    }
+}
+
+fn cancel_action_sound(host: &dyn ClientHost, filter: Option<ActionSoundTag>, fade_ticks: u32) {
+    let prev = {
+        let mut slot = ACTIVE_ACTION_SOUND.lock().unwrap();
+        match *slot {
+            Some((tag, sref)) if filter.is_none_or(|want| want == tag) => {
+                *slot = None;
+                Some(sref)
+            }
+            _ => None,
+        }
+    };
+    if let Some(sref) = prev {
+        stop_or_fade_sound(host, sref, fade_ticks);
+    }
+}
+
+fn clear_all_tracked_sounds(host: &dyn ClientHost) {
+    cancel_action_sound(host, None, 0);
+    let remotes: Vec<SoundRef> = core::mem::take(&mut *REMOTE_ACTION_SOUNDS.lock().unwrap())
+        .into_values()
+        .collect();
+    for sref in remotes {
+        let _ = sref.stop(host);
+    }
+}
+
+fn client_pitch_jitter(salt: u64) -> f32 {
+    let mut h = CLIENT_TICKS
+        .load(Ordering::Relaxed)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(salt.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    h ^= h >> 30;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h >> 27;
+    (((h & 0xFFFF) as f32) * (1.0 / 32_767.5) - 1.0).clamp(-1.0, 1.0)
+}
+
 pub(crate) fn play_local_foley_channel(
     host: &dyn ClientHost,
     channel: SoundChannel,
     event_id: &str,
     volume: f32,
     pitch: f32,
-) {
+) -> Option<SoundRef> {
     let cfg = client_settings();
-    let Some((vol, pit)) = mix_client_sound(&cfg, channel, volume, pitch) else {
-        return;
-    };
+    let (vol, pit) = mix_client_sound(&cfg, channel, volume, pitch)?;
     let mut sound = SoundPlay::ui(event_id).with_volume(vol).with_pitch(pit);
     sound.source = SoundSource::Players;
-    let _ = host.play_local_sound(&sound, 0);
+    host.play_local_sound(&sound, 0)
 }
 
-pub(crate) fn play_local_foley(host: &dyn ClientHost, event_id: &str, volume: f32, pitch: f32) {
+pub(crate) fn play_local_foley(
+    host: &dyn ClientHost,
+    event_id: &str,
+    volume: f32,
+    pitch: f32,
+) -> Option<SoundRef> {
     play_local_foley_channel(
         host,
         default_channel_for_local_sound(event_id),
         event_id,
         volume,
         pitch,
-    );
+    )
+}
+
+fn play_tracked_action_sound(
+    host: &dyn ClientHost,
+    tag: ActionSoundTag,
+    channel: SoundChannel,
+    event_id: &str,
+    volume: f32,
+    pitch: f32,
+) {
+    cancel_action_sound(host, None, 2);
+    if let Some(sref) = play_local_foley_channel(host, channel, event_id, volume, pitch) {
+        *ACTIVE_ACTION_SOUND.lock().unwrap() = Some((tag, sref));
+    }
+}
+
+pub(crate) fn play_local_positional_channel(
+    host: &dyn ClientHost,
+    channel: SoundChannel,
+    event_id: &str,
+    position: [f64; 3],
+    volume: f32,
+    pitch: f32,
+    after_ticks: u32,
+) -> Option<SoundRef> {
+    let cfg = client_settings();
+    let (vol, pit) = mix_client_sound(&cfg, channel, volume, pitch)?;
+    let sound = SoundPlay::at(event_id, SoundSource::Players, position)
+        .with_volume(vol)
+        .with_pitch(pit);
+    host.play_local_sound(&sound, after_ticks)
+}
+
+pub(crate) fn play_local_positional_foley(
+    host: &dyn ClientHost,
+    event_id: &str,
+    position: [f64; 3],
+    volume: f32,
+    pitch: f32,
+    after_ticks: u32,
+) -> Option<SoundRef> {
+    play_local_positional_channel(
+        host,
+        default_channel_for_local_sound(event_id),
+        event_id,
+        position,
+        volume,
+        pitch,
+        after_ticks,
+    )
 }
 
 fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
@@ -326,14 +435,14 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
             && let Ok(host) = cx.client_host()
         {
             if is_headshot {
-                play_local_foley_channel(
+                let _ = play_local_foley_channel(
                     host,
                     SoundChannel::Feedback,
                     snd,
                     (vol * 1.18).min(1.0),
                     (pitch * 1.18).min(2.0),
                 );
-                play_local_foley_channel(
+                let _ = play_local_foley_channel(
                     host,
                     SoundChannel::Feedback,
                     SND_HIT_CONFIRM_CHIME,
@@ -341,65 +450,94 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
                     1.82,
                 );
             } else {
-                play_local_foley_channel(host, SoundChannel::Feedback, snd, vol, pitch);
+                let _ = play_local_foley_channel(host, SoundChannel::Feedback, snd, vol, pitch);
             }
         }
         return Ok(());
     }
 
     let rounds_now = (value.rounds.0.max(0) as u32).min(TUBE_CAPACITY);
-    let mut foley: Option<(SoundChannel, &'static str, f32, f32)> = None;
+    let mut tracked_foley: Option<(ActionSoundTag, SoundChannel, &'static str, f32, f32)> = None;
+    let mut oneshot_foley: Option<(SoundChannel, &'static str, f32, f32)> = None;
+    let mut stop_tracked = false;
 
     {
         let mut anim = client_anim().lock().unwrap();
         anim.known_rounds = rounds_now;
+        let j = client_pitch_jitter(u64::from(rounds_now) + (value.kind.0 as u64) * 31);
         match value.kind.0 {
             SYNC_SHOT => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                stop_tracked = true;
                 anim.on_shot(rounds_now);
             }
             SYNC_DRY_CLICK => {
+                stop_tracked = true;
                 anim.on_dry_click(rounds_now);
                 if cfg.dry_click_alert {
-                    foley = Some((SoundChannel::Feedback, SND_COCK, 0.72, 1.32));
+                    oneshot_foley = Some((SoundChannel::Feedback, SND_DRY_FIRE, 0.74, 1.0 + 0.03 * j));
                 }
                 if rounds_now == 0 && cfg.auto_reload {
                     PENDING_AUTO_RELOAD.store(true, Ordering::Relaxed);
                 }
             }
             SYNC_WET_MISFIRE => {
+                // World-space Mono `SND_MISFIRE_WET` is already emitted at the flooded breech on
+                // the server (`emit_wet_misfire`); only stop interrupted foley & animate trigger here.
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                stop_tracked = true;
                 anim.on_dry_click(rounds_now);
-                foley = Some((SoundChannel::Mechanism, SND_MISFIRE_WET, 0.76, 0.92));
             }
             SYNC_RELOAD_START => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 AIMING.store(false, Ordering::Relaxed);
                 TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadIntro { elapsed: 0.0 };
-                foley = Some((SoundChannel::Reload, SND_RELOAD_INTRO, 0.90, 1.0));
+                tracked_foley = Some((
+                    ActionSoundTag::Reload,
+                    SoundChannel::Reload,
+                    SND_RELOAD_INTRO,
+                    0.90,
+                    1.0 + 0.025 * j,
+                ));
             }
             SYNC_SHELL_INSERTED => {
                 CLIENT_RELOADING.store(true, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadInsert { elapsed: 0.0 };
-                foley = Some((SoundChannel::Reload, SND_RELOAD_INSERT, 0.92, 1.0));
+                tracked_foley = Some((
+                    ActionSoundTag::Reload,
+                    SoundChannel::Reload,
+                    SND_RELOAD_INSERT,
+                    0.92,
+                    1.0 + 0.03 * j,
+                ));
             }
             SYNC_RELOAD_END_NORM => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
                 anim.action = ActionAnim::ReloadEndNorm { elapsed: 0.0 };
-                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.88, 1.0));
+                tracked_foley = Some((
+                    ActionSoundTag::Reload,
+                    SoundChannel::Reload,
+                    SND_RELOAD_END,
+                    0.88,
+                    1.0 + 0.02 * j,
+                ));
             }
             SYNC_RELOAD_END_EMPTY => {
+                // Empty-chamber close cycles the lever at `t = 0.15s` + cocks the hammer at `t = 0.40s`
+                // (`Mechanism` channel); fade any tail from the last shell insert instead of overlapping
+                // `SND_RELOAD_END` on top of the lever throw.
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                stop_tracked = true;
                 anim.action = ActionAnim::ReloadEndEmpty {
                     elapsed: 0.0,
                     lever_sound_played: false,
                     cock_sound_played: false,
                 };
-                foley = Some((SoundChannel::Reload, SND_RELOAD_END, 0.85, 1.0));
             }
             SYNC_RELOAD_ABORTED => {
                 CLIENT_RELOADING.store(false, Ordering::Relaxed);
+                stop_tracked = true;
                 if matches!(
                     anim.action,
                     ActionAnim::ReloadIntro { .. }
@@ -414,10 +552,16 @@ fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), S
         }
     }
 
-    if let Some((ch, snd, vol, pitch)) = foley
-        && let Ok(host) = cx.client_host()
-    {
-        play_local_foley_channel(host, ch, snd, vol, pitch);
+    if let Ok(host) = cx.client_host() {
+        if stop_tracked {
+            cancel_action_sound(host, None, 2);
+        }
+        if let Some((tag, ch, snd, vol, pitch)) = tracked_foley {
+            play_tracked_action_sound(host, tag, ch, snd, vol, pitch);
+        }
+        if let Some((ch, snd, vol, pitch)) = oneshot_foley {
+            let _ = play_local_foley_channel(host, ch, snd, vol, pitch);
+        }
     }
     Ok(())
 }
@@ -433,29 +577,162 @@ fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Resu
     Ok(())
 }
 
+fn resolve_remote_breech_pos(host: &dyn ClientHost, eid: u32) -> Option<[f64; 3]> {
+    let ent = host.entity(eid)?;
+    if let Some(eye) = ent.eye_position(host) {
+        Some([eye[0], eye[1] - 0.24, eye[2]])
+    } else {
+        ent.position(host).map(|p| [p[0], p[1] + 1.32, p[2]])
+    }
+}
+
+fn replace_remote_action_sound(host: &dyn ClientHost, eid: u32, next: Option<SoundRef>) {
+    let prev = {
+        let mut map = REMOTE_ACTION_SOUNDS.lock().unwrap();
+        if map.len() >= 64 && !map.contains_key(&eid) {
+            map.clear();
+        }
+        match next {
+            Some(sref) => map.insert(eid, sref),
+            None => map.remove(&eid),
+        }
+    };
+    if let Some(old) = prev {
+        stop_or_fade_sound(host, old, 2);
+    }
+}
+
 fn on_rifle_tp_sync(
     value: RifleThirdPersonSync,
-    _: &mut dyn IPayloadContext,
+    cx: &mut dyn IPayloadContext,
 ) -> Result<(), String> {
     if value.entity_id.0 <= 0 {
         return Ok(());
     }
     let eid = value.entity_id.0 as u32;
     let now = CLIENT_TICKS.load(Ordering::Relaxed);
-    let mut map = REMOTE_TP_STATES.lock().unwrap();
-    if value.state.0 == TP_STATE_IDLE {
-        map.remove(&eid);
-    } else {
-        if map.len() >= 64 {
-            map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
+    let cue = value.state.0;
+
+    // 1. Update 3rd-person remote pose table (`TP_CUE_DRY_CLICK` is audio-only, preserving pose).
+    if cue != TP_CUE_DRY_CLICK {
+        let mut map = REMOTE_TP_STATES.lock().unwrap();
+        match cue {
+            TP_STATE_IDLE | TP_CUE_RELOAD_END_NORM => {
+                map.remove(&eid);
+            }
+            TP_STATE_RELOADING | TP_CUE_RELOAD_INSERT => {
+                if map.len() >= 64 {
+                    map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
+                }
+                map.insert(
+                    eid,
+                    RemoteTpState {
+                        state: TP_STATE_RELOADING,
+                        set_tick: now,
+                    },
+                );
+            }
+            TP_STATE_LEVER_CYCLE => {
+                if map.len() >= 64 {
+                    map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
+                }
+                map.insert(
+                    eid,
+                    RemoteTpState {
+                        state: TP_STATE_LEVER_CYCLE,
+                        set_tick: now,
+                    },
+                );
+            }
+            _ => {}
         }
-        map.insert(
-            eid,
-            RemoteTpState {
-                state: value.state.0,
-                set_tick: now,
-            },
-        );
+    }
+
+    // 2. Emit 3D Mono positional foley for nearby remote players (`eid != local_eid`).
+    if eid == LOCAL_ENTITY_ID.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let Ok(host) = cx.client_host() else {
+        return Ok(());
+    };
+    if cue == TP_STATE_IDLE {
+        replace_remote_action_sound(host, eid, None);
+        return Ok(());
+    }
+    let Some(pos) = resolve_remote_breech_pos(host, eid) else {
+        return Ok(());
+    };
+    let j = client_pitch_jitter(u64::from(eid).wrapping_mul(17) ^ (cue as u64));
+    match cue {
+        TP_STATE_RELOADING => {
+            let sref = play_local_positional_channel(
+                host,
+                SoundChannel::Reload,
+                SND_RELOAD_INTRO,
+                pos,
+                0.78,
+                1.0 + 0.025 * j,
+                0,
+            );
+            replace_remote_action_sound(host, eid, sref);
+        }
+        TP_CUE_RELOAD_INSERT => {
+            let sref = play_local_positional_channel(
+                host,
+                SoundChannel::Reload,
+                SND_RELOAD_INSERT,
+                pos,
+                0.82,
+                1.0 + 0.03 * j,
+                0,
+            );
+            replace_remote_action_sound(host, eid, sref);
+        }
+        TP_CUE_RELOAD_END_NORM => {
+            let sref = play_local_positional_channel(
+                host,
+                SoundChannel::Reload,
+                SND_RELOAD_END,
+                pos,
+                0.76,
+                1.0 + 0.02 * j,
+                0,
+            );
+            replace_remote_action_sound(host, eid, sref);
+        }
+        TP_STATE_LEVER_CYCLE => {
+            replace_remote_action_sound(host, eid, None);
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Mechanism,
+                SND_LEVER,
+                pos,
+                0.80,
+                1.0 + 0.025 * j,
+                3,
+            );
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Mechanism,
+                SND_COCK,
+                pos,
+                0.66,
+                1.02 + 0.025 * j,
+                8,
+            );
+        }
+        TP_CUE_DRY_CLICK => {
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Mechanism,
+                SND_DRY_FIRE,
+                pos,
+                0.72,
+                1.0 + 0.03 * j,
+                0,
+            );
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -971,6 +1248,7 @@ impl Hooks for Mod {
         }
         if event.mapping == ATTACK_MAPPING {
             if event.pressed {
+                let mut cancelled_inspect = false;
                 let allow_fire = {
                     let mut anim = client_anim().lock().unwrap();
                     match anim.action {
@@ -980,11 +1258,15 @@ impl Hooks for Mod {
                         | ActionAnim::ReloadEndEmpty { .. } => false,
                         ActionAnim::Inspect { .. } => {
                             anim.action = ActionAnim::None;
+                            cancelled_inspect = true;
                             true
                         }
                         _ => true,
                     }
                 };
+                if cancelled_inspect {
+                    cancel_action_sound(host, Some(ActionSoundTag::Inspect), 2);
+                }
                 if allow_fire {
                     PENDING_FIRE.store(true, Ordering::Relaxed);
                 }
@@ -1025,6 +1307,7 @@ impl Hooks for Mod {
         };
 
         if !host.playing() {
+            clear_all_tracked_sounds(host);
             PENDING_FIRE.store(false, Ordering::Relaxed);
             PENDING_AUTO_RELOAD.store(false, Ordering::Relaxed);
             TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
@@ -1084,7 +1367,9 @@ impl Hooks for Mod {
         }
 
         let mut want_skin_request = false;
-        let mut foley_to_play: Option<(&'static str, f32, f32)> = None;
+        let mut draw_foley = false;
+        let mut sling_foley = false;
+        let mut cancel_held_foley = false;
 
         {
             let mut anim = client_anim().lock().unwrap();
@@ -1096,17 +1381,18 @@ impl Hooks for Mod {
             if holding && !anim.was_holding {
                 anim.was_holding = true;
                 anim.action = ActionAnim::Draw { elapsed: 0.0 };
-                foley_to_play = Some((SND_DRAW, 0.85, 1.0));
+                draw_foley = true;
             } else if !holding && anim.was_holding {
                 anim.was_holding = false;
                 anim.action = ActionAnim::None;
+                cancel_held_foley = true;
             }
 
             if is_slung && !anim.was_slung {
                 anim.was_slung = true;
-                if foley_to_play.is_none() {
-                    // Crisp leather/wood sling foley when pressing `F` to stow onto the back.
-                    foley_to_play = Some((SND_DRAW, 0.72, 0.84));
+                if !draw_foley {
+                    // Dedicated quick oiled-leather & walnut back-sling foley when pressing `F`.
+                    sling_foley = true;
                 }
             } else if !is_slung && anim.was_slung {
                 anim.was_slung = false;
@@ -1124,8 +1410,21 @@ impl Hooks for Mod {
                 (anim.walk_phase + anim.walk_speed * if sprint_now { 0.72 } else { 0.52 }) % TAU;
         }
 
-        if let Some((snd, vol, pitch)) = foley_to_play {
-            play_local_foley(host, snd, vol, pitch);
+        if cancel_held_foley {
+            cancel_action_sound(host, None, 2);
+        }
+        let j_tick = client_pitch_jitter(tick);
+        if draw_foley {
+            play_tracked_action_sound(
+                host,
+                ActionSoundTag::Draw,
+                SoundChannel::Handling,
+                SND_DRAW,
+                0.85,
+                1.0 + 0.02 * j_tick,
+            );
+        } else if sling_foley {
+            let _ = play_local_foley(host, SND_SLING, 0.78, 1.0 + 0.03 * j_tick);
         }
         if want_skin_request {
             let _ = input.send(host, &RifleInput::simple(ACTION_SKIN_REQUEST));
@@ -1176,14 +1475,22 @@ impl Hooks for Mod {
             if CLIENT_RELOADING.swap(false, Ordering::Relaxed) {
                 PENDING_RELOAD_CANCEL.store(true, Ordering::Relaxed);
             }
-            let mut anim = client_anim().lock().unwrap();
-            if matches!(
-                anim.action,
-                ActionAnim::Inspect { .. }
-                    | ActionAnim::ReloadIntro { .. }
-                    | ActionAnim::ReloadInsert { .. }
-            ) {
-                anim.action = ActionAnim::None;
+            let cancelled = {
+                let mut anim = client_anim().lock().unwrap();
+                if matches!(
+                    anim.action,
+                    ActionAnim::Inspect { .. }
+                        | ActionAnim::ReloadIntro { .. }
+                        | ActionAnim::ReloadInsert { .. }
+                ) {
+                    anim.action = ActionAnim::None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if cancelled {
+                cancel_action_sound(host, None, 2);
             }
         }
 
@@ -1197,9 +1504,17 @@ impl Hooks for Mod {
         }
 
         if AIMING.load(Ordering::Relaxed) {
-            let mut anim = client_anim().lock().unwrap();
-            if matches!(anim.action, ActionAnim::Inspect { .. }) {
-                anim.action = ActionAnim::None;
+            let cancelled_inspect = {
+                let mut anim = client_anim().lock().unwrap();
+                if matches!(anim.action, ActionAnim::Inspect { .. }) {
+                    anim.action = ActionAnim::None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if cancelled_inspect {
+                cancel_action_sound(host, Some(ActionSoundTag::Inspect), 3);
             }
         }
 
@@ -1240,7 +1555,14 @@ impl Hooks for Mod {
                 }
             };
             if start_inspect {
-                play_local_foley(host, SND_INSPECT, 0.90, 1.0);
+                play_tracked_action_sound(
+                    host,
+                    ActionSoundTag::Inspect,
+                    SoundChannel::Handling,
+                    SND_INSPECT,
+                    0.90,
+                    1.0,
+                );
             }
         }
     }
@@ -1376,9 +1698,15 @@ impl Hooks for Mod {
                             }
                         };
                     } else {
+                        let j = client_pitch_jitter(FRAME_SEQ.load(Ordering::Relaxed));
                         if !lever_sound_played && next >= LEVER_DELAY_SECS {
                             lever_sound_played = true;
-                            triggered_foley.push((SoundChannel::Mechanism, SND_LEVER, 0.86, 1.0));
+                            triggered_foley.push((
+                                SoundChannel::Mechanism,
+                                SND_LEVER,
+                                0.86,
+                                1.0 + 0.025 * j,
+                            ));
                         }
                         if !casing_ejected && next >= CASING_HANDOFF_SECS {
                             casing_ejected = true;
@@ -1387,7 +1715,12 @@ impl Hooks for Mod {
                         if !cock_sound_played && next >= LEVER_DELAY_SECS + 0.24 {
                             cock_sound_played = true;
                             anim.hammer_uncocked = false;
-                            triggered_foley.push((SoundChannel::Mechanism, SND_COCK, 0.72, 1.04));
+                            triggered_foley.push((
+                                SoundChannel::Mechanism,
+                                SND_COCK,
+                                0.72,
+                                1.04 + 0.025 * j,
+                            ));
                         }
                         let total = LEVER_DELAY_SECS + LEVER_DURATION_SECS;
                         anim.action = if next >= total {
@@ -1444,14 +1777,25 @@ impl Hooks for Mod {
                 } => {
                     let next = elapsed + dt;
                     let dur = (RELOAD_CLOSE_EMPTY_TICKS as f32) * 0.05;
+                    let j = client_pitch_jitter(FRAME_SEQ.load(Ordering::Relaxed) ^ 0x55AA);
                     if !lever_sound_played && next >= 0.15 {
                         lever_sound_played = true;
-                        triggered_foley.push((SoundChannel::Reload, SND_LEVER, 0.90, 0.98));
+                        triggered_foley.push((
+                            SoundChannel::Mechanism,
+                            SND_LEVER,
+                            0.90,
+                            0.98 + 0.02 * j,
+                        ));
                     }
                     if !cock_sound_played && next >= 0.40 {
                         cock_sound_played = true;
                         anim.hammer_uncocked = false;
-                        triggered_foley.push((SoundChannel::Reload, SND_COCK, 0.78, 1.0));
+                        triggered_foley.push((
+                            SoundChannel::Mechanism,
+                            SND_COCK,
+                            0.78,
+                            1.0 + 0.025 * j,
+                        ));
                     }
                     anim.action = if next >= dur {
                         anim.hammer_uncocked = false;
@@ -1480,7 +1824,7 @@ impl Hooks for Mod {
         }
 
         for (ch, snd, vol, pitch) in triggered_foley {
-            play_local_foley_channel(host, ch, snd, vol, pitch);
+            let _ = play_local_foley_channel(host, ch, snd, vol, pitch);
         }
 
         cam_delta_pitch *= cfg.camera_recoil_mul;
@@ -1574,14 +1918,6 @@ impl Hooks for Mod {
 
             let (reloading, lever_cycling, aiming_ads, sprinting) = if is_local {
                 let action = client_anim().lock().unwrap().action;
-                let rel = CLIENT_RELOADING.load(Ordering::Relaxed)
-                    || matches!(
-                        action,
-                        ActionAnim::ReloadIntro { .. }
-                            | ActionAnim::ReloadInsert { .. }
-                            | ActionAnim::ReloadEndNorm { .. }
-                            | ActionAnim::ReloadEndEmpty { .. }
-                    );
                 let cyc = matches!(
                     action,
                     ActionAnim::FireCycle {
@@ -1589,7 +1925,19 @@ impl Hooks for Mod {
                         elapsed,
                         ..
                     } if elapsed >= LEVER_DELAY_SECS * 0.6
+                ) || matches!(
+                    action,
+                    ActionAnim::ReloadEndEmpty { elapsed, .. } if elapsed >= 0.15
                 );
+                let rel = !cyc
+                    && (CLIENT_RELOADING.load(Ordering::Relaxed)
+                        || matches!(
+                            action,
+                            ActionAnim::ReloadIntro { .. }
+                                | ActionAnim::ReloadInsert { .. }
+                                | ActionAnim::ReloadEndNorm { .. }
+                                | ActionAnim::ReloadEndEmpty { .. }
+                        ));
                 let ads = (AIMING.load(Ordering::Relaxed)
                     || aim_progress() > 0.35
                     || event.humanoid.use_hand == Some(Hand::Main))

@@ -23,10 +23,13 @@ pub(crate) const SND_FIRE: &str = "just_a_rifle:item.winchester_fire";
 pub(crate) const SND_THUMP: &str = "just_a_rifle:item.winchester_thump";
 pub(crate) const SND_LEVER: &str = "just_a_rifle:item.winchester_lever";
 pub(crate) const SND_COCK: &str = "just_a_rifle:item.winchester_cock";
+pub(crate) const SND_DRY_FIRE: &str = "just_a_rifle:item.winchester_dry_fire";
+pub(crate) const SND_HIT_CLICK: &str = "just_a_rifle:item.winchester_hit_click";
 pub(crate) const SND_RELOAD_INTRO: &str = "just_a_rifle:animation.winchester_reload_intro";
 pub(crate) const SND_RELOAD_INSERT: &str = "just_a_rifle:animation.winchester_reload_insert";
 pub(crate) const SND_RELOAD_END: &str = "just_a_rifle:animation.winchester_reload_end";
 pub(crate) const SND_DRAW: &str = "just_a_rifle:animation.winchester_draw";
+pub(crate) const SND_SLING: &str = "just_a_rifle:animation.winchester_sling";
 pub(crate) const SND_INSPECT: &str = "just_a_rifle:animation.winchester_inspect";
 pub(crate) const SND_SHELL_DROP: &str = "just_a_rifle:item.winchester_shell_drop";
 pub(crate) const SND_MISFIRE_WET: &str = "just_a_rifle:item.winchester_misfire_wet";
@@ -141,6 +144,9 @@ pub(crate) const SYNC_HEADSHOT_CONFIRM: i32 = 10;
 pub(crate) const TP_STATE_IDLE: i32 = 0;
 pub(crate) const TP_STATE_RELOADING: i32 = 1;
 pub(crate) const TP_STATE_LEVER_CYCLE: i32 = 2;
+pub(crate) const TP_CUE_RELOAD_INSERT: i32 = 3;
+pub(crate) const TP_CUE_RELOAD_END_NORM: i32 = 4;
+pub(crate) const TP_CUE_DRY_CLICK: i32 = 5;
 pub(crate) const TP_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
 
 // ---------------------------------------------------------------------------

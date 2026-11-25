@@ -103,7 +103,7 @@ impl HitConfirmSound {
         match self {
             Self::Subtle => Some((SND_HIT_CONFIRM_SUBTLE, 0.44, 1.26)),
             Self::Chime => Some((SND_HIT_CONFIRM_CHIME, 0.56, 1.54)),
-            Self::Click => Some((SND_COCK, 0.46, 1.66)),
+            Self::Click => Some((SND_HIT_CLICK, 0.48, 1.00)),
             Self::Off => None,
         }
     }
@@ -402,14 +402,17 @@ pub(crate) fn default_channel_for_local_sound(event_id: &str) -> SoundChannel {
         SND_FIRE => SoundChannel::FireBlast,
         SND_THUMP => SoundChannel::BassThump,
         SND_RELOAD_INTRO | SND_RELOAD_INSERT | SND_RELOAD_END => SoundChannel::Reload,
-        SND_DRAW | SND_INSPECT => SoundChannel::Handling,
+        SND_DRAW | SND_SLING | SND_INSPECT => SoundChannel::Handling,
         SND_SHELL_DROP => SoundChannel::Casings,
         SND_LEVER | SND_COCK | SND_MISFIRE_WET => SoundChannel::Mechanism,
+        SND_DRY_FIRE | SND_HIT_CLICK => SoundChannel::Feedback,
         _ => SoundChannel::Feedback,
     }
 }
 
 /// Applies the player's master + channel volume sliders and gunshot tone preference.
+/// Caps positional gain per channel so `200%` sliders never inflate OpenAL's `16 * volume`
+/// attenuation radius abnormally or let `BassThump` out-range `FireBlast`.
 /// Returns `None` when the effective gain is muted (`<= 0.001`) so callers skip playback cleanly.
 pub(crate) fn mix_client_sound(
     cfg: &ClientSettings,
@@ -427,8 +430,19 @@ pub(crate) fn mix_client_sound(
         SoundChannel::WorldImpact => cfg.vol_impacts,
         SoundChannel::Feedback => cfg.vol_feedback,
     };
-    let out_vol = volume * cfg.vol_master * ch_gain;
-    if !out_vol.is_finite() || out_vol <= 0.001 {
+    let raw_vol = volume * cfg.vol_master * ch_gain;
+    if !raw_vol.is_finite() || raw_vol <= 0.001 {
+        return None;
+    }
+    let out_vol = match channel {
+        SoundChannel::FireBlast => raw_vol.min(5.0),
+        SoundChannel::BassThump => {
+            let fire_ref_cap = (volume * 2.0 * cfg.vol_master * cfg.vol_fire).max(0.0);
+            raw_vol.min(fire_ref_cap).min(2.5)
+        }
+        _ => raw_vol.min(2.0),
+    };
+    if out_vol <= 0.001 {
         return None;
     }
     let tone_mul = match channel {
@@ -447,8 +461,8 @@ pub(crate) enum LevelSoundDecision {
 }
 
 /// Classifies incoming positional level sounds on the client (`PlayLevelSoundEvent.AtPosition`)
-/// so each player's own sliders control gunfire, lever cycling, material bullet impacts, and
-/// `minecraft:target` bullseye chimes without affecting unrelated Vanilla sounds.
+/// so each player's own sliders control gunfire, lever cycling, material bullet impacts, water
+/// entry splashes, and `minecraft:target` bullseye chimes without affecting unrelated Vanilla sounds.
 pub(crate) fn classify_incoming_level_sound(
     cfg: &ClientSettings,
     namespace: &str,
@@ -463,29 +477,42 @@ pub(crate) fn classify_incoming_level_sound(
             "animation.winchester_reload_intro"
             | "animation.winchester_reload_insert"
             | "animation.winchester_reload_end" => SoundChannel::Reload,
-            "animation.winchester_draw" | "animation.winchester_inspect" => SoundChannel::Handling,
+            "animation.winchester_draw"
+            | "animation.winchester_sling"
+            | "animation.winchester_inspect" => SoundChannel::Handling,
             "item.winchester_shell_drop" => SoundChannel::Casings,
+            "item.winchester_hit_click" => SoundChannel::Feedback,
             _ => SoundChannel::Mechanism,
         };
         return LevelSoundDecision::Mix(ch);
     }
 
-    // Bullet terrain impacts, ricochets, crystal chimes, and `minecraft:target` bullseye chimes
-    // are emitted on `SoundSource::Players` (whereas Vanilla mining/footsteps use `Blocks` and
-    // Note Blocks use `Records`).
-    if namespace == "minecraft" && source == SoundSource::Players && path.starts_with("block.") {
-        if path == "block.note_block.chime" {
-            return match cfg.target_chime_mode {
-                TargetChimeMode::Off => LevelSoundDecision::Cancel,
-                TargetChimeMode::BullseyeOnly if original_pitch < 1.40 => {
-                    LevelSoundDecision::Cancel
-                }
-                TargetChimeMode::BullseyeOnly | TargetChimeMode::InnerRings => {
-                    LevelSoundDecision::Mix(SoundChannel::Feedback)
-                }
-            };
+    // Bullet terrain impacts, ricochets, crystal chimes, candle snuffs, water entry splashes,
+    // and `minecraft:target` bullseye chimes are emitted on `SoundSource::Players` (whereas
+    // Vanilla mining/footsteps/candles use `Blocks`, bobbers use `Neutral`, and Note Blocks use `Records`).
+    if namespace == "minecraft" && source == SoundSource::Players {
+        if path == "entity.fishing_bobber.splash" {
+            return LevelSoundDecision::Mix(SoundChannel::WorldImpact);
         }
-        return LevelSoundDecision::Mix(SoundChannel::WorldImpact);
+        if path.starts_with("block.")
+            && !path.starts_with("block.anvil.")
+            && !path.starts_with("block.grindstone.")
+            && !path.starts_with("block.smithing_table.")
+            && !path.starts_with("block.enchantment_table.")
+        {
+            if path == "block.note_block.chime" {
+                return match cfg.target_chime_mode {
+                    TargetChimeMode::Off => LevelSoundDecision::Cancel,
+                    TargetChimeMode::BullseyeOnly if original_pitch < 1.40 => {
+                        LevelSoundDecision::Cancel
+                    }
+                    TargetChimeMode::BullseyeOnly | TargetChimeMode::InnerRings => {
+                        LevelSoundDecision::Mix(SoundChannel::Feedback)
+                    }
+                };
+            }
+            return LevelSoundDecision::Mix(SoundChannel::WorldImpact);
+        }
     }
 
     LevelSoundDecision::Ignore
@@ -667,6 +694,18 @@ mod tests {
             mix_client_sound(&cfg, SoundChannel::Feedback, 0.70, 1.20),
             None
         );
+
+        // Extreme 200% sliders stay bounded so BassThump never out-ranges FireBlast.
+        let mut loud = ClientSettings::default();
+        loud.vol_master = 2.0;
+        loud.vol_fire = 2.0;
+        loud.vol_bass_thump = 2.0;
+        let (fire_v, _) = mix_client_sound(&loud, SoundChannel::FireBlast, 2.50, 1.0).unwrap();
+        let (thump_v, _) = mix_client_sound(&loud, SoundChannel::BassThump, 1.15, 1.0).unwrap();
+        assert!(thump_v <= 2.50 && thump_v < fire_v);
+        assert_eq!(HitConfirmSound::Click.sound_spec(), Some((SND_HIT_CLICK, 0.48, 1.00)));
+        assert_eq!(default_channel_for_local_sound(SND_SLING), SoundChannel::Handling);
+        assert_eq!(default_channel_for_local_sound(SND_DRY_FIRE), SoundChannel::Feedback);
     }
 
     #[test]
@@ -701,6 +740,36 @@ mod tests {
                 "block.note_block.chime",
                 SoundSource::Records,
                 1.24
+            ),
+            LevelSoundDecision::Ignore
+        );
+        assert_eq!(
+            classify_incoming_level_sound(
+                &cfg,
+                "minecraft",
+                "entity.fishing_bobber.splash",
+                SoundSource::Neutral,
+                1.0
+            ),
+            LevelSoundDecision::Ignore
+        );
+        assert_eq!(
+            classify_incoming_level_sound(
+                &cfg,
+                "minecraft",
+                "entity.fishing_bobber.splash",
+                SoundSource::Players,
+                1.42
+            ),
+            LevelSoundDecision::Mix(SoundChannel::WorldImpact)
+        );
+        assert_eq!(
+            classify_incoming_level_sound(
+                &cfg,
+                "minecraft",
+                "block.anvil.use",
+                SoundSource::Players,
+                1.0
             ),
             LevelSoundDecision::Ignore
         );

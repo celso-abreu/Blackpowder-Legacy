@@ -334,27 +334,30 @@ fn is_player_submerged_simple(host: &dyn ServerHost, player: mod_api::PlayerRef)
     is_point_in_water(host, level, eye)
 }
 
+fn shot_pitch_jitter(now: u64, uuid: u128) -> f32 {
+    let mut h = now
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((uuid as u64) ^ ((uuid >> 64) as u64));
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 27;
+    (((h & 0xFFFF) as f32) * (1.0 / 32_767.5) - 1.0).clamp(-1.0, 1.0)
+}
+
 fn emit_wet_misfire(
     host: &mut dyn ServerHost,
     player: mod_api::PlayerRef,
     frame: &ShooterFrame,
     loaded: u32,
 ) {
+    let j = shot_pitch_jitter(SERVER_TICKS.load(Ordering::Relaxed), player.uuid());
     frame.level.play_sound(
         host,
         SND_MISFIRE_WET,
         frame.breech,
         SoundSource::Players,
-        0.82,
-        0.95,
-    );
-    frame.level.play_sound(
-        host,
-        SND_WATER_BUBBLES,
-        frame.breech,
-        SoundSource::Players,
-        0.52,
-        1.28,
+        0.86,
+        (0.98 + 0.04 * j).clamp(0.85, 1.12),
     );
 
     if let Some(bubble) = BUBBLE_KEY.get().copied() {
@@ -918,6 +921,7 @@ fn fire_rifle(
         let _ = cancel_reload_session(host, player);
         if loaded == 0 {
             send_sync(host, player, SYNC_DRY_CLICK, 0);
+            broadcast_tp_state(host, player, TP_CUE_DRY_CLICK);
             return;
         }
     }
@@ -935,6 +939,7 @@ fn fire_rifle(
     if loaded == 0 {
         LEVER_READY.lock().unwrap().insert(uuid, now + 5);
         send_sync(host, player, SYNC_DRY_CLICK, 0);
+        broadcast_tp_state(host, player, TP_CUE_DRY_CLICK);
         return;
     }
 
@@ -994,17 +999,18 @@ fn fire_rifle(
     LEVER_READY.lock().unwrap().insert(uuid, next_ready);
 
     // Mono 48kHz gunshot blast + breech thump broadcast in 3D world space for all nearby players.
-    // Damped pitch/volume + surface splash when `boca_cano` dips into surface water.
+    // Subtle shot-to-shot pitch jitter prevents identical waveform repetition at 120 RPM.
+    let j = shot_pitch_jitter(now, uuid);
     if muzzle_in_water {
-        play_world_sound(host, player, SND_FIRE, 1.65, 0.78);
-        play_world_sound(host, player, SND_THUMP, 0.95, 0.86);
+        play_world_sound(host, player, SND_FIRE, 1.65, 0.78 + 0.022 * j);
+        play_world_sound(host, player, SND_THUMP, 0.95, 0.86 + 0.020 * j);
         if let Some(ref f) = frame {
             f.level
-                .play_sound(host, SND_WATER_SPLASH, f.muzzle, SoundSource::Players, 0.85, 0.92);
+                .play_sound(host, SND_WATER_SPLASH, f.muzzle, SoundSource::Players, 0.85, 0.92 + 0.03 * j);
         }
     } else {
-        play_world_sound(host, player, SND_FIRE, 2.5, 1.0);
-        play_world_sound(host, player, SND_THUMP, 1.15, 1.0);
+        play_world_sound(host, player, SND_FIRE, 2.5, 1.0 + 0.028 * j);
+        play_world_sound(host, player, SND_THUMP, 1.15, 1.0 + 0.022 * j);
     }
     if let Some(ref f) = frame {
         muzzle_effects(host, f, smoke, aim_pct, muzzle_in_water);
@@ -1133,7 +1139,7 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                             if empty_chamber {
                                 TP_STATE_LEVER_CYCLE
                             } else {
-                                TP_STATE_IDLE
+                                TP_CUE_RELOAD_END_NORM
                             },
                         );
                     } else {
@@ -1147,6 +1153,7 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                         } else {
                             session.inserted_any = true;
                             send_sync(host, player, SYNC_SHELL_INSERTED, next_loaded);
+                            broadcast_tp_state(host, player, TP_CUE_RELOAD_INSERT);
                             if next_loaded == TUBE_CAPACITY {
                                 grant_mod_criterion(host, player, TRIG_FULL_TUBE);
                             }
@@ -1169,9 +1176,6 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                         .lock()
                         .unwrap()
                         .insert(uuid, now + if empty_chamber { 2 } else { 1 });
-                    if !empty_chamber {
-                        broadcast_tp_state(host, player, TP_STATE_IDLE);
-                    }
                 }
             }
         }

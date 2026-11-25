@@ -43,6 +43,27 @@
       }
     ]
   },
+  "item.winchester_dry_fire": {
+    "subtitle": "subtitles.just_a_rifle.winchester_dry_fire",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_cock",
+        "volume": 0.9,
+        "pitch": 1.28,
+        "attenuation_distance": 12
+      }
+    ]
+  },
+  "item.winchester_hit_click": {
+    "subtitle": "subtitles.just_a_rifle.winchester_hit_confirm",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_cock",
+        "volume": 0.9,
+        "pitch": 1.66
+      }
+    ]
+  },
   "animation.winchester_reload_intro": {
     "subtitle": "subtitles.just_a_rifle.winchester_reload",
     "sounds": [
@@ -86,6 +107,16 @@
       }
     ]
   },
+  "animation.winchester_sling": {
+    "subtitle": "subtitles.just_a_rifle.winchester_sling",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_sling",
+        "volume": 0.82,
+        "pitch": 1.0
+      }
+    ]
+  },
   "animation.winchester_inspect": {
     "subtitle": "subtitles.just_a_rifle.winchester_inspect",
     "sounds": [
@@ -100,9 +131,15 @@
     "subtitle": "subtitles.just_a_rifle.winchester_shell_drop",
     "sounds": [
       {
-        "name": "just_a_rifle:winchester_cock",
-        "volume": 0.36,
-        "pitch": 1.82,
+        "name": "just_a_rifle:winchester_shell_drop_1",
+        "volume": 0.48,
+        "pitch": 1.0,
+        "attenuation_distance": 10
+      },
+      {
+        "name": "just_a_rifle:winchester_shell_drop_2",
+        "volume": 0.48,
+        "pitch": 1.0,
         "attenuation_distance": 10
       }
     ]
@@ -111,10 +148,10 @@
     "subtitle": "subtitles.just_a_rifle.winchester_misfire_wet",
     "sounds": [
       {
-        "name": "just_a_rifle:winchester_cock",
-        "volume": 0.72,
-        "pitch": 0.68,
-        "attenuation_distance": 10
+        "name": "just_a_rifle:winchester_misfire_wet",
+        "volume": 0.9,
+        "pitch": 1.0,
+        "attenuation_distance": 12
       }
     ]
   }

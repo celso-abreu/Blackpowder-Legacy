@@ -107,6 +107,7 @@ def main() -> None:
     )
 
     sounds = json.loads((ROOT / "assets" / MOD_ID / "sounds.json").read_text())
+    referenced_oggs: set[Path] = set()
     for event_name, spec in sounds.items():
         subtitle = spec["subtitle"]
         assert subtitle in en, f"{event_name}: missing subtitle {subtitle}"
@@ -115,6 +116,20 @@ def main() -> None:
             assert ns == MOD_ID, f"{event_name}: unexpected namespace {ns}"
             ogg = ROOT / "assets" / ns / "sounds" / f"{rel}.ogg"
             assert ogg.is_file(), f"{event_name}: missing {ogg}"
+            referenced_oggs.add(ogg.resolve())
+            ogg_bytes = ogg.read_bytes()
+            vhdr = ogg_bytes.find(b"\x01vorbis")
+            assert vhdr >= 0, f"{ogg}: missing Vorbis identification header"
+            _, v_ch, v_rate = struct.unpack("<IBI", ogg_bytes[vhdr + 7 : vhdr + 16])
+            assert v_rate == 48_000, f"{ogg}: expected 48000 Hz sample rate, got {v_rate} Hz"
+            if "attenuation_distance" in entry:
+                assert v_ch == 1, (
+                    f"{event_name} ({ogg.name}): positional 3D sound must be Mono (CH=1) for OpenAL attenuation, got CH={v_ch}"
+                )
+
+    disk_oggs = {p.resolve() for p in (ROOT / "assets" / MOD_ID / "sounds").rglob("*.ogg")}
+    orphan_oggs = disk_oggs - referenced_oggs
+    assert not orphan_oggs, f"Unreferenced .ogg files in sounds/: {sorted(p.name for p in orphan_oggs)}"
 
     tab = json.loads(
         (ROOT / "data" / MOD_ID / "horizon" / "creative_tab" / f"{MOD_ID}.json").read_text()

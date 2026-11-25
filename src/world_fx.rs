@@ -13,11 +13,11 @@ use mod_api::{
 use crate::constants::*;
 use crate::server::consume_bullet_water_splash_on_impact;
 use crate::{
-    holding_rifle_recently, is_point_in_water, play_local_foley, BulletImpactSync, BELL_BLOCK_KEY,
-    BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC, CHORUS_FLOWER_BLOCK_KEY,
-    CRIT_KEY, DECORATED_POT_BLOCK_KEY, LAST_EJECTOR_VIEW_X, LAST_EJECTOR_VIEW_Y,
-    LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POINTED_DRIPSTONE_BLOCK_KEY, POOF_KEY, RIFLE_MODELS,
-    SMOKE_KEY, TARGET_BLOCK_KEY, WHITE_SMOKE_KEY,
+    holding_rifle_recently, is_point_in_water, play_local_positional_foley, BulletImpactSync,
+    BELL_BLOCK_KEY, BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC,
+    CHORUS_FLOWER_BLOCK_KEY, CRIT_KEY, DECORATED_POT_BLOCK_KEY, LAST_EJECTOR_VIEW_X,
+    LAST_EJECTOR_VIEW_Y, LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POINTED_DRIPSTONE_BLOCK_KEY,
+    POOF_KEY, RIFLE_MODELS, SMOKE_KEY, TARGET_BLOCK_KEY, WHITE_SMOKE_KEY,
 };
 
 static WORLD_EFFECTS: OnceLock<Mutex<WorldEffectsState>> = OnceLock::new();
@@ -767,7 +767,7 @@ pub(crate) fn handle_bullet_terrain_impact(
             host,
             SND_CANDLE_EXTINGUISH,
             event.at,
-            SoundSource::Blocks,
+            SoundSource::Players,
             0.85,
             1.05 + 0.06 * jitter,
         );
@@ -1405,7 +1405,7 @@ fn hits_solid_wall(host: &dyn ClientHost, x: f64, y: f64, z: f64) -> bool {
 
 pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
     let cfg = crate::settings::client_settings();
-    let mut clink_sounds: Vec<(f32, f32)> = Vec::new();
+    let mut clink_sounds: Vec<([f64; 3], f32, f32)> = Vec::new();
     {
         let mut fx = world_effects().lock().unwrap();
         if fx.holes.is_empty() && fx.casings.is_empty() {
@@ -1508,8 +1508,8 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
                     let impact_speed = (-casing.vel[1]) as f32;
                     if in_water {
                         if impact_speed > 0.35 && casing.bounces == 0 {
-                            let pitch_var = 0.70 + 0.08 * fx.next_unit_f32();
-                            clink_sounds.push((0.26, pitch_var));
+                            let pitch_var = 0.72 + 0.08 * fx.next_unit_f32();
+                            clink_sounds.push((casing.pos, 0.24, pitch_var));
                         }
                         casing.vel = [0.0; 3];
                         casing.pitch_deg = 0.0;
@@ -1527,9 +1527,9 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
                         casing.yaw_vel *= 0.55;
                         casing.roll_vel *= 0.65;
                         if casing.bounces < 2 {
-                            let vol = if casing.bounces == 0 { 0.72 } else { 0.34 };
+                            let vol = if casing.bounces == 0 { 0.68 } else { 0.34 };
                             let pitch_var = 0.94 + 0.12 * fx.next_unit_f32();
-                            clink_sounds.push((vol, pitch_var));
+                            clink_sounds.push((casing.pos, vol, pitch_var));
                         }
                         casing.bounces += 1;
                     } else {
@@ -1570,8 +1570,8 @@ pub(crate) fn step_world_effects(host: &dyn ClientHost, dt: f32) {
         fx.casings = casings;
     }
 
-    for (vol, pitch_mul) in clink_sounds {
-        play_local_foley(host, SND_SHELL_DROP, vol, pitch_mul);
+    for (pos, vol, pitch_mul) in clink_sounds {
+        play_local_positional_foley(host, SND_SHELL_DROP, pos, vol, pitch_mul, 0);
     }
 }
 
