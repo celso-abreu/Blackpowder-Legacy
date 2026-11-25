@@ -37,9 +37,9 @@ use mod_api::{
     ParticleKey, ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent,
     Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent,
     ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundSource,
-    StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, TextContent, ToClient, ToServer,
-    VarInt,
+    StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer, VarInt,
 };
+use mod_api::text::TextContent;
 
 use crate::arms::{invalidate_skin_sprite_cache, PlayerArms};
 use crate::ballistics::{
