@@ -466,8 +466,6 @@ pub(crate) fn mix_client_sound(
         }
         _ => 1.0,
     };
-        _ => 1.0,
-    };
     let out_pitch = (pitch * tone_mul).clamp(0.25, 2.50);
     Some((out_vol, out_pitch))
 }
