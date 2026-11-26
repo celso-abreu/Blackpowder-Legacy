@@ -1,6 +1,6 @@
 //! Client configuration page (`Options > Mods > Just a Rifle > Config`) & per-channel audio mixer.
 //!
-//! Registers 31 typed settings (`Toggle`, `Choice`, `Range`, `Color`) via
+//! Registers 33 typed settings (`Toggle`, `Choice`, `Range`, `Color`) via
 //! `Registrar::register_setting`, caches a fast `Copy` snapshot updated on `Hooks::setting_changed`
 //! and world entry, and mixes both client-local foley and incoming world level sounds per player.
 
@@ -19,6 +19,8 @@ pub(crate) const KEY_AUDIO_MASTER: &str = "audio.master";
 pub(crate) const KEY_AUDIO_FIRE: &str = "audio.fire";
 pub(crate) const KEY_AUDIO_BASS_THUMP: &str = "audio.bass_thump";
 pub(crate) const KEY_AUDIO_FIRE_TONE: &str = "audio.fire_tone";
+pub(crate) const KEY_AUDIO_ECHO: &str = "audio.echo";
+pub(crate) const KEY_AUDIO_CONCUSSION: &str = "audio.concussion";
 pub(crate) const KEY_AUDIO_MECHANISM: &str = "audio.mechanism";
 pub(crate) const KEY_AUDIO_RELOAD: &str = "audio.reload";
 pub(crate) const KEY_AUDIO_HANDLING: &str = "audio.handling";
@@ -207,6 +209,7 @@ impl BackSlingStyle {
 pub(crate) enum SoundChannel {
     FireBlast,
     BassThump,
+    Echo,
     Mechanism,
     Reload,
     Handling,
@@ -221,6 +224,8 @@ pub(crate) struct ClientSettings {
     pub(crate) vol_fire: f32,
     pub(crate) vol_bass_thump: f32,
     pub(crate) fire_tone: FireTone,
+    pub(crate) vol_echo: f32,
+    pub(crate) blast_concussion: bool,
     pub(crate) vol_mechanism: f32,
     pub(crate) vol_reload: f32,
     pub(crate) vol_handling: f32,
@@ -262,6 +267,8 @@ impl Default for ClientSettings {
             vol_fire: 1.0,
             vol_bass_thump: 1.0,
             fire_tone: FireTone::Balanced,
+            vol_echo: 1.0,
+            blast_concussion: true,
             vol_mechanism: 1.0,
             vol_reload: 1.0,
             vol_handling: 1.0,
@@ -333,6 +340,8 @@ pub(crate) fn refresh_client_settings(host: &dyn ClientHost) {
         vol_fire: pct(host, KEY_AUDIO_FIRE, 100.0, 0.0, 200.0),
         vol_bass_thump: pct(host, KEY_AUDIO_BASS_THUMP, 100.0, 0.0, 200.0),
         fire_tone: FireTone::from_index(host.setting_choice(KEY_AUDIO_FIRE_TONE).unwrap_or(0)),
+        vol_echo: pct(host, KEY_AUDIO_ECHO, 100.0, 0.0, 200.0),
+        blast_concussion: host.setting_bool(KEY_AUDIO_CONCUSSION).unwrap_or(true),
         vol_mechanism: pct(host, KEY_AUDIO_MECHANISM, 100.0, 0.0, 200.0),
         vol_reload: pct(host, KEY_AUDIO_RELOAD, 100.0, 0.0, 200.0),
         vol_handling: pct(host, KEY_AUDIO_HANDLING, 100.0, 0.0, 200.0),
@@ -401,6 +410,10 @@ pub(crate) fn default_channel_for_local_sound(event_id: &str) -> SoundChannel {
     match event_id {
         SND_FIRE => SoundChannel::FireBlast,
         SND_THUMP => SoundChannel::BassThump,
+        SND_ECHO_OPEN | SND_ECHO_CAVE => SoundChannel::Echo,
+        SND_BULLET_CRACK | SND_BULLET_WHIZ | SND_IMPACT_FLESH | SND_IMPACT_ARMOR => {
+            SoundChannel::WorldImpact
+        }
         SND_RELOAD_INTRO | SND_RELOAD_INSERT | SND_RELOAD_END => SoundChannel::Reload,
         SND_DRAW | SND_SLING | SND_INSPECT => SoundChannel::Handling,
         SND_SHELL_DROP => SoundChannel::Casings,
@@ -423,6 +436,7 @@ pub(crate) fn mix_client_sound(
     let ch_gain = match channel {
         SoundChannel::FireBlast => cfg.vol_fire,
         SoundChannel::BassThump => cfg.vol_fire * cfg.vol_bass_thump,
+        SoundChannel::Echo => cfg.vol_fire * cfg.vol_echo,
         SoundChannel::Mechanism => cfg.vol_mechanism,
         SoundChannel::Reload => cfg.vol_reload,
         SoundChannel::Handling => cfg.vol_handling,
@@ -436,6 +450,7 @@ pub(crate) fn mix_client_sound(
     }
     let out_vol = match channel {
         SoundChannel::FireBlast => raw_vol.min(5.0),
+        SoundChannel::Echo => raw_vol.min(4.5),
         SoundChannel::BassThump => {
             let fire_ref_cap = (volume * 2.0 * cfg.vol_master * cfg.vol_fire).max(0.0);
             raw_vol.min(fire_ref_cap).min(2.5)
@@ -446,7 +461,11 @@ pub(crate) fn mix_client_sound(
         return None;
     }
     let tone_mul = match channel {
-        SoundChannel::FireBlast | SoundChannel::BassThump => cfg.fire_tone.pitch_mul(),
+        SoundChannel::FireBlast | SoundChannel::BassThump | SoundChannel::Echo => {
+            cfg.fire_tone.pitch_mul()
+        }
+        _ => 1.0,
+    };
         _ => 1.0,
     };
     let out_pitch = (pitch * tone_mul).clamp(0.25, 2.50);
@@ -474,6 +493,11 @@ pub(crate) fn classify_incoming_level_sound(
         let ch = match path {
             "item.winchester_fire" => SoundChannel::FireBlast,
             "item.winchester_thump" => SoundChannel::BassThump,
+            "item.winchester_echo_open" | "item.winchester_echo_cave" => SoundChannel::Echo,
+            "item.winchester_bullet_crack"
+            | "item.winchester_bullet_whiz"
+            | "item.winchester_impact_flesh"
+            | "item.winchester_impact_armor" => SoundChannel::WorldImpact,
             "animation.winchester_reload_intro"
             | "animation.winchester_reload_insert"
             | "animation.winchester_reload_end" => SoundChannel::Reload,
@@ -553,6 +577,8 @@ pub(crate) fn setting_specs() -> Vec<SettingSpec> {
         range_pct(KEY_AUDIO_FIRE, 0.0, 200.0, 5.0, 100.0),
         range_pct(KEY_AUDIO_BASS_THUMP, 0.0, 200.0, 5.0, 100.0),
         choice_opt(KEY_AUDIO_FIRE_TONE, &["balanced", "deep", "crisp"], 0),
+        range_pct(KEY_AUDIO_ECHO, 0.0, 200.0, 5.0, 100.0),
+        toggle_opt(KEY_AUDIO_CONCUSSION, true),
         range_pct(KEY_AUDIO_MECHANISM, 0.0, 200.0, 5.0, 100.0),
         range_pct(KEY_AUDIO_RELOAD, 0.0, 200.0, 5.0, 100.0),
         range_pct(KEY_AUDIO_HANDLING, 0.0, 200.0, 5.0, 100.0),
@@ -650,7 +676,7 @@ mod tests {
     #[test]
     fn all_registered_setting_specs_validate_with_unique_keys() {
         let specs = setting_specs();
-        assert_eq!(specs.len(), 31);
+        assert_eq!(specs.len(), 33);
         let mut seen = BTreeSet::new();
         for spec in &specs {
             assert_eq!(spec.check(), Ok(()), "invalid spec: {}", spec.key);
@@ -706,6 +732,16 @@ mod tests {
         assert_eq!(HitConfirmSound::Click.sound_spec(), Some((SND_HIT_CLICK, 0.48, 1.00)));
         assert_eq!(default_channel_for_local_sound(SND_SLING), SoundChannel::Handling);
         assert_eq!(default_channel_for_local_sound(SND_DRY_FIRE), SoundChannel::Feedback);
+        assert_eq!(default_channel_for_local_sound(SND_ECHO_OPEN), SoundChannel::Echo);
+        assert_eq!(default_channel_for_local_sound(SND_ECHO_CAVE), SoundChannel::Echo);
+        assert_eq!(
+            default_channel_for_local_sound(SND_BULLET_CRACK),
+            SoundChannel::WorldImpact
+        );
+        assert_eq!(
+            default_channel_for_local_sound(SND_IMPACT_ARMOR),
+            SoundChannel::WorldImpact
+        );
     }
 
     #[test]

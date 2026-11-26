@@ -11,7 +11,7 @@ use mod_api::{
 };
 
 use crate::constants::*;
-use crate::server::consume_bullet_water_splash_on_impact;
+use crate::server::{consume_bullet_water_splash_on_impact, flush_bullet_flyby_on_impact};
 use crate::{
     holding_rifle_recently, is_point_in_water, play_local_positional_foley, BulletImpactSync,
     BELL_BLOCK_KEY, BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC,
@@ -621,6 +621,7 @@ pub(crate) fn handle_bullet_terrain_impact(
         return;
     };
     consume_bullet_water_splash_on_impact(host, level, event.at);
+    flush_bullet_flyby_on_impact(host, level, event.owner, event.at, None);
 
     let underwater =
         is_point_in_water(host, level, impact_fx_pos) || is_point_in_water(host, level, event.at);

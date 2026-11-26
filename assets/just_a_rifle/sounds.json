@@ -21,6 +21,96 @@
       }
     ]
   },
+  "item.winchester_echo_open": {
+    "subtitle": "subtitles.just_a_rifle.winchester_echo",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_echo_open",
+        "volume": 0.92,
+        "pitch": 1.0,
+        "attenuation_distance": 64
+      }
+    ]
+  },
+  "item.winchester_echo_cave": {
+    "subtitle": "subtitles.just_a_rifle.winchester_echo",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_echo_cave",
+        "volume": 0.94,
+        "pitch": 1.0,
+        "attenuation_distance": 56
+      }
+    ]
+  },
+  "item.winchester_bullet_crack": {
+    "subtitle": "subtitles.just_a_rifle.winchester_bullet_crack",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_bullet_crack_1",
+        "volume": 0.95,
+        "pitch": 1.0,
+        "attenuation_distance": 18
+      },
+      {
+        "name": "just_a_rifle:winchester_bullet_crack_2",
+        "volume": 0.95,
+        "pitch": 1.0,
+        "attenuation_distance": 18
+      }
+    ]
+  },
+  "item.winchester_bullet_whiz": {
+    "subtitle": "subtitles.just_a_rifle.winchester_bullet_whiz",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_bullet_whiz_1",
+        "volume": 0.9,
+        "pitch": 1.0,
+        "attenuation_distance": 16
+      },
+      {
+        "name": "just_a_rifle:winchester_bullet_whiz_2",
+        "volume": 0.9,
+        "pitch": 1.0,
+        "attenuation_distance": 16
+      }
+    ]
+  },
+  "item.winchester_impact_flesh": {
+    "subtitle": "subtitles.just_a_rifle.winchester_impact_flesh",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_impact_flesh_1",
+        "volume": 0.92,
+        "pitch": 1.0,
+        "attenuation_distance": 20
+      },
+      {
+        "name": "just_a_rifle:winchester_impact_flesh_2",
+        "volume": 0.92,
+        "pitch": 1.0,
+        "attenuation_distance": 20
+      }
+    ]
+  },
+  "item.winchester_impact_armor": {
+    "subtitle": "subtitles.just_a_rifle.winchester_impact_armor",
+    "sounds": [
+      {
+        "name": "just_a_rifle:winchester_impact_armor_1",
+        "volume": 0.96,
+        "pitch": 1.0,
+        "attenuation_distance": 28
+      },
+      {
+        "name": "just_a_rifle:winchester_impact_armor_2",
+        "volume": 0.96,
+        "pitch": 1.0,
+        "attenuation_distance": 28
+      }
+    ]
+  },
   "item.winchester_lever": {
     "subtitle": "subtitles.just_a_rifle.winchester_lever",
     "sounds": [

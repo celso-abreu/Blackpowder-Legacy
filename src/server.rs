@@ -6,20 +6,20 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use mod_api::{
-    ClientHost, EntityRef, EntityUuid, Hand, Host, HostSide, IPayloadContext, Identifier,
-    InteractionResult, ItemBarEvent, ItemPart, ItemStack, LevelRef, LivingRef, OnUseTickEvent,
-    ParticleKey, ParticleOptions, ReleaseUsingEvent, ServerHost, ShouldCauseReequipAnimationEvent,
-    SoundSource, UseDurationEvent, UseItemEvent, VarInt,
+    ClientHost, EntityRef, EntityUuid, EquipmentSlot, Hand, Host, HostSide, IPayloadContext,
+    Identifier, InteractionResult, ItemBarEvent, ItemPart, ItemStack, LevelRef, LightLayer,
+    LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions, ReleaseUsingEvent, ServerHost,
+    ShouldCauseReequipAnimationEvent, SoundSource, UseDurationEvent, UseItemEvent, VarInt,
 };
 
 use crate::constants::*;
-use crate::exploration::{grant_mod_criterion, record_bullet_shot};
+use crate::exploration::{distance_3d, grant_mod_criterion, record_bullet_shot};
 use crate::skin::{default_skin_for_uuid, parse_mojang_skin_property};
 use crate::{
-    is_point_in_water, RifleInput, RifleSkinSync, RifleSync, RifleThirdPersonSync, AIMING,
-    AIM_LAST_TICK, BUBBLE_KEY, BUBBLE_POP_KEY, CLIENT_RELOADING, CLIENT_SPRINTING, CLIENT_TICKS,
-    FLAME_KEY, RIFLE_SKIN_SYNC, RIFLE_SYNC, RIFLE_TP_SYNC, SERVER_TICKS, SMOKE_KEY, SPLASH_KEY,
-    WHITE_SMOKE_KEY,
+    is_point_in_water, RifleAcousticSync, RifleInput, RifleSkinSync, RifleSync,
+    RifleThirdPersonSync, AIMING, AIM_LAST_TICK, BUBBLE_KEY, BUBBLE_POP_KEY, CLIENT_RELOADING,
+    CLIENT_SPRINTING, CLIENT_TICKS, FLAME_KEY, RIFLE_ACOUSTIC_SYNC, RIFLE_SKIN_SYNC, RIFLE_SYNC,
+    RIFLE_TP_SYNC, SERVER_TICKS, SMOKE_KEY, SPLASH_KEY, WHITE_SMOKE_KEY,
 };
 
 static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new());
@@ -30,11 +30,295 @@ static ACTIVE_BULLETS: Mutex<Vec<ActiveBullet>> = Mutex::new(Vec::new());
 #[derive(Clone, Copy)]
 struct ActiveBullet {
     entity: EntityRef,
+    shooter_eid: u32,
+    origin: [f64; 3],
     prev_pos: [f64; 3],
     in_water: bool,
+    terminated: bool,
+    whizzed_eids: [u32; 4],
     pending_splash: Option<[f64; 3]>,
     spawn_tick: u64,
     last_step_tick: u64,
+}
+
+impl ActiveBullet {
+    fn has_whizzed(&self, eid: u32) -> bool {
+        eid != 0 && self.whizzed_eids.contains(&eid)
+    }
+
+    fn mark_whizzed(&mut self, eid: u32) {
+        if eid == 0 || self.has_whizzed(eid) {
+            return;
+        }
+        for slot in &mut self.whizzed_eids {
+            if *slot == 0 {
+                *slot = eid;
+                break;
+            }
+        }
+    }
+}
+
+pub(crate) fn pack_coord_sub16(v: f64) -> VarInt {
+    if !v.is_finite() {
+        return VarInt(0);
+    }
+    let scaled = (v * 16.0).round().clamp(-500_000_000.0, 500_000_000.0) as i32;
+    VarInt(scaled)
+}
+
+pub(crate) fn unpack_coord_sub16(v: VarInt) -> f64 {
+    f64::from(v.0) * (1.0 / 16.0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FlybyHit {
+    pub(crate) closest_point: [f64; 3],
+    pub(crate) is_supersonic_crack: bool,
+    pub(crate) proximity: f32,
+}
+
+/// Evaluates whether a `.44-40` bullet segment `seg_a -> seg_b` reaches its true closest point of
+/// approach past `listener_eye` (`<= FLYBY_MAX_RADIUS`), distinguishing sharp supersonic Mach
+/// snaps (`<= 38m` & `<= 2.35m` miss) from transonic/subsonic Doppler lead whizzes downrange.
+pub(crate) fn evaluate_bullet_flyby(
+    muzzle_origin: [f64; 3],
+    seg_a: [f64; 3],
+    seg_b: [f64; 3],
+    listener_eye: [f64; 3],
+    terminated: bool,
+) -> Option<FlybyHit> {
+    let ab = [
+        seg_b[0] - seg_a[0],
+        seg_b[1] - seg_a[1],
+        seg_b[2] - seg_a[2],
+    ];
+    let len_sq = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+    if !len_sq.is_finite() || len_sq < 1e-6 {
+        return None;
+    }
+
+    let b_to_eye = [
+        listener_eye[0] - seg_b[0],
+        listener_eye[1] - seg_b[1],
+        listener_eye[2] - seg_b[2],
+    ];
+    let ahead_dot = b_to_eye[0] * ab[0] + b_to_eye[1] * ab[1] + b_to_eye[2] * ab[2];
+
+    // While still in flight, defer until `seg_b` reaches or crosses the listener's perpendicular
+    // plane so we always capture the true global minimum distance rather than an early approach step.
+    if !terminated && ahead_dot > 0.0 {
+        return None;
+    }
+
+    let a_to_eye = [
+        listener_eye[0] - seg_a[0],
+        listener_eye[1] - seg_a[1],
+        listener_eye[2] - seg_a[2],
+    ];
+    let t = ((a_to_eye[0] * ab[0] + a_to_eye[1] * ab[1] + a_to_eye[2] * ab[2]) / len_sq)
+        .clamp(0.0, 1.0);
+    let closest = [
+        seg_a[0] + ab[0] * t,
+        seg_a[1] + ab[1] * t,
+        seg_a[2] + ab[2] * t,
+    ];
+    let miss_distance = distance_3d(listener_eye, closest);
+    if !miss_distance.is_finite() || miss_distance > FLYBY_MAX_RADIUS {
+        return None;
+    }
+
+    // If the bullet terminated BEFORE reaching the listener's plane (e.g. hitting the ground in
+    // front of them), only trigger a grazing whiz when the impact itself is tight (`<= 2.75m`).
+    if terminated && ahead_dot > 0.0 && miss_distance > 2.75 {
+        return None;
+    }
+
+    let travel_distance = distance_3d(muzzle_origin, closest);
+    if !travel_distance.is_finite() || travel_distance < FLYBY_MIN_MUZZLE_DIST {
+        return None;
+    }
+
+    let is_supersonic_crack =
+        miss_distance <= FLYBY_CRACK_RADIUS && travel_distance <= FLYBY_SUPERSONIC_RANGE;
+    let proximity = (1.0 - (miss_distance / FLYBY_MAX_RADIUS)).clamp(0.0, 1.0) as f32;
+    Some(FlybyHit {
+        closest_point: closest,
+        is_supersonic_crack,
+        proximity,
+    })
+}
+
+/// Pure acoustic classifier mapping sky visibility, sky-light level, overhead ceiling probes, and
+/// horizontal wall reflections around the muzzle into `(ACOUSTIC_CUE_SHOT_*, intensity_pm)`.
+pub(crate) fn classify_shot_acoustics(
+    can_see_sky: bool,
+    sky_light: i32,
+    low_ceiling: bool,
+    med_ceiling: bool,
+    tight_walls: u8,
+    reflect_walls: u8,
+) -> (i32, i32) {
+    let sky = sky_light.clamp(0, 15);
+    let tw = i32::from(tight_walls.min(4));
+    let rw = i32::from(reflect_walls.min(4));
+
+    if !can_see_sky
+        && (med_ceiling || sky <= 3)
+        && (sky <= 4 || tw >= 2 || (low_ceiling && tw >= 1))
+    {
+        let intensity =
+            (480 + tw * 105 + if low_ceiling { 120 } else { 0 } + (4 - sky.min(4)) * 30)
+                .clamp(480, 1000);
+        (ACOUSTIC_CUE_SHOT_CONFINED, intensity)
+    } else if !can_see_sky && (med_ceiling || low_ceiling) {
+        let intensity = (420 + tw * 90 + rw * 55).clamp(420, 880);
+        (ACOUSTIC_CUE_SHOT_SEMI, intensity)
+    } else {
+        let intensity = (380 + rw * 145 + tw * 35).clamp(380, 1000);
+        (ACOUSTIC_CUE_SHOT_OPEN, intensity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntityImpactKind {
+    ShieldBlock,
+    ArmorMetal,
+    RigidConstruct,
+    Flesh,
+}
+
+fn is_metallic_armor_id(item_id: &str) -> bool {
+    let path = item_id.split_once(':').map_or(item_id, |(_, p)| p);
+    if path.starts_with("leather_") || path.starts_with("turtle_") || path == "wolf_armor" {
+        return false;
+    }
+    path.starts_with("iron_")
+        || path.starts_with("chainmail_")
+        || path.starts_with("golden_")
+        || path.starts_with("diamond_")
+        || path.starts_with("netherite_")
+        || path.ends_with("_horse_armor")
+}
+
+/// Classifies the ballistic target material when a `.44-40` slug hits an entity so armored targets,
+/// shields, golems, skeletons, and unarmored bodies produce distinct 3D impact audio.
+pub(crate) fn classify_entity_impact_kind(
+    entity_kind_id: &str,
+    armor_item_id: Option<&str>,
+    blocking_front: bool,
+) -> EntityImpactKind {
+    if blocking_front {
+        return EntityImpactKind::ShieldBlock;
+    }
+    if armor_item_id.is_some_and(is_metallic_armor_id) {
+        return EntityImpactKind::ArmorMetal;
+    }
+    let path = entity_kind_id
+        .split_once(':')
+        .map_or(entity_kind_id, |(_, p)| p);
+    if matches!(
+        path,
+        "iron_golem" | "copper_golem" | "shulker" | "blaze"
+    ) || path.contains("minecart")
+    {
+        return EntityImpactKind::ArmorMetal;
+    }
+    if matches!(
+        path,
+        "skeleton"
+            | "stray"
+            | "bogged"
+            | "wither_skeleton"
+            | "skeleton_horse"
+            | "wither"
+            | "armor_stand"
+            | "creaking"
+    ) || path.contains("boat")
+        || path.contains("raft")
+    {
+        return EntityImpactKind::RigidConstruct;
+    }
+    EntityImpactKind::Flesh
+}
+
+pub(crate) fn emit_entity_ballistic_impact_sound(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    victim_id: u32,
+    hit_at: [f64; 3],
+    ray_dir: [f64; 3],
+    aabb: Option<[[f64; 3]; 2]>,
+    is_headshot: bool,
+    now: u64,
+) {
+    let Some(victim_ent) = host.entity(victim_id) else {
+        return;
+    };
+    let kind_id = victim_ent
+        .kind(host)
+        .map(|k| k.id(host).to_string())
+        .unwrap_or_default();
+
+    let mut blocking_front = false;
+    let mut armor_id: Option<String> = None;
+
+    if let Some(liv) = host.living(victim_ent) {
+        if liv.is_blocking(host).unwrap_or(false)
+            && let Some(look) = victim_ent.view_vector(host)
+        {
+            let horiz_dot = look[0] * ray_dir[0] + look[2] * ray_dir[2];
+            blocking_front = horiz_dot < -0.05;
+        }
+
+        let hit_slot = if is_headshot {
+            EquipmentSlot::Head
+        } else if let Some(b) = aabb {
+            let h = (b[1][1] - b[0][1]).max(0.1);
+            let rel_y = ((hit_at[1] - b[0][1]) / h).clamp(0.0, 1.0);
+            if rel_y >= 0.52 {
+                EquipmentSlot::Chest
+            } else if rel_y >= 0.24 {
+                EquipmentSlot::Legs
+            } else {
+                EquipmentSlot::Feet
+            }
+        } else {
+            EquipmentSlot::Chest
+        };
+        armor_id = liv
+            .equipment(host, hit_slot)
+            .map(|st| st.item().id(host).to_string());
+    }
+
+    let impact_kind = classify_entity_impact_kind(&kind_id, armor_id.as_deref(), blocking_front);
+    let j = shot_pitch_jitter(now, u128::from(victim_id) * 0x9E37_79B9);
+    let underwater = is_point_in_water(host, level, hit_at);
+    let water_vol = if underwater { 0.72 } else { 1.0 };
+    let water_pitch = if underwater { 0.78 } else { 1.0 };
+
+    let (snd, base_vol, base_pitch) = match impact_kind {
+        EntityImpactKind::ShieldBlock => (SND_IMPACT_ARMOR, 0.96, 0.86 + 0.03 * j),
+        EntityImpactKind::ArmorMetal => (
+            SND_IMPACT_ARMOR,
+            if is_headshot { 1.00 } else { 0.92 },
+            (if is_headshot { 1.12 } else { 0.98 }) + 0.04 * j,
+        ),
+        EntityImpactKind::RigidConstruct => (SND_IMPACT_FLESH, 0.86, 1.25 + 0.04 * j),
+        EntityImpactKind::Flesh => (
+            SND_IMPACT_FLESH,
+            if is_headshot { 0.96 } else { 0.86 },
+            (if is_headshot { 1.10 } else { 0.99 }) + 0.04 * j,
+        ),
+    };
+    level.play_sound(
+        host,
+        snd,
+        hit_at,
+        SoundSource::Players,
+        base_vol * water_vol,
+        (base_pitch * water_pitch).clamp(0.5, 2.0),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -650,9 +934,217 @@ fn emit_cavitation_trail(
     }
 }
 
+fn probe_and_broadcast_shot_acoustics(
+    host: &mut dyn ServerHost,
+    shooter: mod_api::PlayerRef,
+    muzzle: [f64; 3],
+    level: LevelRef,
+) {
+    let Some(chan) = RIFLE_ACOUSTIC_SYNC.get() else {
+        return;
+    };
+    let bp = [
+        muzzle[0].floor() as i32,
+        muzzle[1].floor() as i32,
+        muzzle[2].floor() as i32,
+    ];
+    let can_see_sky = level.can_see_sky(host, bp).unwrap_or(false);
+    let sky_light = level
+        .brightness(host, LightLayer::Sky, bp)
+        .unwrap_or(if can_see_sky { 15 } else { 0 })
+        .clamp(0, 15);
+    let low_ceiling = !level
+        .line_of_sight(host, muzzle, [muzzle[0], muzzle[1] + 5.0, muzzle[2]])
+        .unwrap_or(true);
+    let med_ceiling = low_ceiling
+        || !level
+            .line_of_sight(host, muzzle, [muzzle[0], muzzle[1] + 14.0, muzzle[2]])
+            .unwrap_or(true);
+
+    let mut tight_walls = 0_u8;
+    let mut reflect_walls = 0_u8;
+    for (dx, dz) in [(1.0_f64, 0.0_f64), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        let hit_tight = !level
+            .line_of_sight(
+                host,
+                muzzle,
+                [muzzle[0] + dx * 6.5, muzzle[1] + 0.2, muzzle[2] + dz * 6.5],
+            )
+            .unwrap_or(true);
+        if hit_tight {
+            tight_walls += 1;
+            reflect_walls += 1;
+        } else {
+            let hit_far = !level
+                .line_of_sight(
+                    host,
+                    muzzle,
+                    [muzzle[0] + dx * 24.0, muzzle[1] + 1.2, muzzle[2] + dz * 24.0],
+                )
+                .unwrap_or(true);
+            if hit_far {
+                reflect_walls += 1;
+            }
+        }
+    }
+
+    let (cue, intensity_pm) = classify_shot_acoustics(
+        can_see_sky,
+        sky_light,
+        low_ceiling,
+        med_ceiling,
+        tight_walls,
+        reflect_walls,
+    );
+    let payload = RifleAcousticSync {
+        cue: VarInt(cue),
+        x_sub16: pack_coord_sub16(muzzle[0]),
+        y_sub16: pack_coord_sub16(muzzle[1]),
+        z_sub16: pack_coord_sub16(muzzle[2]),
+        intensity_pm: VarInt(intensity_pm),
+    };
+
+    if let Some(players) = level.online_players(host) {
+        for p in players {
+            let near = p == shooter
+                || p.entity().position(host).is_some_and(|pos| {
+                    let dx = pos[0] - muzzle[0];
+                    let dy = pos[1] - muzzle[1];
+                    let dz = pos[2] - muzzle[2];
+                    dx * dx + dy * dy + dz * dz <= ACOUSTIC_BROADCAST_RADIUS_SQ
+                });
+            if near {
+                let _ = chan.send(host, p, &payload);
+            }
+        }
+    }
+}
+
+fn emit_segment_flybys(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    bullet: &mut ActiveBullet,
+    seg_a: [f64; 3],
+    seg_b: [f64; 3],
+    skip_victim_eid: Option<u32>,
+    terminated: bool,
+) {
+    let Some(chan) = RIFLE_ACOUSTIC_SYNC.get() else {
+        return;
+    };
+    let Some(players) = level.online_players(host) else {
+        return;
+    };
+    for p in players {
+        let pid = p.entity().id();
+        if pid == 0
+            || pid == bullet.shooter_eid
+            || Some(pid) == skip_victim_eid
+            || bullet.has_whizzed(pid)
+        {
+            continue;
+        }
+        let Some(eye) = p.entity().eye_position(host) else {
+            continue;
+        };
+        let Some(hit) = evaluate_bullet_flyby(bullet.origin, seg_a, seg_b, eye, terminated) else {
+            continue;
+        };
+        if is_point_in_water(host, level, eye) {
+            continue;
+        }
+        if !level
+            .line_of_sight(host, hit.closest_point, eye)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        bullet.mark_whizzed(pid);
+        let payload = RifleAcousticSync {
+            cue: VarInt(if hit.is_supersonic_crack {
+                ACOUSTIC_CUE_BULLET_CRACK
+            } else {
+                ACOUSTIC_CUE_BULLET_WHIZ
+            }),
+            x_sub16: pack_coord_sub16(hit.closest_point[0]),
+            y_sub16: pack_coord_sub16(hit.closest_point[1]),
+            z_sub16: pack_coord_sub16(hit.closest_point[2]),
+            intensity_pm: VarInt((hit.proximity * 1000.0).round().clamp(0.0, 1000.0) as i32),
+        };
+        let _ = chan.send(host, p, &payload);
+    }
+}
+
+/// Flushes terminal-tick bullet flybys when a `.44-40` projectile impacts terrain or an entity
+/// mid-tick (`projectile_impact` runs before `level_tick_post` and discards the projectile).
+pub(crate) fn flush_bullet_flyby_on_impact(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    owner_eid: u32,
+    hit_at: [f64; 3],
+    skip_victim_eid: Option<u32>,
+) {
+    let matched_idx = {
+        let active = ACTIVE_BULLETS.lock().unwrap();
+        let mut best: Option<(usize, f64)> = None;
+        for (idx, b) in active.iter().enumerate() {
+            if b.terminated || b.in_water {
+                continue;
+            }
+            if owner_eid != 0 && b.shooter_eid != 0 && b.shooter_eid != owner_eid {
+                continue;
+            }
+            let end = if let Some(vel) = b.entity.velocity(host) {
+                [
+                    b.prev_pos[0] + vel[0],
+                    b.prev_pos[1] + vel[1],
+                    b.prev_pos[2] + vel[2],
+                ]
+            } else {
+                b.prev_pos
+            };
+            let dx = end[0] - hit_at[0];
+            let dy = end[1] - hit_at[1];
+            let dz = end[2] - hit_at[2];
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if d2 <= 900.0 && best.is_none_or(|(_, best_d2)| d2 < best_d2) {
+                best = Some((idx, d2));
+            }
+        }
+        best.map(|(i, _)| i)
+    };
+
+    let Some(idx) = matched_idx else {
+        return;
+    };
+    let mut bullet_copy = {
+        let mut active = ACTIVE_BULLETS.lock().unwrap();
+        let Some(b) = active.get_mut(idx) else {
+            return;
+        };
+        b.terminated = true;
+        *b
+    };
+    let seg_a = bullet_copy.prev_pos;
+    emit_segment_flybys(
+        host,
+        level,
+        &mut bullet_copy,
+        seg_a,
+        hit_at,
+        skip_victim_eid,
+        true,
+    );
+    if let Some(b) = ACTIVE_BULLETS.lock().unwrap().get_mut(idx) {
+        b.whizzed_eids = bullet_copy.whizzed_eids;
+    }
+}
+
 fn register_spawned_bullet(
     host: &mut dyn ServerHost,
     entity: EntityRef,
+    shooter_eid: u32,
+    origin: [f64; 3],
     muzzle_in_water: bool,
     now: u64,
 ) {
@@ -694,8 +1186,12 @@ fn register_spawned_bullet(
     }
     active.push(ActiveBullet {
         entity,
+        shooter_eid,
+        origin,
         prev_pos: pos0,
         in_water: starts_in_water,
+        terminated: false,
+        whizzed_eids: [0; 4],
         pending_splash,
         spawn_tick: now,
         last_step_tick: now,
@@ -743,7 +1239,7 @@ pub(crate) fn tick_active_bullets(host: &mut dyn ServerHost, now: u64) {
 
     let mut kept = Vec::with_capacity(bullets.len());
     for mut b in bullets {
-        if now.saturating_sub(b.spawn_tick) > 120 || !host.entity_is_valid(b.entity) {
+        if b.terminated || now.saturating_sub(b.spawn_tick) > 120 || !host.entity_is_valid(b.entity) {
             continue;
         }
         let Some(level) = b.entity.level(host) else {
@@ -789,6 +1285,8 @@ pub(crate) fn tick_active_bullets(host: &mut dyn ServerHost, now: u64) {
             }
         } else {
             b.in_water = false;
+            let seg_a = b.prev_pos;
+            emit_segment_flybys(host, level, &mut b, seg_a, pos, None, false);
             let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
             if speed.is_finite() && speed > 1e-4 {
                 let dir = [vel[0] / speed, vel[1] / speed, vel[2] / speed];
@@ -976,7 +1474,19 @@ fn fire_rifle(
         return;
     };
 
-    register_spawned_bullet(host, shot.entity(), muzzle_in_water, now);
+    let shot_origin = frame
+        .as_ref()
+        .map(|f| f.muzzle)
+        .or_else(|| player.entity().eye_position(host))
+        .or_else(|| player.entity().position(host));
+    register_spawned_bullet(
+        host,
+        shot.entity(),
+        player.entity().id(),
+        shot_origin.unwrap_or([0.0; 3]),
+        muzzle_in_water,
+        now,
+    );
     if let Some(origin) = frame
         .as_ref()
         .map(|f| f.eye)
@@ -1011,6 +1521,9 @@ fn fire_rifle(
     } else {
         play_world_sound(host, player, SND_FIRE, 2.5, 1.0 + 0.028 * j);
         play_world_sound(host, player, SND_THUMP, 1.15, 1.0 + 0.022 * j);
+        if let Some(ref f) = frame {
+            probe_and_broadcast_shot_acoustics(host, player, f.muzzle, f.level);
+        }
     }
     if let Some(ref f) = frame {
         muzzle_effects(host, f, smoke, aim_pct, muzzle_in_water);
@@ -1298,5 +1811,124 @@ mod tests {
             (2.5..=4.0).contains(&total_depth),
             "unexpected total underwater penetration: {total_depth}"
         );
+    }
+
+    #[test]
+    fn bullet_flyby_waits_for_closest_approach_and_splits_supersonic_vs_subsonic() {
+        let muzzle = [0.0, 64.0, 0.0];
+        let listener = [0.6, 64.0, 20.0];
+
+        // Step 1 (`0 -> 15m`): bullet is still 5m in front of listener (`ahead_dot > 0`) -> defer!
+        assert_eq!(
+            evaluate_bullet_flyby(
+                muzzle,
+                [0.0, 64.0, 0.0],
+                [0.0, 64.0, 15.0],
+                listener,
+                false
+            ),
+            None
+        );
+
+        // Step 2 (`15 -> 30m`): crosses listener plane at `z = 20.0`, `miss = 0.6m`, `travel = 20m` -> crack!
+        let hit = evaluate_bullet_flyby(
+            muzzle,
+            [0.0, 64.0, 15.0],
+            [0.0, 64.0, 30.0],
+            listener,
+            false,
+        )
+        .expect("expected supersonic flyby");
+        assert!(hit.is_supersonic_crack);
+        assert!((distance_3d(listener, hit.closest_point) - 0.6).abs() < 1e-6);
+        assert!((hit.closest_point[2] - 20.0).abs() < 1e-6);
+        assert!(hit.proximity > 0.85);
+
+        // Downrange (`55m > 38m`) close pass (`1.1m`): transonic/subsonic Doppler lead whiz!
+        let far_whiz = evaluate_bullet_flyby(
+            muzzle,
+            [0.0, 64.0, 45.0],
+            [0.0, 64.0, 60.0],
+            [1.1, 64.0, 55.0],
+            false,
+        )
+        .expect("expected downrange whiz");
+        assert!(!far_whiz.is_supersonic_crack);
+
+        // Point-blank (`1.2m < 2.6m` from muzzle) never triggers a flyby on bystanders hugging barrel.
+        assert_eq!(
+            evaluate_bullet_flyby(
+                muzzle,
+                [0.0, 64.0, 0.0],
+                [0.0, 64.0, 15.0],
+                [0.5, 64.0, 1.2],
+                false
+            ),
+            None
+        );
+
+        // Terminal wall hit 4.5m in front of listener (`ahead_dot > 0` and `miss > 2.75m`) is ignored,
+        // whereas a wall hit 0.9m right behind the listener's head triggers a crisp snap.
+        assert_eq!(
+            evaluate_bullet_flyby(
+                muzzle,
+                [0.0, 64.0, 5.0],
+                [0.0, 64.0, 15.5],
+                listener,
+                true
+            ),
+            None
+        );
+        let wall_behind = evaluate_bullet_flyby(
+            muzzle,
+            [0.0, 64.0, 15.0],
+            [0.0, 64.0, 20.9],
+            listener,
+            true,
+        )
+        .expect("expected terminal flyby on wall right behind listener");
+        assert!(wall_behind.is_supersonic_crack);
+    }
+
+    #[test]
+    fn shot_acoustics_and_entity_impact_classifiers_cover_all_regimes() {
+        let (cave_cue, cave_int) = classify_shot_acoustics(false, 0, true, true, 3, 4);
+        assert_eq!(cave_cue, ACOUSTIC_CUE_SHOT_CONFINED);
+        assert!(cave_int >= 850);
+
+        let (porch_cue, _) = classify_shot_acoustics(false, 12, false, true, 0, 2);
+        assert_eq!(porch_cue, ACOUSTIC_CUE_SHOT_SEMI);
+
+        let (plains_cue, plains_int) = classify_shot_acoustics(true, 15, false, false, 0, 0);
+        let (canyon_cue, canyon_int) = classify_shot_acoustics(true, 15, false, false, 1, 4);
+        assert_eq!(plains_cue, ACOUSTIC_CUE_SHOT_OPEN);
+        assert_eq!(canyon_cue, ACOUSTIC_CUE_SHOT_OPEN);
+        assert!(canyon_int > plains_int + 300);
+
+        assert_eq!(
+            classify_entity_impact_kind("minecraft:player", Some("minecraft:iron_chestplate"), false),
+            EntityImpactKind::ArmorMetal
+        );
+        assert_eq!(
+            classify_entity_impact_kind("minecraft:player", Some("minecraft:leather_chestplate"), false),
+            EntityImpactKind::Flesh
+        );
+        assert_eq!(
+            classify_entity_impact_kind("minecraft:player", None, true),
+            EntityImpactKind::ShieldBlock
+        );
+        assert_eq!(
+            classify_entity_impact_kind("minecraft:iron_golem", None, false),
+            EntityImpactKind::ArmorMetal
+        );
+        assert_eq!(
+            classify_entity_impact_kind("minecraft:skeleton", None, false),
+            EntityImpactKind::RigidConstruct
+        );
+
+        for coord in [-29_999_984.25_f64, -123.4375, 0.0, 42.6875, 29_999_984.5] {
+            let roundtrip = unpack_coord_sub16(pack_coord_sub16(coord));
+            assert!((roundtrip - coord).abs() <= 0.0625 + 1e-6);
+        }
     }
 }

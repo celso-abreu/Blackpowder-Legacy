@@ -21,6 +21,12 @@ pub(crate) const MODEL_BULLET_HOLE_ID: &str = "just_a_rifle:special/bullet_hole"
 
 pub(crate) const SND_FIRE: &str = "just_a_rifle:item.winchester_fire";
 pub(crate) const SND_THUMP: &str = "just_a_rifle:item.winchester_thump";
+pub(crate) const SND_ECHO_OPEN: &str = "just_a_rifle:item.winchester_echo_open";
+pub(crate) const SND_ECHO_CAVE: &str = "just_a_rifle:item.winchester_echo_cave";
+pub(crate) const SND_BULLET_CRACK: &str = "just_a_rifle:item.winchester_bullet_crack";
+pub(crate) const SND_BULLET_WHIZ: &str = "just_a_rifle:item.winchester_bullet_whiz";
+pub(crate) const SND_IMPACT_FLESH: &str = "just_a_rifle:item.winchester_impact_flesh";
+pub(crate) const SND_IMPACT_ARMOR: &str = "just_a_rifle:item.winchester_impact_armor";
 pub(crate) const SND_LEVER: &str = "just_a_rifle:item.winchester_lever";
 pub(crate) const SND_COCK: &str = "just_a_rifle:item.winchester_cock";
 pub(crate) const SND_DRY_FIRE: &str = "just_a_rifle:item.winchester_dry_fire";
@@ -55,6 +61,7 @@ pub(crate) const SYNC_CHANNEL: &str = "just_a_rifle:rifle_sync";
 pub(crate) const SKIN_CHANNEL: &str = "just_a_rifle:rifle_skin";
 pub(crate) const IMPACT_CHANNEL: &str = "just_a_rifle:bullet_impact";
 pub(crate) const TP_STATE_CHANNEL: &str = "just_a_rifle:rifle_tp_state";
+pub(crate) const ACOUSTIC_CHANNEL: &str = "just_a_rifle:rifle_acoustics";
 
 pub(crate) const POSE_HIP_READY_ID: &str = "just_a_rifle:hip_ready";
 pub(crate) const POSE_SPRINT_CARRY_ID: &str = "just_a_rifle:sprint_carry";
@@ -148,6 +155,19 @@ pub(crate) const TP_CUE_RELOAD_INSERT: i32 = 3;
 pub(crate) const TP_CUE_RELOAD_END_NORM: i32 = 4;
 pub(crate) const TP_CUE_DRY_CLICK: i32 = 5;
 pub(crate) const TP_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
+
+pub(crate) const ACOUSTIC_CUE_SHOT_OPEN: i32 = 1;
+pub(crate) const ACOUSTIC_CUE_SHOT_SEMI: i32 = 2;
+pub(crate) const ACOUSTIC_CUE_SHOT_CONFINED: i32 = 3;
+pub(crate) const ACOUSTIC_CUE_BULLET_CRACK: i32 = 4;
+pub(crate) const ACOUSTIC_CUE_BULLET_WHIZ: i32 = 5;
+pub(crate) const ACOUSTIC_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
+
+/// `.44-40` bullet near-miss flyby envelope (`blocks`).
+pub(crate) const FLYBY_MAX_RADIUS: f64 = 5.5;
+pub(crate) const FLYBY_CRACK_RADIUS: f64 = 2.35;
+pub(crate) const FLYBY_SUPERSONIC_RANGE: f64 = 38.0;
+pub(crate) const FLYBY_MIN_MUZZLE_DIST: f64 = 2.6;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters

@@ -3,7 +3,7 @@
 //! Clean-room Rust `v0.10.0` modular architecture:
 //! - `constants`   — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
 //! - `ballistics`  — Sub-tick 3D ray-AABB headshot geometry & smooth `> 40 m` falloff math.
-//! - `settings`    — `Options > Mods > Config` 31-setting registry & per-channel audio mixer.
+//! - `settings`    — `Options > Mods > Config` 33-setting registry & per-channel audio mixer.
 //! - `skin`        — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
 //! - `arms`        — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
 //! - `pose`        — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
@@ -33,8 +33,8 @@ use mod_api::{
     GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host,
     HostSide, HumanoidPart, IPayloadContext, Identifier, ItemKey, ItemTooltipEvent,
     KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelHost, LevelRandomHost, LevelRef,
-    LevelTickPostEvent, LivingDamagePreEvent, LivingDeathEvent, ModelBakingCompletedEvent,
-    ParticleKey, ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent,
+    LevelTickPostEvent, LightLayer, LivingDamagePreEvent, LivingDeathEvent,
+    ModelBakingCompletedEvent, ParticleKey, ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent,
     Registrar, RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent,
     ServerHost, ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundRef,
     SoundSource, StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer,
@@ -59,8 +59,9 @@ use crate::pose::{
     recoil_envelope, tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
 };
 use crate::server::{
-    find_active_bullet_ray, on_rifle_input, rounds, tick_active_bullets, tick_reload_sessions,
-    Winchester,
+    consume_bullet_water_splash_on_impact, emit_entity_ballistic_impact_sound,
+    find_active_bullet_ray, flush_bullet_flyby_on_impact, on_rifle_input, rounds,
+    tick_active_bullets, tick_reload_sessions, unpack_coord_sub16, Winchester,
 };
 use crate::settings::{
     classify_incoming_level_sound, client_settings, default_channel_for_local_sound,
@@ -131,6 +132,15 @@ pub(crate) struct RifleThirdPersonSync {
     pub(crate) state: VarInt,
 }
 
+#[derive(horizon_mod_api_macros::PayloadCodec)]
+pub(crate) struct RifleAcousticSync {
+    pub(crate) cue: VarInt,
+    pub(crate) x_sub16: VarInt,
+    pub(crate) y_sub16: VarInt,
+    pub(crate) z_sub16: VarInt,
+    pub(crate) intensity_pm: VarInt,
+}
+
 #[derive(Clone, Copy)]
 struct RemoteTpState {
     state: i32,
@@ -188,6 +198,7 @@ pub(crate) static RIFLE_SYNC: OnceLock<ToClient<RifleSync>> = OnceLock::new();
 pub(crate) static RIFLE_SKIN_SYNC: OnceLock<ToClient<RifleSkinSync>> = OnceLock::new();
 pub(crate) static BULLET_IMPACT_SYNC: OnceLock<ToClient<BulletImpactSync>> = OnceLock::new();
 pub(crate) static RIFLE_TP_SYNC: OnceLock<ToClient<RifleThirdPersonSync>> = OnceLock::new();
+pub(crate) static RIFLE_ACOUSTIC_SYNC: OnceLock<ToClient<RifleAcousticSync>> = OnceLock::new();
 static POSE_HIP_READY: OnceLock<CustomArmPose> = OnceLock::new();
 static POSE_SPRINT_CARRY: OnceLock<CustomArmPose> = OnceLock::new();
 static POSE_LEVER_CYCLE: OnceLock<CustomArmPose> = OnceLock::new();
@@ -297,6 +308,19 @@ fn refresh_rifle_models(host: &dyn ClientHost) {
 
 static ACTIVE_ACTION_SOUND: Mutex<Option<(ActionSoundTag, SoundRef)>> = Mutex::new(None);
 static REMOTE_ACTION_SOUNDS: Mutex<BTreeMap<u32, SoundRef>> = Mutex::new(BTreeMap::new());
+static PENDING_CONCUSSION: Mutex<Option<(f32, f32, u32)>> = Mutex::new(None);
+static CONCUSSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+const CONCUSSION_EXEMPT_SOUNDS: &[&str] = &[
+    SND_FIRE,
+    SND_THUMP,
+    SND_ECHO_CAVE,
+    SND_ECHO_OPEN,
+    SND_LEVER,
+    SND_COCK,
+    SND_BULLET_CRACK,
+    SND_BULLET_WHIZ,
+];
 
 fn stop_or_fade_sound(host: &dyn ClientHost, sound: SoundRef, fade_ticks: u32) {
     if fade_ticks == 0 {
@@ -737,6 +761,169 @@ fn on_rifle_tp_sync(
     Ok(())
 }
 
+fn on_rifle_acoustic_sync(
+    value: RifleAcousticSync,
+    cx: &mut dyn IPayloadContext,
+) -> Result<(), String> {
+    let Ok(host) = cx.client_host() else {
+        return Ok(());
+    };
+    let cfg = client_settings();
+    let pos = [
+        unpack_coord_sub16(value.x_sub16),
+        unpack_coord_sub16(value.y_sub16),
+        unpack_coord_sub16(value.z_sub16),
+    ];
+    let intensity = (value.intensity_pm.0 as f32 * 0.001).clamp(0.0, 1.0);
+
+    let cam = host.camera();
+    let listener_pos = cam
+        .as_ref()
+        .map(|c| c.position)
+        .or_else(|| host.local_player().and_then(|p| p.entity().eye_position(host)));
+    let dist = listener_pos.map_or(0.0, |lp| distance_3d(pos, lp));
+    // Speed of sound (~340 m/s = 17 blocks/tick at 20 Hz) for realistic downrange report arrival.
+    let prop_ticks = (dist / 17.0).floor().clamp(0.0, 12.0) as u32;
+    let salt = (value.x_sub16.0 as u64)
+        .wrapping_mul(31)
+        .wrapping_add(value.z_sub16.0 as u64);
+    let j = client_pitch_jitter(salt);
+
+    match value.cue.0 {
+        ACOUSTIC_CUE_BULLET_CRACK => {
+            let vol = 0.72 + 0.28 * intensity;
+            let pitch = 0.96 + 0.12 * intensity + 0.03 * j;
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::WorldImpact,
+                SND_BULLET_CRACK,
+                pos,
+                vol,
+                pitch,
+                0,
+            );
+            // Very close supersonic graze (`<= ~3m`) trails a subtle aerodynamic slipstream wake.
+            if intensity >= 0.45 {
+                let _ = play_local_positional_channel(
+                    host,
+                    SoundChannel::WorldImpact,
+                    SND_BULLET_WHIZ,
+                    pos,
+                    0.36 * intensity,
+                    1.06 + 0.03 * j,
+                    1,
+                );
+            }
+        }
+        ACOUSTIC_CUE_BULLET_WHIZ => {
+            let vol = 0.42 + 0.50 * intensity;
+            let pitch = 0.90 + 0.18 * intensity + 0.03 * j;
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::WorldImpact,
+                SND_BULLET_WHIZ,
+                pos,
+                vol,
+                pitch,
+                0,
+            );
+        }
+        ACOUSTIC_CUE_SHOT_CONFINED => {
+            let (vol, pitch) = if dist <= 32.0 {
+                (
+                    0.62 + 0.42 * intensity,
+                    0.96 + 0.06 * (1.0 - intensity) + 0.025 * j,
+                )
+            } else {
+                let fade = (1.0 - ((dist - 32.0) / 68.0) as f32).clamp(0.18, 1.0);
+                (1.55 * fade, 0.88 + 0.025 * j)
+            };
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Echo,
+                SND_ECHO_CAVE,
+                pos,
+                vol,
+                pitch,
+                (1 + prop_ticks).min(14),
+            );
+
+            // Subtle indoor/cave blast pressure concussion when detonating right near the listener.
+            if cfg.blast_concussion
+                && cfg.vol_master > 0.01
+                && cfg.vol_fire > 0.01
+                && dist <= 5.0
+                && let Some(lp) = listener_pos
+            {
+                let dim = cam
+                    .as_ref()
+                    .map_or(DEFAULT_DIMENSION, |c| c.dimension.as_str());
+                let lbp = [lp[0].floor() as i32, lp[1].floor() as i32, lp[2].floor() as i32];
+                let listener_sky = host
+                    .level(dim)
+                    .and_then(|lvl| lvl.brightness(host, LightLayer::Sky, lbp))
+                    .unwrap_or(0);
+                if listener_sky <= 9 {
+                    let prox = (1.0 - (dist as f32 / 5.0)).clamp(0.0, 1.0);
+                    let amount = ((0.14 + 0.18 * intensity) * prox).clamp(0.05, 0.34);
+                    let lowpass = ((0.28 + 0.26 * intensity) * prox).clamp(0.10, 0.56);
+                    let ticks = (10.0 + 10.0 * intensity * prox).round().clamp(8.0, 20.0) as u32;
+                    *PENDING_CONCUSSION.lock().unwrap() = Some((amount, lowpass, ticks));
+                }
+            }
+        }
+        ACOUSTIC_CUE_SHOT_SEMI => {
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Echo,
+                SND_ECHO_CAVE,
+                pos,
+                0.30 * intensity,
+                1.07 + 0.02 * j,
+                (1 + prop_ticks).min(14),
+            );
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Echo,
+                SND_ECHO_OPEN,
+                pos,
+                0.46 * intensity,
+                0.98 + 0.02 * j,
+                (3 + prop_ticks).min(16),
+            );
+        }
+        ACOUSTIC_CUE_SHOT_OPEN => {
+            let (vol, pitch, after) = if dist <= 32.0 {
+                let base_delay = if intensity >= 0.72 { 2 } else { 3 };
+                (
+                    0.40 + 0.50 * intensity,
+                    0.98 + 0.025 * j,
+                    base_delay + prop_ticks,
+                )
+            } else {
+                // Distant listeners (>32..96m) hear the rolling valley report arrive at speed of sound.
+                let fade = (1.0 - ((dist - 32.0) / 68.0) as f32).clamp(0.16, 1.0);
+                (
+                    (1.55 + 0.45 * intensity) * fade,
+                    0.91 + 0.025 * j,
+                    prop_ticks.clamp(2, 12),
+                )
+            };
+            let _ = play_local_positional_channel(
+                host,
+                SoundChannel::Echo,
+                SND_ECHO_OPEN,
+                pos,
+                vol,
+                pitch,
+                after,
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn count_local_reserve_ammo(host: &dyn ClientHost) -> u32 {
     let Some(cartridge) = CARTRIDGE_KEY.get().copied() else {
         return 0;
@@ -929,11 +1116,16 @@ impl Hooks for Mod {
             PayloadId(TP_STATE_CHANNEL.into()),
             on_rifle_tp_sync,
         );
+        let acoustic_sync = view.play_to_client_typed::<RifleAcousticSync>(
+            PayloadId(ACOUSTIC_CHANNEL.into()),
+            on_rifle_acoustic_sync,
+        );
         let _ = RIFLE_INPUT.set(input);
         let _ = RIFLE_SYNC.set(sync);
         let _ = RIFLE_SKIN_SYNC.set(skin);
         let _ = BULLET_IMPACT_SYNC.set(impact);
         let _ = RIFLE_TP_SYNC.set(tp_sync);
+        let _ = RIFLE_ACOUSTIC_SYNC.set(acoustic_sync);
     }
 
     fn hears_projectile_impacts(&self, _: &dyn Host, event: &mut HearsProjectileImpactsEvent) {
@@ -949,21 +1141,30 @@ impl Hooks for Mod {
             if event.entity.is_none() {
                 handle_bullet_terrain_impact(host, event);
             } else if let Some(victim_id) = event.entity
-                && event.owner != 0
                 && victim_id != event.owner
                 && let Some(level) = host.level(event.dimension)
-                && let Some((shooter, dist)) =
-                    resolve_shooter_and_distance(host, level, event.owner, event.at)
             {
                 let now = SERVER_TICKS.load(Ordering::Relaxed);
+                consume_bullet_water_splash_on_impact(host, level, event.at);
+                flush_bullet_flyby_on_impact(host, level, event.owner, event.at, Some(victim_id));
+
                 let victim_ent = host.entity(victim_id);
                 let aabb = victim_ent.and_then(|e| e.bounding_box(host));
                 let eye_h = victim_ent.and_then(|e| e.eye_height(host));
+                let shooter_dist = if event.owner != 0 {
+                    resolve_shooter_and_distance(host, level, event.owner, event.at)
+                } else {
+                    None
+                };
 
                 let (ray_origin, ray_dir) = find_active_bullet_ray(host, event.at).unwrap_or_else(
                     || {
                         let orig = resolve_shot_origin_for_owner(event.owner)
-                            .or_else(|| shooter.entity().eye_position(host))
+                            .or_else(|| {
+                                shooter_dist
+                                    .as_ref()
+                                    .and_then(|(s, _)| s.entity().eye_position(host))
+                            })
                             .unwrap_or(event.at);
                         (
                             orig,
@@ -979,39 +1180,52 @@ impl Hooks for Mod {
                 let is_headshot = aabb.is_some_and(|bounds| {
                     is_ray_headshot_on_box(ray_origin, ray_dir, event.at, bounds, eye_h)
                 });
-                let eval = evaluate_ballistics(dist, is_headshot);
-                record_pending_impact(event.owner as i32, victim_id as i32, eval);
-                record_bullet_entity_hit(victim_id, shooter.uuid(), dist, eval.is_headshot, now);
+                emit_entity_ballistic_impact_sound(
+                    host,
+                    level,
+                    victim_id,
+                    event.at,
+                    ray_dir,
+                    aabb,
+                    is_headshot,
+                    now,
+                );
 
-                if eval.is_headshot && let Some(crit) = CRIT_KEY.get().copied() {
-                    let head_y = aabb.map_or(event.at[1], |b| {
-                        (b[0][1] + eye_h.unwrap_or((b[1][1] - b[0][1]) * 0.85)).min(b[1][1])
-                    });
-                    let crit_opts = ParticleOptions::simple(crit);
-                    level.send_particles(
-                        host,
-                        &crit_opts,
-                        None,
-                        [event.at[0], head_y, event.at[2]],
-                        [0.14, 0.14, 0.14],
-                        0.18,
-                        7,
-                    );
-                }
+                if let Some((shooter, dist)) = shooter_dist {
+                    let eval = evaluate_ballistics(dist, is_headshot);
+                    record_pending_impact(event.owner as i32, victim_id as i32, eval);
+                    record_bullet_entity_hit(victim_id, shooter.uuid(), dist, eval.is_headshot, now);
 
-                if let Some(sync) = RIFLE_SYNC.get() {
-                    let _ = sync.send(
-                        host,
-                        shooter,
-                        &RifleSync {
-                            kind: VarInt(if is_headshot {
-                                SYNC_HEADSHOT_CONFIRM
-                            } else {
-                                SYNC_HIT_CONFIRM
-                            }),
-                            rounds: VarInt(0),
-                        },
-                    );
+                    if eval.is_headshot && let Some(crit) = CRIT_KEY.get().copied() {
+                        let head_y = aabb.map_or(event.at[1], |b| {
+                            (b[0][1] + eye_h.unwrap_or((b[1][1] - b[0][1]) * 0.85)).min(b[1][1])
+                        });
+                        let crit_opts = ParticleOptions::simple(crit);
+                        level.send_particles(
+                            host,
+                            &crit_opts,
+                            None,
+                            [event.at[0], head_y, event.at[2]],
+                            [0.14, 0.14, 0.14],
+                            0.18,
+                            7,
+                        );
+                    }
+
+                    if let Some(sync) = RIFLE_SYNC.get() {
+                        let _ = sync.send(
+                            host,
+                            shooter,
+                            &RifleSync {
+                                kind: VarInt(if is_headshot {
+                                    SYNC_HEADSHOT_CONFIRM
+                                } else {
+                                    SYNC_HIT_CONFIRM
+                                }),
+                                rounds: VarInt(0),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -1178,11 +1392,16 @@ impl Hooks for Mod {
 
     fn setting_changed(&self, host: &mut dyn ClientHost, _: &mut SettingChangedEvent<'_>) {
         refresh_client_settings(host);
-        if client_settings().ads_mode == AdsMode::Hold
+        let cfg = client_settings();
+        if cfg.ads_mode == AdsMode::Hold
             && TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed)
         {
             AIMING.store(false, Ordering::Relaxed);
             let _ = host.set_mapping_down("key.use", false);
+        }
+        if !cfg.blast_concussion && CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
+            *PENDING_CONCUSSION.lock().unwrap() = None;
+            let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
         }
     }
 
@@ -1308,6 +1527,10 @@ impl Hooks for Mod {
 
         if !host.playing() {
             clear_all_tracked_sounds(host);
+            *PENDING_CONCUSSION.lock().unwrap() = None;
+            if CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
+                let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
+            }
             PENDING_FIRE.store(false, Ordering::Relaxed);
             PENDING_AUTO_RELOAD.store(false, Ordering::Relaxed);
             TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
@@ -1328,6 +1551,18 @@ impl Hooks for Mod {
             anim.action = ActionAnim::None;
             anim.skin_requested = false;
             return;
+        }
+
+        if !cfg.blast_concussion || cfg.vol_master <= 0.01 || cfg.vol_fire <= 0.01 {
+            *PENDING_CONCUSSION.lock().unwrap() = None;
+            if CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
+                let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
+            }
+        } else if let Some((amount, lowpass, muffle_ticks)) =
+            PENDING_CONCUSSION.lock().unwrap().take()
+            && host.muffle_sounds(amount, lowpass, muffle_ticks, CONCUSSION_EXEMPT_SOUNDS)
+        {
+            CONCUSSION_ACTIVE.store(true, Ordering::Relaxed);
         }
 
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
