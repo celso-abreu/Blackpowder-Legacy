@@ -6,12 +6,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use mod_api::{
-    ClientHost, EntityRef, EntityUuid, EquipmentSlot, Hand, Host, HostSide, IPayloadContext,
-    Identifier, InteractionResult, ItemBarEvent, ItemPart, ItemStack, LevelRef, LightLayer,
-    LivingRef, OnUseTickEvent, ParticleKey, ParticleOptions, ReleaseUsingEvent, ServerHost,
+    CanGrindstoneRepairEvent, ClientHost, EntityRef, EntityUuid, EquipmentSlot, GameEventContext,
+    Hand, Host, HostSide, IPayloadContext, Identifier, InteractionResult,
+    IsCombineRepairableEvent, ItemBarEvent, ItemPart, ItemStack, LevelRef, LightLayer, LivingRef,
+    LoopContext, OnUseTickEvent, ParticleKey, ParticleOptions, ReleaseUsingEvent, ServerHost,
     ShouldCauseReequipAnimationEvent, SoundSource, UseDurationEvent, UseItemEvent, VarInt,
+    XpRepairRatioEvent,
 };
 
+use crate::ballistics::compute_voxel_ray_exit;
 use crate::constants::*;
 use crate::exploration::{distance_3d, grant_mod_criterion, record_bullet_shot};
 use crate::skin::{default_skin_for_uuid, parse_mojang_skin_property};
@@ -26,15 +29,42 @@ static AIM_TICKS: Mutex<BTreeMap<u128, (i32, u64)>> = Mutex::new(BTreeMap::new()
 static LEVER_READY: Mutex<BTreeMap<u128, u64>> = Mutex::new(BTreeMap::new());
 static RELOAD_SESSIONS: Mutex<BTreeMap<u128, ReloadSession>> = Mutex::new(BTreeMap::new());
 static ACTIVE_BULLETS: Mutex<Vec<ActiveBullet>> = Mutex::new(Vec::new());
+static BARREL_HEAT: Mutex<BTreeMap<u128, BarrelHeatState>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Copy)]
+struct BarrelHeatState {
+    heat: f32,
+    last_shot_tick: u64,
+    last_step_tick: u64,
+    muzzle_mm: [i32; 3],
+}
+
+pub(crate) fn clear_barrel_heat() {
+    BARREL_HEAT.lock().unwrap().clear();
+}
+
+pub(crate) fn add_shot_barrel_heat(current_heat: f32) -> f32 {
+    (current_heat.max(0.0) + BARREL_HEAT_SHOT_GAIN).min(1.60)
+}
+
+pub(crate) fn step_barrel_heat(current_heat: f32, dt_ticks: u64) -> f32 {
+    if !current_heat.is_finite() || current_heat <= 0.0 {
+        return 0.0;
+    }
+    let cooled = current_heat - (dt_ticks.min(1_000) as f32) * BARREL_HEAT_COOL_PER_TICK;
+    if cooled <= 1e-4 { 0.0 } else { cooled }
+}
 
 #[derive(Clone, Copy)]
 struct ActiveBullet {
     entity: EntityRef,
     shooter_eid: u32,
+    shooter_uuid: u128,
     origin: [f64; 3],
     prev_pos: [f64; 3],
     in_water: bool,
     terminated: bool,
+    leaf_pierces: u8,
     whizzed_eids: [u32; 4],
     pending_splash: Option<[f64; 3]>,
     spawn_tick: u64,
@@ -251,9 +281,9 @@ pub(crate) fn emit_entity_ballistic_impact_sound(
     aabb: Option<[[f64; 3]; 2]>,
     is_headshot: bool,
     now: u64,
-) {
+) -> EntityImpactKind {
     let Some(victim_ent) = host.entity(victim_id) else {
-        return;
+        return EntityImpactKind::Flesh;
     };
     let kind_id = victim_ent
         .kind(host)
@@ -319,6 +349,7 @@ pub(crate) fn emit_entity_ballistic_impact_sound(
         base_vol * water_vol,
         (base_pitch * water_pitch).clamp(0.5, 2.0),
     );
+    impact_kind
 }
 
 #[derive(Clone, Copy)]
@@ -1144,8 +1175,11 @@ fn register_spawned_bullet(
     host: &mut dyn ServerHost,
     entity: EntityRef,
     shooter_eid: u32,
+    shooter_uuid: u128,
     origin: [f64; 3],
     muzzle_in_water: bool,
+    leaf_pierces: u8,
+    inherited_whizzed: [u32; 4],
     now: u64,
 ) {
     let Some(level) = entity.level(host) else {
@@ -1187,15 +1221,226 @@ fn register_spawned_bullet(
     active.push(ActiveBullet {
         entity,
         shooter_eid,
+        shooter_uuid,
         origin,
         prev_pos: pos0,
         in_water: starts_in_water,
         terminated: false,
-        whizzed_eids: [0; 4],
+        leaf_pierces,
+        whizzed_eids: inherited_whizzed,
         pending_splash,
         spawn_tick: now,
         last_step_tick: now,
     });
+}
+
+/// Perforates up to `MAX_LEAF_PERFORATIONS` (`2`) dry `#minecraft:leaves` blocks per shot by
+/// spawning a continuation `.44-40` projectile `2 mm` past the far voxel face with `72%` retained
+/// velocity, preserving original muzzle distance, headshot ray geometry, and flyby deduplication.
+pub(crate) fn try_perforate_foliage_on_impact(
+    host: &mut dyn ServerHost,
+    _level: LevelRef,
+    owner_eid: u32,
+    block: [i32; 3],
+    hit_at: [f64; 3],
+) -> bool {
+    if owner_eid == 0 {
+        return false;
+    }
+    let now = SERVER_TICKS.load(Ordering::Relaxed);
+    let candidate = {
+        let active = ACTIVE_BULLETS.lock().unwrap();
+        let mut best: Option<(usize, f64, ActiveBullet)> = None;
+        for (i, b) in active.iter().enumerate() {
+            if b.shooter_eid != owner_eid
+                || b.in_water
+                || b.leaf_pierces >= MAX_LEAF_PERFORATIONS
+            {
+                continue;
+            }
+            let vel = b.entity.velocity(host).unwrap_or([0.0; 3]);
+            let end = [
+                b.prev_pos[0] + vel[0],
+                b.prev_pos[1] + vel[1],
+                b.prev_pos[2] + vel[2],
+            ];
+            let dx = end[0] - hit_at[0];
+            let dy = end[1] - hit_at[1];
+            let dz = end[2] - hit_at[2];
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if d2 <= 900.0 && best.is_none_or(|(_, best_d2, _)| d2 < best_d2) {
+                best = Some((i, d2, *b));
+            }
+        }
+        best
+    };
+
+    let Some((idx, _, parent)) = candidate else {
+        return false;
+    };
+
+    let vel = parent.entity.velocity(host).unwrap_or([
+        hit_at[0] - parent.prev_pos[0],
+        hit_at[1] - parent.prev_pos[1],
+        hit_at[2] - parent.prev_pos[2],
+    ]);
+    let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+    let next_speed = speed * LEAF_VELOCITY_RETENTION;
+    if !next_speed.is_finite() || next_speed < MIN_LEAF_PERFORATION_SPEED || speed < 1e-4 {
+        return false;
+    }
+
+    let Some(exit_pos) = compute_voxel_ray_exit(block, hit_at, vel) else {
+        return false;
+    };
+    let Some(owner_ent) = host.entity(owner_eid) else {
+        return false;
+    };
+    let Ok(bullet_id) = Identifier::parse(BULLET) else {
+        return false;
+    };
+    let Some(item) = host.item_key(&bullet_id) else {
+        return false;
+    };
+    let Some(carried) = ItemStack::new(item, 1) else {
+        return false;
+    };
+
+    let next_vel = [
+        vel[0] * LEAF_VELOCITY_RETENTION,
+        vel[1] * LEAF_VELOCITY_RETENTION,
+        vel[2] * LEAF_VELOCITY_RETENTION,
+    ];
+    let owner_living = LivingRef::new(owner_ent);
+    let Some(child) =
+        host.spawn_projectile_from_rotation(owner_living, &bullet_id, &carried, 0.0, 0.0, 0.0)
+    else {
+        return false;
+    };
+    let child_ent = child.entity();
+    if !child_ent.teleport_to(host, exit_pos) || !child_ent.set_velocity(host, next_vel) {
+        let _ = child_ent.discard(host);
+        return false;
+    }
+
+    if let Some(slot) = ACTIVE_BULLETS.lock().unwrap().get_mut(idx) {
+        slot.terminated = true;
+    }
+    let next_pierces = parent.leaf_pierces.saturating_add(1);
+    register_spawned_bullet(
+        host,
+        child_ent,
+        owner_eid,
+        parent.shooter_uuid,
+        parent.origin,
+        false,
+        next_pierces,
+        parent.whizzed_eids,
+        now,
+    );
+    if parent.shooter_uuid != 0 {
+        record_bullet_shot(child_ent.id(), owner_eid, parent.shooter_uuid, parent.origin, now);
+    }
+    true
+}
+
+/// Steps post-shot barrel heat cooling, rising muzzle smoke wisps after sustained rapid fire,
+/// and steam quenching (`SND_LAVA_EXTINGUISH`) when a hot barrel dips into water.
+pub(crate) fn tick_barrel_heat(host: &mut dyn ServerHost, now: u64) {
+    let uuids: Vec<u128> = {
+        let guard = BARREL_HEAT.lock().unwrap();
+        if guard.is_empty() {
+            return;
+        }
+        guard.keys().copied().collect()
+    };
+
+    for uuid in uuids {
+        let Some(player) = host.player(uuid) else {
+            BARREL_HEAT.lock().unwrap().remove(&uuid);
+            continue;
+        };
+        let Some(level) = player.entity().level(host) else {
+            continue;
+        };
+        if !level.in_place(host) {
+            continue;
+        }
+
+        let Some(mut state) = BARREL_HEAT.lock().unwrap().get(&uuid).copied() else {
+            continue;
+        };
+        if state.last_step_tick >= now {
+            continue;
+        }
+        let dt = now.saturating_sub(state.last_step_tick);
+        state.heat = step_barrel_heat(state.heat, dt);
+        state.last_step_tick = now;
+
+        if state.heat > 0.0
+            && held_rifle(host, player).is_some()
+            && let Some(frame) = compute_shooter_frame(host, player, state.muzzle_mm)
+        {
+            if is_point_in_water(host, frame.level, frame.muzzle) {
+                if state.heat >= 0.45 {
+                    frame.level.play_sound(
+                        host,
+                        SND_LAVA_EXTINGUISH,
+                        frame.muzzle,
+                        SoundSource::Players,
+                        0.38,
+                        1.65,
+                    );
+                    if let Some(white_smoke) = WHITE_SMOKE_KEY.get().copied() {
+                        let steam_opts = ParticleOptions::simple(white_smoke);
+                        frame.level.send_particles(
+                            host,
+                            &steam_opts,
+                            None,
+                            frame.muzzle,
+                            [0.03, 0.04, 0.03],
+                            0.015,
+                            4,
+                        );
+                    }
+                    if let Some(bubble) = BUBBLE_KEY.get().copied() {
+                        let bubble_opts = ParticleOptions::simple(bubble);
+                        frame.level.send_particles(
+                            host,
+                            &bubble_opts,
+                            None,
+                            frame.muzzle,
+                            [0.03, 0.03, 0.03],
+                            0.04,
+                            5,
+                        );
+                    }
+                }
+                state.heat = 0.0;
+            } else if state.heat >= BARREL_HEAT_WISP_THRESHOLD
+                && now.saturating_sub(state.last_shot_tick) >= 5
+                && (now.wrapping_add(uuid as u64 & 3)) % 3 == 0
+                && let Some(smoke) = SMOKE_KEY.get().copied()
+            {
+                let smoke_opts = ParticleOptions::simple(smoke);
+                frame.level.send_particles(
+                    host,
+                    &smoke_opts,
+                    None,
+                    frame.muzzle,
+                    [0.008, 0.014, 0.008],
+                    0.006,
+                    1,
+                );
+            }
+        }
+
+        if state.heat <= 0.0 {
+            BARREL_HEAT.lock().unwrap().remove(&uuid);
+        } else {
+            BARREL_HEAT.lock().unwrap().insert(uuid, state);
+        }
+    }
 }
 
 /// Flushes any pending water-surface entry splash & cavitation streak if a bullet enters shallow
@@ -1483,8 +1728,11 @@ fn fire_rifle(
         host,
         shot.entity(),
         player.entity().id(),
+        uuid,
         shot_origin.unwrap_or([0.0; 3]),
         muzzle_in_water,
+        0,
+        [0; 4],
         now,
     );
     if let Some(origin) = frame
@@ -1494,6 +1742,58 @@ fn fire_rifle(
         .or_else(|| player.entity().position(host))
     {
         record_bullet_shot(shot.entity().id(), player.entity().id(), uuid, origin, now);
+    }
+
+    // Emit Sculk/Warden `minecraft:projectile_shoot` vibration attributed directly to the shooter.
+    if let Some(level) = frame
+        .as_ref()
+        .map(|f| f.level)
+        .or_else(|| player.entity().level(host))
+        && let Some(at) = shot_origin
+    {
+        let _ = level.game_event(
+            host,
+            GAME_EVENT_PROJECTILE_SHOOT,
+            at,
+            GameEventContext {
+                source_entity: Some(player.entity()),
+                affected_state: None,
+            },
+        );
+    }
+
+    // Accumulate barrel heat across rapid shots, or quench immediately if the crown is underwater.
+    {
+        let mut heat_map = BARREL_HEAT.lock().unwrap();
+        let prev_heat = heat_map
+            .get(&uuid)
+            .map_or(0.0, |st| step_barrel_heat(st.heat, now.saturating_sub(st.last_step_tick)));
+        if muzzle_in_water {
+            heat_map.remove(&uuid);
+            drop(heat_map);
+            if prev_heat >= 0.45
+                && let Some(ref f) = frame
+            {
+                f.level.play_sound(
+                    host,
+                    SND_LAVA_EXTINGUISH,
+                    f.muzzle,
+                    SoundSource::Players,
+                    0.42,
+                    1.60,
+                );
+            }
+        } else {
+            heat_map.insert(
+                uuid,
+                BarrelHeatState {
+                    heat: add_shot_barrel_heat(prev_heat),
+                    last_shot_tick: now,
+                    last_step_tick: now,
+                    muzzle_mm,
+                },
+            );
+        }
     }
 
     let remaining = loaded - 1;
@@ -1531,6 +1831,8 @@ fn fire_rifle(
     send_sync(host, player, SYNC_SHOT, remaining);
     if remaining > 0 {
         broadcast_tp_state(host, player, TP_STATE_LEVER_CYCLE);
+    } else {
+        broadcast_tp_state(host, player, TP_CUE_LAST_SHOT_EJECT);
     }
 }
 
@@ -1650,7 +1952,7 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
                             host,
                             player,
                             if empty_chamber {
-                                TP_STATE_LEVER_CYCLE
+                                TP_CUE_EMPTY_CHAMBER_LEVER
                             } else {
                                 TP_CUE_RELOAD_END_NORM
                             },
@@ -1760,6 +2062,24 @@ impl ItemPart for Winchester {
         }
     }
 
+    /// Stack `damage` stores loaded `.44-40` rounds (`0..=8`), not wear & tear:
+    /// disable Mending XP consumption (`ratio = 0.0`) so XP orbs never delete loaded rounds.
+    fn xp_repair_ratio(&self, _: &dyn Host, event: &mut XpRepairRatioEvent<'_>) {
+        event.ratio = 0.0;
+    }
+
+    /// Prevent Grindstone two-item combination from destroying a second Winchester or wiping ammo,
+    /// while preserving single-item Grindstone disenchanting.
+    fn can_grindstone_repair(&self, _: &dyn LoopContext, event: &mut CanGrindstoneRepairEvent<'_>) {
+        event.can_repair = false;
+    }
+
+    /// Prevent Crafting Table, 2×2 inventory grid, and Redstone Crafter item-combination repair
+    /// from merging two Winchesters and wiping their loaded `.44-40` rounds.
+    fn is_combine_repairable(&self, _: &dyn LoopContext, event: &mut IsCombineRepairableEvent<'_>) {
+        event.repairable = false;
+    }
+
     fn release_using(&self, host: HostSide<'_>, event: &mut ReleaseUsingEvent<'_>) {
         event.used = true;
         match host {
@@ -1776,6 +2096,19 @@ impl ItemPart for Winchester {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barrel_heat_accumulates_on_rapid_fire_and_cools_smoothly() {
+        let h1 = add_shot_barrel_heat(0.0);
+        assert!(h1 < BARREL_HEAT_WISP_THRESHOLD, "single shot should not smoke: {h1}");
+        let h2 = add_shot_barrel_heat(step_barrel_heat(h1, 13));
+        let h3 = add_shot_barrel_heat(step_barrel_heat(h2, 13));
+        assert!(
+            h3 >= BARREL_HEAT_WISP_THRESHOLD,
+            "rapid 3-shot burst should cross smoke wisp threshold: {h3}"
+        );
+        assert_eq!(step_barrel_heat(h3, 200), 0.0);
+    }
 
     #[test]
     fn water_entry_step_caps_first_tick_underwater_penetration() {

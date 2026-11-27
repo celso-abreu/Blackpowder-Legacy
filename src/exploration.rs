@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use mod_api::{
     ContainerLootFilledEvent, CriterionContext, CriterionTest, CriterionTestError, Host,
-    Identifier, ItemStack, LevelHost, LevelRef, LivingDeathEvent, PlayerRef, ServerHost,
+    Identifier, ItemStack, LevelHost, LevelRef, LivingDeathEvent, LootDropsEvent, PlayerRef,
+    ServerHost,
 };
 
 use crate::constants::*;
@@ -487,6 +488,99 @@ pub(crate) fn handle_living_death_advancements(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Renewable Frontier `.44-40` Combat Drops on Illager Raiders
+// ---------------------------------------------------------------------------
+
+pub(crate) fn roll_illager_ammo_drop(
+    entity_kind: &str,
+    killed_with_winchester: bool,
+    seed: u64,
+) -> u32 {
+    let (chance, min_c, max_c) = match (entity_kind, killed_with_winchester) {
+        ("minecraft:pillager", true) => (0.50_f32, 2_u32, 4_u32),
+        ("minecraft:pillager", false) => (0.30, 1, 3),
+        ("minecraft:vindicator", true) => (0.38, 2, 3),
+        ("minecraft:vindicator", false) => (0.22, 1, 2),
+        ("minecraft:evoker", true) => (0.65, 4, 6),
+        ("minecraft:evoker", false) => (0.45, 3, 5),
+        _ => return 0,
+    };
+    let r0 = splitmix64(seed);
+    if unit_f32_from_u64(r0) >= chance {
+        return 0;
+    }
+    range_inclusive_u32(splitmix64(r0), min_c, max_c)
+}
+
+pub(crate) fn on_loot_drops(
+    host: &mut dyn ServerHost,
+    event: &mut LootDropsEvent<'_>,
+    now: u64,
+) {
+    let Some((raw_eid, entity_kind)) = event.context.entity else {
+        return;
+    };
+    if !matches!(
+        entity_kind,
+        "minecraft:pillager" | "minecraft:vindicator" | "minecraft:evoker"
+    ) {
+        return;
+    }
+    let Some(source) = event.context.damage_source else {
+        return;
+    };
+    let Some(cartridge_key) = CARTRIDGE_KEY.get().copied() else {
+        return;
+    };
+    let Ok(victim_eid) = u32::try_from(raw_eid) else {
+        return;
+    };
+
+    let rifle_key = RIFLE_KEY.get().copied();
+    let recent_rifle_hit = RECENT_ENTITY_HITS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .any(|h| h.victim_entity_id == victim_eid && now.saturating_sub(h.tick) <= 4);
+    let killed_with_winchester = recent_rifle_hit
+        || (source.direct > 0 && is_tracked_rifle_bullet(source.direct as u32, now))
+        || event
+            .context
+            .weapon_item(host)
+            .is_some_and(|w| Some(w.item()) == rifle_key);
+
+    let killed_by_player = killed_with_winchester
+        || (source.causing > 0
+            && host
+                .entity(source.causing as u32)
+                .and_then(|e| e.kind(host))
+                .is_some_and(|k| k.id(host) == "minecraft:player"));
+    if !killed_by_player {
+        return;
+    }
+
+    let mut fp = u64::from(victim_eid)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    if let Some(pos) = source.position {
+        let qx = (pos[0] * 16.0).round() as i64 as u64;
+        let qy = (pos[1] * 16.0).round() as i64 as u64;
+        let qz = (pos[2] * 16.0).round() as i64 as u64;
+        fp = splitmix64(fp ^ qx.rotate_left(11) ^ qy.rotate_left(27) ^ qz.rotate_left(43));
+    }
+    for stack in event.drops.iter() {
+        fp = splitmix64(fp ^ (u64::from(stack.count()) << 16) ^ u64::from(stack.damage()));
+    }
+    let count = roll_illager_ammo_drop(entity_kind, killed_with_winchester, fp);
+    if count > 0
+        && let Some(ammo_stack) = ItemStack::new(cartridge_key, count)
+    {
+        event.drops.push(ammo_stack);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +659,23 @@ mod tests {
         assert!(is_hostile_monster_kind("minecraft:creeper"));
         assert!(!is_hostile_monster_kind("minecraft:cow"));
         assert!(!is_hostile_monster_kind("minecraft:armor_stand"));
+    }
+
+    #[test]
+    fn illager_combat_ammo_drops_reward_winchester_kills_without_overdropping() {
+        let mut base_drops = 0_u32;
+        let mut rifle_drops = 0_u32;
+        for i in 0..10_000_u64 {
+            let b = roll_illager_ammo_drop("minecraft:pillager", false, i.wrapping_mul(17) ^ 0xA5A5);
+            let r = roll_illager_ammo_drop("minecraft:pillager", true, i.wrapping_mul(17) ^ 0xA5A5);
+            assert!(b == 0 || (1..=3).contains(&b));
+            assert!(r == 0 || (2..=4).contains(&r));
+            base_drops += u32::from(b > 0);
+            rifle_drops += u32::from(r > 0);
+            assert_eq!(roll_illager_ammo_drop("minecraft:zombie", true, i), 0);
+        }
+        assert!((2_750..=3_250).contains(&base_drops), "base_drops={base_drops}");
+        assert!((4_750..=5_250).contains(&rifle_drops), "rifle_drops={rifle_drops}");
+        assert!(rifle_drops > base_drops + 1_500);
     }
 }

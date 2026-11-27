@@ -5,17 +5,21 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
-    BlockUpdateFlags, CameraType, ClientHost, GameEventContext, GameRuleValue, Host,
+    BlockUpdateFlags, CameraType, ClientHost, Compound, GameEventContext, GameRuleValue, Host,
     HostBlockStates, IPayloadContext, LevelRef, LightCoords, LightLayer, ModelInstance, Overlay,
-    ParticleOptions, ProjectileImpactEvent, ServerHost, SoundSource, VarInt, WorldDrawContext,
+    ParticleOptions, ProjectileImpactEvent, ServerHost, SoundSource, Tag, VarInt,
+    WorldDrawContext,
 };
 
 use crate::constants::*;
-use crate::server::{consume_bullet_water_splash_on_impact, flush_bullet_flyby_on_impact};
+use crate::server::{
+    consume_bullet_water_splash_on_impact, flush_bullet_flyby_on_impact,
+    try_perforate_foliage_on_impact,
+};
 use crate::{
     holding_rifle_recently, is_point_in_water, play_local_positional_foley, BulletImpactSync,
     BELL_BLOCK_KEY, BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC,
-    CHORUS_FLOWER_BLOCK_KEY, CRIT_KEY, DECORATED_POT_BLOCK_KEY, LAST_EJECTOR_VIEW_X,
+    CHORUS_FLOWER_BLOCK_KEY, CRIT_KEY, DECORATED_POT_BLOCK_KEY, FLAME_KEY, LAST_EJECTOR_VIEW_X,
     LAST_EJECTOR_VIEW_Y, LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POINTED_DRIPSTONE_BLOCK_KEY,
     POOF_KEY, RIFLE_MODELS, SMOKE_KEY, TARGET_BLOCK_KEY, WHITE_SMOKE_KEY,
 };
@@ -659,19 +663,43 @@ pub(crate) fn handle_bullet_terrain_impact(
         || block_id == CHORUS_FLOWER_BLOCK;
     let is_dripstone = POINTED_DRIPSTONE_BLOCK_KEY.get().copied() == Some(hit_block)
         || block_id == POINTED_DRIPSTONE_BLOCK;
+    let is_tnt = block_id == TNT_BLOCK;
     let in_flower_pots = host.block_in_tag(hit_block, TAG_FLOWER_POTS).unwrap_or(false);
     let in_candles = host.block_in_tag(hit_block, TAG_CANDLES).unwrap_or(false);
+    let in_leaves = host.block_in_tag(hit_block, TAG_LEAVES).unwrap_or(false);
 
     let (can_break, drop_items) = bullet_break_permissions(host, level, event.owner);
     let shooter_dist =
         crate::exploration::resolve_shooter_and_distance(host, level, event.owner, event.at);
+    let source_ent = if event.owner != 0 {
+        host.entity(event.owner)
+    } else {
+        shooter_dist.as_ref().map(|(s, _)| s.entity())
+    };
+
+    // Emit Sculk/Warden `minecraft:projectile_land` downrange vibration (muffled automatically
+    // when `affected_state` belongs to `#minecraft:dampens_vibrations`).
+    let _ = level.game_event(
+        host,
+        GAME_EVENT_PROJECTILE_LAND,
+        event.at,
+        GameEventContext {
+            source_entity: source_ent,
+            affected_state: Some(hit_state),
+        },
+    );
 
     // Horizon natively shatters `decorated_pot` and `chorus_flower` right after `projectile_impact`
     // when `can_break` holds; we shatter thin window panes, flower pots, and stalactites directly.
     let native_will_shatter = can_break && (is_decorated_pot || is_chorus_flower);
     let mut shattered_now = false;
-    let mut suppress_decal =
-        native_will_shatter || is_bell || is_dripstone || in_flower_pots || in_candles;
+    let mut suppress_decal = native_will_shatter
+        || is_bell
+        || is_dripstone
+        || is_tnt
+        || in_flower_pots
+        || in_candles
+        || in_leaves;
 
     if !suppress_decal
         && let Some(outline) = host.state_outline(hit_state)
@@ -790,6 +818,88 @@ pub(crate) fn handle_bullet_terrain_impact(
                 0.015,
                 5,
             );
+        }
+    } else if in_leaves && !underwater {
+        // Soft-lead `.44-40` shears cleanly through up to 2 dry canopy leaf blocks (`72%` speed
+        // retention per leaf) while bursting sheared leaf particles on entry.
+        let _ = try_perforate_foliage_on_impact(host, level, event.owner, event.block, event.at);
+    } else if is_tnt
+        && !underwater
+        && can_break
+        && !matches!(
+            level.game_rule(host, RULE_TNT_EXPLODES),
+            Ok(Some(GameRuleValue::Bool(false)))
+        )
+        && let Some(air_state) = host.block_state_id(AIR_BLOCK)
+        && matches!(
+            level.set_block(
+                host,
+                event.block,
+                air_state,
+                BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS,
+            ),
+            Ok(true)
+        )
+    {
+        // Hot `.44-40` blackpowder spark ignites TNT blocks on a rapid `0.9 s` (`18`-tick) fuse!
+        shattered_now = true;
+        suppress_decal = true;
+        let tnt_pos = [
+            f64::from(event.block[0]) + 0.5,
+            f64::from(event.block[1]),
+            f64::from(event.block[2]) + 0.5,
+        ];
+        let mut nbt = Compound::new();
+        nbt.insert("fuse".into(), Tag::Short(TNT_BULLET_FUSE_TICKS));
+        if let Some(tnt_eid) = host.summon(event.dimension, ENTITY_TNT, tnt_pos, nbt)
+            && let Some(tnt_ent) = host.entity(tnt_eid)
+        {
+            let ang = f64::from(jitter) * std::f64::consts::PI;
+            let _ = tnt_ent.set_velocity(host, [-ang.sin() * 0.02, 0.20, -ang.cos() * 0.02]);
+        }
+        level.play_sound(
+            host,
+            SND_TNT_PRIMED,
+            tnt_pos,
+            SoundSource::Blocks,
+            1.0,
+            1.08 + 0.04 * jitter,
+        );
+        let _ = level.game_event(
+            host,
+            GAME_EVENT_PRIME_FUSE,
+            tnt_pos,
+            GameEventContext {
+                source_entity: source_ent,
+                affected_state: None,
+            },
+        );
+        if let Some(flame) = FLAME_KEY.get().copied() {
+            let flame_opts = ParticleOptions::simple(flame);
+            level.send_particles(
+                host,
+                &flame_opts,
+                None,
+                impact_fx_pos,
+                [0.06, 0.06, 0.06],
+                0.04,
+                6,
+            );
+        }
+        if let Some(smoke) = SMOKE_KEY.get().copied() {
+            let smoke_opts = ParticleOptions::simple(smoke);
+            level.send_particles(
+                host,
+                &smoke_opts,
+                None,
+                impact_fx_pos,
+                [0.08, 0.08, 0.08],
+                0.03,
+                8,
+            );
+        }
+        if let Some((shooter, _)) = shooter_dist {
+            crate::exploration::grant_mod_criterion(host, shooter, TRIG_POWDER_KEG);
         }
     } else if can_break && (is_dripstone || is_fragile_bullet_shatter_block(block_id, in_flower_pots))
     {
@@ -971,6 +1081,8 @@ pub(crate) fn handle_bullet_terrain_impact(
         let chip_opts = ParticleOptions::simple(block_key);
         let (chip_spread, chip_speed, chip_count) = if underwater {
             ([0.05, 0.05, 0.05], 0.08, 7)
+        } else if in_leaves {
+            ([0.12, 0.12, 0.12], 0.16, 16)
         } else {
             match material {
                 ImpactMaterial::Metal => ([0.04, 0.04, 0.04], 0.12, 6),
@@ -1347,6 +1459,85 @@ pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
     }
     // Start aligned with the barrel & carrier slot (`local -Z` hollow mouth pointing forward,
     // tilted `+18°` upward matching Stage 1's exit angle) before tumbling end-over-end.
+    let init_yaw = 180.0 - yaw_deg - 8.0;
+    let init_pitch = -pitch_deg - 18.0;
+    let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
+    let yaw_vel = (210.0 + 160.0 * fx.next_unit_f32()) * spin_sign;
+    let roll_vel = 560.0 + 240.0 * fx.next_unit_f32();
+
+    fx.casings.push(SpentCasing {
+        dimension: dim,
+        pos: origin,
+        vel,
+        yaw_deg: init_yaw,
+        pitch_deg: init_pitch,
+        roll_deg: 24.0,
+        yaw_vel,
+        pitch_vel,
+        roll_vel,
+        bounces: 0,
+        settled: false,
+        age: 0.0,
+        light,
+    });
+}
+
+/// Spawns a 3D spinning/bouncing `.44-40` brass shell casing from a nearby remote player's
+/// held Winchester top-carrier port so multiplayer observers see and hear brass clinking on the ground.
+pub(crate) fn spawn_spent_casing_from_remote_actor(host: &dyn ClientHost, entity_id: u32) {
+    let cfg = crate::settings::client_settings();
+    if !cfg.casing_ejection || cfg.max_casings == 0 {
+        return;
+    }
+    let Some(ent) = host.entity(entity_id) else {
+        return;
+    };
+    let Some(eye) = ent.eye_position(host) else {
+        return;
+    };
+    let [yaw_deg, pitch_deg] = ent.rotation(host).unwrap_or([0.0, 0.0]);
+
+    let yaw_rad = f64::from(yaw_deg).to_radians();
+    let pitch_rad = f64::from(pitch_deg).to_radians();
+    let (sin_y, cos_y) = yaw_rad.sin_cos();
+    let (sin_p, cos_p) = pitch_rad.sin_cos();
+
+    let forward = [-sin_y * cos_p, -sin_p, cos_y * cos_p];
+    let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
+    let right = [-cos_y, 0.0, -sin_y];
+
+    let origin = [
+        eye[0] + right[0] * 0.26 + up[0] * -0.26 + forward[0] * 0.56,
+        eye[1] + right[1] * 0.26 + up[1] * -0.26 + forward[1] * 0.56,
+        eye[2] + right[2] * 0.26 + up[2] * -0.26 + forward[2] * 0.56,
+    ];
+
+    let mut fx = world_effects().lock().unwrap();
+    let r0 = f64::from(fx.next_unit_f32());
+    let r1 = f64::from(fx.next_unit_f32());
+    let r2 = f64::from(fx.next_unit_f32());
+    let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
+
+    let v_right = 0.92 + 0.38 * r0;
+    let v_up = 1.55 + 0.38 * r1;
+    let v_fwd = -0.18 + 0.24 * r2;
+    let vel = [
+        right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
+        right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
+        right[2] * v_right + up[2] * v_up + forward[2] * v_fwd,
+    ];
+
+    let dim = fx.active_dimension.clone();
+    let block_pos = [
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+    ];
+    let light = sample_world_light(host, &dim, block_pos);
+
+    while fx.casings.len() >= cfg.max_casings {
+        fx.casings.remove(0);
+    }
     let init_yaw = 180.0 - yaw_deg - 8.0;
     let init_pitch = -pitch_deg - 18.0;
     let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
