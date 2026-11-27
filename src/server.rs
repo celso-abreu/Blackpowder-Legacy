@@ -1318,7 +1318,8 @@ pub(crate) fn try_perforate_foliage_on_impact(
         return false;
     };
     let child_ent = child.entity();
-    if !child_ent.teleport_to(host, exit_pos) || !child_ent.set_velocity(host, next_vel) {
+    let child_rot = parent.entity.rotation(host);
+    if !child_ent.teleport_to(host, exit_pos, child_rot) || !child_ent.set_velocity(host, next_vel) {
         let _ = child_ent.discard(host);
         return false;
     }

@@ -1486,7 +1486,7 @@ pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
 /// held Winchester top-carrier port so multiplayer observers see and hear brass clinking on the ground.
 pub(crate) fn spawn_spent_casing_from_remote_actor(host: &dyn ClientHost, entity_id: u32) {
     let cfg = crate::settings::client_settings();
-    if !cfg.casing_ejection || cfg.max_casings == 0 {
+    if cfg.max_casings == 0 {
         return;
     }
     let Some(ent) = host.entity(entity_id) else {

@@ -518,7 +518,7 @@ pub(crate) fn on_loot_drops(
     event: &mut LootDropsEvent<'_>,
     now: u64,
 ) {
-    let Some((raw_eid, entity_kind)) = event.context.entity else {
+    let Some((victim_eid, entity_kind)) = event.context.entity else {
         return;
     };
     if !matches!(
@@ -531,9 +531,6 @@ pub(crate) fn on_loot_drops(
         return;
     };
     let Some(cartridge_key) = CARTRIDGE_KEY.get().copied() else {
-        return;
-    };
-    let Ok(victim_eid) = u32::try_from(raw_eid) else {
         return;
     };
 
