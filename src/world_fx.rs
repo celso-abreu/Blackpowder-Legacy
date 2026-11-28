@@ -880,7 +880,7 @@ pub(crate) fn handle_bullet_terrain_impact(
     } else if in_candles || is_candle_cake {
         let was_lit = parse_state_property(&state_str, "lit") == Some("true");
         let candle_count = parse_state_property(&state_str, "candles")
-            .and_then(|s| s.parse::<u32>().ok())
+            .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(1)
             .clamp(1, 4);
         match classify_candle_shot(
