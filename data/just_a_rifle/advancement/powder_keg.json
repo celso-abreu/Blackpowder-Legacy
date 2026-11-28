@@ -1,0 +1,27 @@
+{
+  "parent": "just_a_rifle:candle_snuffer",
+  "display": {
+    "icon": {
+      "id": "minecraft:tnt",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.just_a_rifle.powder_keg.title"
+    },
+    "description": {
+      "translate": "advancements.just_a_rifle.powder_keg.description"
+    },
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "ignited_powder_keg": {
+      "trigger": "just_a_rifle:powder_keg"
+    }
+  },
+  "rewards": {
+    "experience": 60
+  }
+}

@@ -21,12 +21,21 @@ pub(crate) const MODEL_BULLET_HOLE_ID: &str = "just_a_rifle:special/bullet_hole"
 
 pub(crate) const SND_FIRE: &str = "just_a_rifle:item.winchester_fire";
 pub(crate) const SND_THUMP: &str = "just_a_rifle:item.winchester_thump";
+pub(crate) const SND_ECHO_OPEN: &str = "just_a_rifle:item.winchester_echo_open";
+pub(crate) const SND_ECHO_CAVE: &str = "just_a_rifle:item.winchester_echo_cave";
+pub(crate) const SND_BULLET_CRACK: &str = "just_a_rifle:item.winchester_bullet_crack";
+pub(crate) const SND_BULLET_WHIZ: &str = "just_a_rifle:item.winchester_bullet_whiz";
+pub(crate) const SND_IMPACT_FLESH: &str = "just_a_rifle:item.winchester_impact_flesh";
+pub(crate) const SND_IMPACT_ARMOR: &str = "just_a_rifle:item.winchester_impact_armor";
 pub(crate) const SND_LEVER: &str = "just_a_rifle:item.winchester_lever";
 pub(crate) const SND_COCK: &str = "just_a_rifle:item.winchester_cock";
+pub(crate) const SND_DRY_FIRE: &str = "just_a_rifle:item.winchester_dry_fire";
+pub(crate) const SND_HIT_CLICK: &str = "just_a_rifle:item.winchester_hit_click";
 pub(crate) const SND_RELOAD_INTRO: &str = "just_a_rifle:animation.winchester_reload_intro";
 pub(crate) const SND_RELOAD_INSERT: &str = "just_a_rifle:animation.winchester_reload_insert";
 pub(crate) const SND_RELOAD_END: &str = "just_a_rifle:animation.winchester_reload_end";
 pub(crate) const SND_DRAW: &str = "just_a_rifle:animation.winchester_draw";
+pub(crate) const SND_SLING: &str = "just_a_rifle:animation.winchester_sling";
 pub(crate) const SND_INSPECT: &str = "just_a_rifle:animation.winchester_inspect";
 pub(crate) const SND_SHELL_DROP: &str = "just_a_rifle:item.winchester_shell_drop";
 pub(crate) const SND_MISFIRE_WET: &str = "just_a_rifle:item.winchester_misfire_wet";
@@ -38,8 +47,10 @@ pub(crate) const SND_CRYSTAL_CHIME: &str = "minecraft:block.amethyst_block.chime
 pub(crate) const SND_BELL_USE: &str = "minecraft:block.bell.use";
 pub(crate) const SND_TARGET_BULLSEYE: &str = "minecraft:block.note_block.chime";
 pub(crate) const SND_CANDLE_EXTINGUISH: &str = "minecraft:block.candle.extinguish";
+pub(crate) const SND_TNT_PRIMED: &str = "minecraft:entity.tnt.primed";
 pub(crate) const SND_WATER_SPLASH: &str = "minecraft:entity.fishing_bobber.splash";
 pub(crate) const SND_WATER_BUBBLES: &str = "minecraft:block.bubble_column.upwards_inside";
+pub(crate) const SND_LAVA_EXTINGUISH: &str = "minecraft:block.lava.extinguish";
 pub(crate) const SND_HIT_CONFIRM_SUBTLE: &str = "minecraft:entity.arrow.hit";
 pub(crate) const SND_HIT_CONFIRM_CHIME: &str = "minecraft:block.note_block.bell";
 
@@ -52,6 +63,7 @@ pub(crate) const SYNC_CHANNEL: &str = "just_a_rifle:rifle_sync";
 pub(crate) const SKIN_CHANNEL: &str = "just_a_rifle:rifle_skin";
 pub(crate) const IMPACT_CHANNEL: &str = "just_a_rifle:bullet_impact";
 pub(crate) const TP_STATE_CHANNEL: &str = "just_a_rifle:rifle_tp_state";
+pub(crate) const ACOUSTIC_CHANNEL: &str = "just_a_rifle:rifle_acoustics";
 
 pub(crate) const POSE_HIP_READY_ID: &str = "just_a_rifle:hip_ready";
 pub(crate) const POSE_SPRINT_CARRY_ID: &str = "just_a_rifle:sprint_carry";
@@ -74,11 +86,21 @@ pub(crate) const TARGET_BLOCK: &str = "minecraft:target";
 pub(crate) const DECORATED_POT_BLOCK: &str = "minecraft:decorated_pot";
 pub(crate) const CHORUS_FLOWER_BLOCK: &str = "minecraft:chorus_flower";
 pub(crate) const POINTED_DRIPSTONE_BLOCK: &str = "minecraft:pointed_dripstone";
+pub(crate) const CAKE_BLOCK: &str = "minecraft:cake";
+pub(crate) const TNT_BLOCK: &str = "minecraft:tnt";
+pub(crate) const AIR_BLOCK: &str = "minecraft:air";
+pub(crate) const ENTITY_TNT: &str = "minecraft:tnt";
+pub(crate) const ENTITY_TNT_MINECART: &str = "minecraft:tnt_minecart";
 pub(crate) const TAG_FLOWER_POTS: &str = "minecraft:flower_pots";
 pub(crate) const TAG_CANDLES: &str = "minecraft:candles";
+pub(crate) const TAG_LEAVES: &str = "minecraft:leaves";
 pub(crate) const GAME_EVENT_BLOCK_CHANGE: &str = "minecraft:block_change";
+pub(crate) const GAME_EVENT_PROJECTILE_SHOOT: &str = "minecraft:projectile_shoot";
+pub(crate) const GAME_EVENT_PROJECTILE_LAND: &str = "minecraft:projectile_land";
+pub(crate) const GAME_EVENT_PRIME_FUSE: &str = "minecraft:prime_fuse";
 pub(crate) const RULE_PROJECTILES_BREAK_BLOCKS: &str = "projectiles_can_break_blocks";
 pub(crate) const RULE_BLOCK_DROPS: &str = "block_drops";
+pub(crate) const RULE_TNT_EXPLODES: &str = "tnt_explodes";
 pub(crate) const DEFAULT_DIMENSION: &str = "minecraft:overworld";
 
 pub(crate) const LOOT_ABANDONED_MINESHAFT: &str = "minecraft:chests/abandoned_mineshaft";
@@ -92,6 +114,7 @@ pub(crate) const TRIG_FULL_TUBE: &str = "just_a_rifle:full_tube";
 pub(crate) const TRIG_WET_POWDER: &str = "just_a_rifle:wet_powder";
 pub(crate) const TRIG_BELL_RINGER: &str = "just_a_rifle:bell_ringer";
 pub(crate) const TRIG_CANDLE_SNUFFER: &str = "just_a_rifle:candle_snuffer";
+pub(crate) const TRIG_POWDER_KEG: &str = "just_a_rifle:powder_keg";
 pub(crate) const TRIG_DEADEYE: &str = "just_a_rifle:deadeye_bullseye";
 pub(crate) const TRIG_SHERIFF: &str = "just_a_rifle:sheriff";
 pub(crate) const TRIG_LONG_SHOT: &str = "just_a_rifle:long_shot";
@@ -141,7 +164,36 @@ pub(crate) const SYNC_HEADSHOT_CONFIRM: i32 = 10;
 pub(crate) const TP_STATE_IDLE: i32 = 0;
 pub(crate) const TP_STATE_RELOADING: i32 = 1;
 pub(crate) const TP_STATE_LEVER_CYCLE: i32 = 2;
+pub(crate) const TP_CUE_RELOAD_INSERT: i32 = 3;
+pub(crate) const TP_CUE_RELOAD_END_NORM: i32 = 4;
+pub(crate) const TP_CUE_DRY_CLICK: i32 = 5;
+pub(crate) const TP_CUE_LAST_SHOT_EJECT: i32 = 6;
+pub(crate) const TP_CUE_EMPTY_CHAMBER_LEVER: i32 = 7;
 pub(crate) const TP_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
+
+/// Foliage perforation (`#minecraft:leaves`), shield impact & barrel-heat parameters.
+pub(crate) const MAX_LEAF_PERFORATIONS: u8 = 2;
+pub(crate) const LEAF_VELOCITY_RETENTION: f64 = 0.72;
+pub(crate) const MIN_LEAF_PERFORATION_SPEED: f64 = 4.5;
+pub(crate) const SHIELD_MIN_RIFLE_WEAR: i32 = 6;
+pub(crate) const SHIELD_RIFLE_KNOCKBACK: f64 = 0.34;
+pub(crate) const TNT_BULLET_FUSE_TICKS: i16 = 18;
+pub(crate) const BARREL_HEAT_SHOT_GAIN: f32 = 0.38;
+pub(crate) const BARREL_HEAT_COOL_PER_TICK: f32 = 0.011;
+pub(crate) const BARREL_HEAT_WISP_THRESHOLD: f32 = 0.72;
+
+pub(crate) const ACOUSTIC_CUE_SHOT_OPEN: i32 = 1;
+pub(crate) const ACOUSTIC_CUE_SHOT_SEMI: i32 = 2;
+pub(crate) const ACOUSTIC_CUE_SHOT_CONFINED: i32 = 3;
+pub(crate) const ACOUSTIC_CUE_BULLET_CRACK: i32 = 4;
+pub(crate) const ACOUSTIC_CUE_BULLET_WHIZ: i32 = 5;
+pub(crate) const ACOUSTIC_BROADCAST_RADIUS_SQ: f64 = 96.0 * 96.0;
+
+/// `.44-40` bullet near-miss flyby envelope (`blocks`).
+pub(crate) const FLYBY_MAX_RADIUS: f64 = 5.5;
+pub(crate) const FLYBY_CRACK_RADIUS: f64 = 2.35;
+pub(crate) const FLYBY_SUPERSONIC_RANGE: f64 = 38.0;
+pub(crate) const FLYBY_MIN_MUZZLE_DIST: f64 = 2.6;
 
 // ---------------------------------------------------------------------------
 // Gameplay & Ballistics Parameters

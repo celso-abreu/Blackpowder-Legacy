@@ -1,7 +1,7 @@
 id = "just_a_rifle"
 name = "Just a Rifle"
-version = "0.10.0"
-description = "Just one finely crafted Winchester 1873 lever-action rifle for Horizon: articulated 3D rig, .44-40 headshots & distance ballistics, dynamic 3rd-person poses, reserve HUD & smart tooltips, reactive targets, water physics, 31-option Config, and CC0 audio."
+version = "0.11.0"
+description = "Just one finely crafted Winchester 1873 lever-action rifle for Horizon: articulated 3D rig, .44-40 headshots, foliage perforation & shield ballistics, 3D spatial echoes & flybys, reactive TNT & targets, water physics, 33-option Config, and CC0 audio."
 authors = ["celso-abreu"]
 license = "MIT"
 credits = "CC0 / Public Domain firearm & foley audio (see SOUND-CREDITS.md); custom 3D Winchester 1873 Blockbench model."

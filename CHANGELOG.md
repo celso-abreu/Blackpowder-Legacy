@@ -4,6 +4,27 @@ Histórico consolidado de evolução do mod (anteriormente *Blackpowder Legacy*,
 
 ---
 
+## `v0.11.0` — Sistema de Áudio Espacial 3D (`48 kHz`), Reatividade de Mundo (TNT, Folhagens, Escudos, Velas & Sculk), Calor do Cano, Proteção de Reparo e Modularização
+
+### Sistema Acústico 3D & Multiplayer (`src/client_audio.rs`, `src/server.rs`, `23` `.ogg` `48 kHz`)
+- **Áudios 3D Mono `48 kHz` com atenuação espacial OpenAL real:** padronização de todos os **23** arquivos `.ogg` em `48 kHz` (`21` Mono espaciais + `2` Stereo locais de manuseio em 1ª pessoa), eliminando som sem atenuação em multiplayer, além de cancelamento/fade suave via `SoundRef` ao interromper inspeção, saque ou recarga.
+- **Passagem balística (`crack` supersônico + `whiz` Doppler) & Eco ambiental:** projéteis que passam perto de jogadores disparam estalo supersônico N-wave (`>= 2,2` blocos/tick) ou assobio subsônico no instante exato de maior aproximação; disparos sondam luz do céu e teto para emitir reverberação de caverna/interior (`winchester_echo_cave`) ou eco aberto de vale (`winchester_echo_open`) com atraso de velocidade do som (`340 m/s`), acompanhados de concussão opcional em ambientes fechados (`audio.concussion`, **33 opções** no menu Config).
+- **Impactos em corpo vs. armadura/escudo & Foley 3D remoto:** impactos em entidades distinguem tecido desprotegido (`winchester_impact_flesh`), armaduras metálicas e bloqueio de escudo (`winchester_impact_armor`), enquanto observadores em multiplayer ouvem recarga, ciclo de alavanca e cápsulas `.44-40` quicando no chão a partir da culatra de jogadores próximos.
+
+### Interações Físicas de Mundo, Combate & Sobrevivência (`src/world_fx.rs`, `src/ballistics.rs`, `src/exploration.rs`)
+- **Perfuração de folhagens (`<= 2` blocos):** balas `.44-40` atravessam copas de folhas e trepadeiras mantendo `82%` da velocidade por camada perfurada, gerando partículas de folhas cortadas sem parar no primeiro arbusto.
+- **Ignição balística de TNT & Detonação de `tnt_minecart` (`14ª` Conquista):** tiros secos acendem blocos `minecraft:tnt` com pavio curto (`15` ticks) e detonam vagões de dinamite instantaneamente, desbloqueando **`Barril de Pólvora` / `Powder Keg`** (`just_a_rifle:powder_keg`).
+- ** Física dupla em velas (pavio vs. cera):** tiros de raspão no pavio superior apagam a chama intacta (`Tiro de Salão` / `Candle Snuffer`), enquanto tiros em cheio no corpo ou base da vela estouram a cera em partículas coloridas da própria vela sem largar o item.
+- **Impacto pesado em escudos, vibrações Sculk/Warden & Espólio de Illagers:** bloqueio em escudo aplica recuo físico e desgaste balístico (`4..10` pontos) sem falso hitmarker de headshot; disparos e impactos emitem `minecraft:projectile_shoot` e `minecraft:projectile_land` atribuídos ao atirador (respeitando `#minecraft:dampens_vibrations`); Saqueadores e outros Illagers abatidos pela Winchester deixam cair cartuchos `.44-40` escalados com *Saque* (*Looting*).
+- **Aquecimento do cano & Têmpera na água:** cadência rápida aquece progressivamente o cano octogonal, gerando fios de fumaça acima da massa de mira e vapor chiando (`block.lava.extinguish`) ao mergulhar o cano quente na água.
+- **Proteção de integridade da munição (`ItemStack::damage`):** bloqueio de reparo em Rebolo, combinação em bancada/inventário/Crafter, *Remendo* (*Mending*, `xp_repair_ratio = 0.0`) e reparo por material na Bigorna, preservando munição exata ao renomear a arma.
+
+### Manutenção Estrutural, Ciclo de Vida WASM & Localização `pt_pt`
+- **Modularização de `src/lib.rs` (`-1.012` linhas):** extração limpa de `src/client_audio.rs` e `src/hud.rs`, deduplicação da física de ejeção de cápsulas em `src/world_fx.rs`, passo único por tick de servidor em `tick_pending_impacts` / `tick_reload_sessions`, limpeza completa de todas as tabelas estáticas ao sair de mundos e poda periódica de jogadores/entidades desconectados.
+- **Tradução `pt_pt.json` & Verificador endurecido:** suporte completo a Português Europeu (`en_us`, `pt_br` e `pt_pt` com `141` chaves sincronizadas), créditos completos dos `23` áudios em `SOUND-CREDITS.md`, remoção dos scripts legados `tools/decompile/` e novas checagens automáticas de paridade de versão/áudio/documentação em `tools/verify_assets.py`.
+
+---
+
 ## `v0.10.0` — Balística `.44-40` & Headshots, Poses 3D em `F5`/Multiplayer, HUD de Reserva, Tooltips Inteligentes, LOD 3D, Água, Alvos Reativos, Config (31 Opções) e Conquistas
 
 ### Balística Terminal `.44-40` & Headshots (`src/ballistics.rs`)
