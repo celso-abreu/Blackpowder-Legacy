@@ -39,8 +39,23 @@ struct BarrelHeatState {
     muzzle_mm: [i32; 3],
 }
 
-pub(crate) fn clear_barrel_heat() {
+pub(crate) fn reset_server_state() {
+    AIM_TICKS.lock().unwrap().clear();
+    LEVER_READY.lock().unwrap().clear();
+    RELOAD_SESSIONS.lock().unwrap().clear();
+    ACTIVE_BULLETS.lock().unwrap().clear();
     BARREL_HEAT.lock().unwrap().clear();
+}
+
+pub(crate) fn prune_stale_server_maps(now: u64) {
+    LEVER_READY
+        .lock()
+        .unwrap()
+        .retain(|_, &mut ready_tick| now <= ready_tick);
+    AIM_TICKS
+        .lock()
+        .unwrap()
+        .retain(|_, &mut (_, seen_tick)| now.saturating_sub(seen_tick) <= 100);
 }
 
 pub(crate) fn add_shot_barrel_heat(current_heat: f32) -> f32 {
@@ -365,6 +380,7 @@ struct ReloadSession {
     from_empty: bool,
     inserted_any: bool,
     phase: ReloadPhase,
+    last_step_tick: u64,
 }
 
 pub(crate) struct Winchester;
@@ -1879,6 +1895,7 @@ fn start_reload(host: &mut dyn ServerHost, player: mod_api::PlayerRef) {
             phase: ReloadPhase::Opening {
                 until: now + RELOAD_OPEN_TICKS,
             },
+            last_step_tick: now,
         },
     );
     send_sync(host, player, SYNC_RELOAD_START, loaded);
@@ -1891,6 +1908,9 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
         let Some(entity) = host.entity_by_uuid(EntityUuid(uuid)) else {
             continue;
         };
+        if !entity.level(host).is_some_and(|lvl| lvl.in_place(host)) {
+            continue;
+        }
         let Some(player) = host.player(uuid) else {
             RELOAD_SESSIONS.lock().unwrap().remove(&uuid);
             continue;
@@ -1898,6 +1918,10 @@ pub(crate) fn tick_reload_sessions(host: &mut dyn ServerHost, now: u64) {
         let Some(mut session) = RELOAD_SESSIONS.lock().unwrap().get(&uuid).copied() else {
             continue;
         };
+        if session.last_step_tick >= now {
+            continue;
+        }
+        session.last_step_tick = now;
 
         let sprinting = entity.is_sprinting(host).unwrap_or(false);
         let submerged = is_player_submerged_simple(host, player);

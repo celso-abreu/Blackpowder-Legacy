@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Fast, zero-dependency integrity checks for Just a Rifle's manifests & assets.
+"""Fast, zero-dependency integrity checks for Just a Rifle's manifests, docs & assets.
 
 Verifies:
-1. `Cargo.toml`, `horizon-mod.toml`, and GitHub Actions workflows agree on the
-   mod version, `just_a_rifle` namespace, and pinned `HORIZON_SDK_COMMIT`.
-2. Every JSON under `assets/` and `data/` parses cleanly.
-3. `en_us.json` and `pt_br.json` have identical key sets covering all subtitles,
-   items, keybinds, and the creative tab.
-4. Every `.ogg` referenced by `sounds.json` exists on disk.
-5. `bullet_hole.png` has strictly binary alpha (`0` or `255`) so Horizon bakes
-   `special/bullet_hole` on the cutout GPU-instanced path.
+1. `Cargo.toml`, `horizon-mod.toml`, `README.md`, `CHANGELOG.md`, and GitHub Actions
+   workflows agree on the mod version, `just_a_rifle` namespace, and `HORIZON_SDK_COMMIT`.
+2. Every JSON under `assets/` and `data/` parses cleanly without stale namespaces.
+3. All language files (`en_us.json`, `pt_br.json`, `pt_pt.json`) share identical key sets
+   and `%s` format placeholder counts, covering all items, tooltips, subtitles, settings,
+   and advancements.
+4. Every `.ogg` in `assets/just_a_rifle/sounds/` is `48 kHz`, Mono when 3D-attenuated,
+   referenced in `sounds.json`, and credited in `SOUND-CREDITS.md`.
+5. `README.md` Layout accurately matches `src/*.rs` and `tools/*.py` on disk.
+6. `bullet_hole.png` and `icon.png` have strictly binary alpha (`0` or `255`), and GUI
+   3D LOD models stay within fast BSP element bounds.
 """
 
 from pathlib import Path
@@ -67,6 +70,9 @@ def parse_rgba8_png_info(path: Path) -> tuple[int, int, set[int]]:
 def main() -> None:
     cargo_txt = (ROOT / "Cargo.toml").read_text()
     hmod_txt = (ROOT / "horizon-mod.toml").read_text()
+    readme_txt = (ROOT / "README.md").read_text()
+    changelog_txt = (ROOT / "CHANGELOG.md").read_text()
+    credits_txt = (ROOT / "SOUND-CREDITS.md").read_text()
 
     cargo_ver = re.search(r'^version\s*=\s*"([^"]+)"', cargo_txt, re.M)
     hmod_ver = re.search(r'^version\s*=\s*"([^"]+)"', hmod_txt, re.M)
@@ -75,6 +81,11 @@ def main() -> None:
 
     assert cargo_ver and hmod_ver and cargo_ver.group(1) == hmod_ver.group(1), (
         "Cargo.toml and horizon-mod.toml version mismatch"
+    )
+    ver = cargo_ver.group(1)
+    assert f"v{ver}" in readme_txt, f"README.md does not document current version v{ver}"
+    assert f"## `v{ver}`" in changelog_txt, (
+        f"CHANGELOG.md missing release section ## `v{ver}`"
     )
     assert hmod_id and hmod_id.group(1) == MOD_ID, f"Expected id = {MOD_ID}"
     for req_field in ("homepage", "issues", "credits"):
@@ -91,6 +102,18 @@ def main() -> None:
             f"{wf_name} HORIZON_SDK_COMMIT does not match Cargo.toml sdk ({sdk_sha})"
         )
 
+    # Verify README.md Layout lists exact `src/*.rs` and `tools/*.py` files on disk.
+    disk_rs = {p.name for p in (ROOT / "src").glob("*.rs")}
+    readme_rs = set(re.findall(r"^\s+([a-z0-9_]+\.rs)\b", readme_txt, re.M))
+    assert disk_rs == readme_rs, (
+        f"README.md src/*.rs drift: disk={sorted(disk_rs)} vs readme={sorted(readme_rs)}"
+    )
+    disk_py = {p.name for p in (ROOT / "tools").glob("*.py")}
+    readme_py = set(re.findall(r"^\s+([a-z0-9_]+\.py)\b", readme_txt, re.M))
+    assert disk_py == readme_py, (
+        f"README.md tools/*.py drift: disk={sorted(disk_py)} vs readme={sorted(readme_py)}"
+    )
+
     json_files = sorted(
         list((ROOT / "assets").rglob("*.json")) + list((ROOT / "data").rglob("*.json"))
     )
@@ -100,11 +123,19 @@ def main() -> None:
         assert "blackpowder_legacy" not in raw_text, f"Stale namespace in {jf}"
         json.loads(raw_text)
 
-    en = json.loads((ROOT / "assets" / MOD_ID / "lang" / "en_us.json").read_text())
-    pt = json.loads((ROOT / "assets" / MOD_ID / "lang" / "pt_br.json").read_text())
-    assert set(en.keys()) == set(pt.keys()), (
-        f"en_us / pt_br key mismatch: {set(en.keys()) ^ set(pt.keys())}"
-    )
+    lang_dir = ROOT / "assets" / MOD_ID / "lang"
+    lang_files = sorted(lang_dir.glob("*.json"))
+    assert len(lang_files) >= 3, f"Expected >=3 language files, found {len(lang_files)}"
+    en = json.loads((lang_dir / "en_us.json").read_text())
+    for lf in lang_files:
+        data = json.loads(lf.read_text())
+        assert set(data.keys()) == set(en.keys()), (
+            f"{lf.name} / en_us.json key mismatch: {set(data.keys()) ^ set(en.keys())}"
+        )
+        for k, en_val in en.items():
+            assert data[k].count("%s") == en_val.count("%s"), (
+                f"{lf.name} key {k!r} %s placeholder mismatch vs en_us.json"
+            )
 
     sounds = json.loads((ROOT / "assets" / MOD_ID / "sounds.json").read_text())
     referenced_oggs: set[Path] = set()
@@ -129,7 +160,14 @@ def main() -> None:
 
     disk_oggs = {p.resolve() for p in (ROOT / "assets" / MOD_ID / "sounds").rglob("*.ogg")}
     orphan_oggs = disk_oggs - referenced_oggs
-    assert not orphan_oggs, f"Unreferenced .ogg files in sounds/: {sorted(p.name for p in orphan_oggs)}"
+    assert not orphan_oggs, (
+        f"Unreferenced .ogg files in sounds/: {sorted(p.name for p in orphan_oggs)}"
+    )
+    disk_ogg_names = {p.name for p in disk_oggs}
+    credited_ogg_names = set(re.findall(r"`([a-z0-9_]+\.ogg)`", credits_txt))
+    assert disk_ogg_names == credited_ogg_names, (
+        f"SOUND-CREDITS.md .ogg mismatch: missing={sorted(disk_ogg_names - credited_ogg_names)}, extra={sorted(credited_ogg_names - disk_ogg_names)}"
+    )
 
     tab = json.loads(
         (ROOT / "data" / MOD_ID / "horizon" / "creative_tab" / f"{MOD_ID}.json").read_text()
@@ -140,7 +178,9 @@ def main() -> None:
     key_consts = dict(
         re.findall(r'const\s+(KEY_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]+)"', settings_rs)
     )
-    assert len(key_consts) >= 25, f"Expected >=25 setting keys in settings.rs, got {len(key_consts)}"
+    assert len(key_consts) >= 25, (
+        f"Expected >=25 setting keys in settings.rs, got {len(key_consts)}"
+    )
     for cname, key_val in key_consts.items():
         lbl = f"config.{MOD_ID}.{key_val}"
         tip = f"config.{MOD_ID}.{key_val}.tooltip"
@@ -199,11 +239,13 @@ def main() -> None:
     assert 0 < icon_bytes <= 262_144, f"icon.png exceeds 256 KiB limit ({icon_bytes} bytes)"
     iw, ih, icon_alphas = parse_rgba8_png_info(icon_path)
     assert iw == ih and 1 <= iw <= 512, f"icon.png must be square 1..=512 px, got {iw}x{ih}"
-    assert icon_alphas <= {0, 255}, f"icon.png expected crisp cutout corners, got {sorted(icon_alphas)}"
+    assert icon_alphas <= {0, 255}, (
+        f"icon.png expected crisp cutout corners, got {sorted(icon_alphas)}"
+    )
 
-    lib_rs = (ROOT / "src" / "lib.rs").read_text()
-    for tkey in re.findall(r'"(tooltip\.just_a_rifle\.[^"]+)"', lib_rs):
-        assert tkey in en, f"src/lib.rs references missing tooltip translation {tkey}"
+    all_rs = "\n".join(p.read_text() for p in (ROOT / "src").glob("*.rs"))
+    for tkey in re.findall(r'"(tooltip\.just_a_rifle\.[^"]+)"', all_rs):
+        assert tkey in en, f"src/*.rs references missing tooltip translation {tkey}"
 
     # Guard against GUI 3D BSP polygon explosion: `items/winchester_1873.json` must route `gui`
     # to `item/winchester_1873_lod`, and both 3D LOD meshes must stay compact (< 60 elements).
@@ -227,8 +269,10 @@ def main() -> None:
         )
 
     print(
-        f"OK: {MOD_ID} v{cargo_ver.group(1)} (sdk {sdk_sha[:7]}), "
-        f"{len(json_files)} JSONs, {len(en)} lang keys, {len(sounds)} sound events, 3D LOD & cutout decal verified."
+        f"OK: {MOD_ID} v{ver} (sdk {sdk_sha[:7]}), "
+        f"{len(json_files)} JSONs, {len(lang_files)} langs ({len(en)} keys each), "
+        f"{len(sounds)} sound events ({len(disk_oggs)} .ogg credited), "
+        f"{len(disk_rs)} Rust modules, 3D LOD & cutout decal verified."
     )
 
 

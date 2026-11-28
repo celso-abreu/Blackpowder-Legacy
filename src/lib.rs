@@ -1,20 +1,24 @@
 //! Just a Rifle — Winchester 1873 lever-action rifle for Horizon (wasm mod, v0.11.0).
 //!
 //! Clean-room Rust `v0.11.0` modular architecture:
-//! - `constants`   — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
-//! - `ballistics`  — Sub-tick 3D ray-AABB headshot geometry, shield wear & leaf-pierce math.
-//! - `settings`    — `Options > Mods > Config` 33-setting registry & per-channel audio mixer.
-//! - `skin`        — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
-//! - `arms`        — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
-//! - `pose`        — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
-//! - `world_fx`    — Reactive world targets, TNT/foliage ballistics, bullet decals & casings.
-//! - `exploration` — Structure chest loot, Illager `.44-40` drops & 14 mod advancements.
-//! - `server`      — Authoritative firing, barrel heat, foliage perforation & reload loop.
+//! - `constants`    — Content IDs, ballistics, and exact Blockbench `[0..16]` texel pivots.
+//! - `ballistics`   — Sub-tick 3D ray-AABB headshot geometry, shield wear & leaf-pierce math.
+//! - `settings`     — `Options > Mods > Config` 33-setting registry & per-channel audio mixer.
+//! - `skin`         — Mojang Base64 + UTF-16LE SHA-1 skin decoder & 18-skin UUID fallback.
+//! - `arms`         — 1st-person `slim` (`3×12×4`) / `wide` (`4×12×4`) arm & 3D sleeve meshes.
+//! - `pose`         — 2nd-order springs, TAC state machine, dual-arm poses & sight kinematics.
+//! - `client_audio` — Tracked foley cancellation, indoor blast concussion & client sync handlers.
+//! - `hud`          — Western brass ammo HUD, headshot hitmarker, ADS vignette & rich tooltips.
+//! - `world_fx`     — Reactive world targets, TNT/foliage ballistics, bullet decals & casings.
+//! - `exploration`  — Structure chest loot, Illager `.44-40` drops & 14 mod advancements.
+//! - `server`       — Authoritative firing, barrel heat, foliage perforation & reload loop.
 
 mod arms;
 mod ballistics;
+mod client_audio;
 mod constants;
 mod exploration;
+mod hud;
 mod pose;
 mod server;
 mod settings;
@@ -31,17 +35,16 @@ use mod_api::{
     CameraPoseEvent, ClientHost, ClientResourcesReloadedEvent, ClientSetupEvent,
     ClientTickPreEvent, ComputeFovEvent, ContainerLootFilledEvent, CustomArmPose,
     ExplosionInteraction, ExplosionSettings, Flow, FluidKey, GameRuleValue, GetArmPoseEvent,
-    GuiDraw, GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host,
-    HostSide, HumanoidPart, IPayloadContext, Identifier, ItemKey, ItemTooltipEvent,
-    KeyConflictContext, KeyMappingPreEvent, KeyRegistration, LevelHost, LevelRandomHost, LevelRef,
-    LevelTickPostEvent, LightLayer, LivingDamagePreEvent, LivingDeathEvent,
-    LivingShieldBlockEvent, LootDropsEvent, ModelBakingCompletedEvent, ParticleKey,
-    ParticleOptions, PayloadId, PlayLevelSoundAtPositionEvent, ProjectileImpactEvent, Registrar,
-    RegistrationContext, RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost,
-    ServerTickEvent, ServerTickPhase, SettingChangedEvent, SoundPlay, SoundRef, SoundSource,
-    StandaloneModelsEvent, SubmitCustomGeometryEvent, Text, ToClient, ToServer, VarInt,
+    GuiLayerPreEvent, GuiRenderPostEvent, Hand, HearsProjectileImpactsEvent, Hooks, Host, HostSide,
+    HumanoidPart, Identifier, ItemKey, ItemTooltipEvent, KeyConflictContext, KeyMappingPreEvent,
+    KeyRegistration, LevelHost, LevelRandomHost, LevelRef, LevelTickPostEvent,
+    LivingDamagePreEvent, LivingDeathEvent, LivingShieldBlockEvent, LootDropsEvent,
+    ModelBakingCompletedEvent, ParticleKey, ParticleOptions, PayloadId,
+    PlayLevelSoundAtPositionEvent, ProjectileImpactEvent, Registrar, RegistrationContext,
+    RenderFramePreEvent, RenderHandEvent, RenderPlayerPostEvent, ServerHost, ServerTickEvent,
+    ServerTickPhase, SettingChangedEvent, StandaloneModelsEvent, SubmitCustomGeometryEvent,
+    ToClient, ToServer, VarInt,
 };
-use mod_api::text::TextContent;
 
 use crate::arms::{invalidate_skin_sprite_cache, PlayerArms};
 use crate::ballistics::{
@@ -49,12 +52,20 @@ use crate::ballistics::{
     is_ray_headshot_on_box, record_pending_impact, record_pending_shield_block,
     take_pending_impact, take_pending_shield_block, tick_pending_impacts,
 };
+use crate::client_audio::{
+    cancel_action_sound, clear_all_tracked_sounds, client_pitch_jitter, flush_pending_concussion,
+    on_rifle_acoustic_sync, on_rifle_skin_sync, on_rifle_sync, on_rifle_tp_sync, play_local_foley,
+    play_local_foley_channel, play_tracked_action_sound, prune_remote_client_tables,
+    reset_concussion_state, ActionSoundTag, REMOTE_TP_STATES,
+};
 use crate::constants::*;
 use crate::exploration::{
-    distance_3d, flush_pending_exploration_advancements, grant_mod_criterion,
-    handle_living_death_advancements, is_tracked_rifle_bullet, on_container_loot_filled,
-    on_loot_drops, record_bullet_entity_hit, resolve_shooter_and_distance,
-    resolve_shot_origin_for_owner,
+    flush_pending_exploration_advancements, grant_mod_criterion, handle_living_death_advancements,
+    is_tracked_rifle_bullet, on_container_loot_filled, on_loot_drops, record_bullet_entity_hit,
+    reset_exploration_state, resolve_shooter_and_distance, resolve_shot_origin_for_owner,
+};
+use crate::hud::{
+    count_local_reserve_ammo, render_gui_layer_pre, render_gui_post, render_item_tooltip,
 };
 use crate::pose::{
     build_fire_input, cam_recoil_curve, compute_gun_texel_view_pos, draw_back_sling_assembly,
@@ -62,20 +73,19 @@ use crate::pose::{
     recoil_envelope, tex_to_unit, ActionAnim, ClientAnimState, RifleModels, SlungRifleState,
 };
 use crate::server::{
-    clear_barrel_heat, consume_bullet_water_splash_on_impact, emit_entity_ballistic_impact_sound,
-    find_active_bullet_ray, flush_bullet_flyby_on_impact, on_rifle_input, rounds,
-    tick_active_bullets, tick_barrel_heat, tick_reload_sessions, unpack_coord_sub16,
+    consume_bullet_water_splash_on_impact, emit_entity_ballistic_impact_sound,
+    find_active_bullet_ray, flush_bullet_flyby_on_impact, on_rifle_input, prune_stale_server_maps,
+    reset_server_state, rounds, tick_active_bullets, tick_barrel_heat, tick_reload_sessions,
     EntityImpactKind, Winchester,
 };
 use crate::settings::{
-    classify_incoming_level_sound, client_settings, default_channel_for_local_sound,
-    mark_settings_dirty, mix_client_sound, refresh_client_settings, refresh_settings_if_dirty,
-    register_all_settings, AdsMode, BackSlingStyle, LevelSoundDecision, SoundChannel,
+    classify_incoming_level_sound, client_settings, mark_settings_dirty, mix_client_sound,
+    refresh_client_settings, refresh_settings_if_dirty, register_all_settings, AdsMode,
+    BackSlingStyle, LevelSoundDecision, SoundChannel,
 };
-use crate::skin::ResolvedSkin;
 use crate::world_fx::{
-    handle_bullet_terrain_impact, on_bullet_impact_sync, spawn_spent_casing_from_camera,
-    spawn_spent_casing_from_remote_actor, step_world_effects, submit_world_effects,
+    clear_world_effects, handle_bullet_terrain_impact, on_bullet_impact_sync,
+    spawn_spent_casing_from_camera, step_world_effects, submit_world_effects,
 };
 
 // ---------------------------------------------------------------------------
@@ -145,19 +155,6 @@ pub(crate) struct RifleAcousticSync {
     pub(crate) intensity_pm: VarInt,
 }
 
-#[derive(Clone, Copy)]
-struct RemoteTpState {
-    state: i32,
-    set_tick: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ActionSoundTag {
-    Draw,
-    Inspect,
-    Reload,
-}
-
 // ---------------------------------------------------------------------------
 // Shared Client & Server Runtime State
 // ---------------------------------------------------------------------------
@@ -168,9 +165,9 @@ pub(crate) static CLIENT_SPRINTING: AtomicBool = AtomicBool::new(false);
 pub(crate) static CLIENT_SNEAKING: AtomicBool = AtomicBool::new(false);
 static PENDING_FIRE: AtomicBool = AtomicBool::new(false);
 static PENDING_RELOAD_CANCEL: AtomicBool = AtomicBool::new(false);
-static PENDING_AUTO_RELOAD: AtomicBool = AtomicBool::new(false);
-static TOGGLE_AIM_LATCH: AtomicBool = AtomicBool::new(false);
-static HEADSHOT_HITMARKER: AtomicBool = AtomicBool::new(false);
+pub(crate) static PENDING_AUTO_RELOAD: AtomicBool = AtomicBool::new(false);
+pub(crate) static TOGGLE_AIM_LATCH: AtomicBool = AtomicBool::new(false);
+pub(crate) static HEADSHOT_HITMARKER: AtomicBool = AtomicBool::new(false);
 
 pub(crate) static CLIENT_TICKS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AIM_LAST_TICK: AtomicU64 = AtomicU64::new(0);
@@ -178,11 +175,11 @@ static LAST_AUTO_RELOAD_TICK: AtomicU64 = AtomicU64::new(0);
 static FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 static RIFLE_SEEN_FRAME: AtomicU64 = AtomicU64::new(0);
 static ADS_BITS: AtomicU32 = AtomicU32::new(0);
-static HITMARKER_TIMER_BITS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static HITMARKER_TIMER_BITS: AtomicU32 = AtomicU32::new(0);
 /// 20 Hz client cache of local player entity ID (`0` when unavailable) and `.44-40` reserve
 /// (`u32::MAX` = Creative `∞`).
-static LOCAL_ENTITY_ID: AtomicU32 = AtomicU32::new(0);
-static LOCAL_RESERVE_AMMO: AtomicU32 = AtomicU32::new(0);
+pub(crate) static LOCAL_ENTITY_ID: AtomicU32 = AtomicU32::new(0);
+pub(crate) static LOCAL_RESERVE_AMMO: AtomicU32 = AtomicU32::new(0);
 /// Packed 20 Hz cache of `local_offhand_rifle_status`: `0` = not slung, else
 /// `1 | ((chest_armored as u32) << 1) | (loaded_rounds << 2)` so `render_player_post` never
 /// queries entities/inventories across WASM on every `F5` or Inventory paperdoll frame.
@@ -229,7 +226,6 @@ static PLAYER_ARMS: OnceLock<PlayerArms> = OnceLock::new();
 pub(crate) static RIFLE_MODELS: Mutex<Option<RifleModels>> = Mutex::new(None);
 static CLIENT_ANIM: OnceLock<Mutex<ClientAnimState>> = OnceLock::new();
 static SLUNG_RIFLES: Mutex<BTreeMap<u32, SlungRifleState>> = Mutex::new(BTreeMap::new());
-static REMOTE_TP_STATES: Mutex<BTreeMap<u32, RemoteTpState>> = Mutex::new(BTreeMap::new());
 
 pub(crate) fn is_water_fluid(fluid: FluidKey) -> bool {
     WATER_FLUID_KEY.get().copied() == Some(fluid)
@@ -308,742 +304,6 @@ fn resolve_rifle_models(host: &dyn ClientHost) -> Option<RifleModels> {
 
 fn refresh_rifle_models(host: &dyn ClientHost) {
     *RIFLE_MODELS.lock().unwrap() = resolve_rifle_models(host);
-}
-
-static ACTIVE_ACTION_SOUND: Mutex<Option<(ActionSoundTag, SoundRef)>> = Mutex::new(None);
-static REMOTE_ACTION_SOUNDS: Mutex<BTreeMap<u32, SoundRef>> = Mutex::new(BTreeMap::new());
-static PENDING_CONCUSSION: Mutex<Option<(f32, f32, u32)>> = Mutex::new(None);
-static CONCUSSION_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-const CONCUSSION_EXEMPT_SOUNDS: &[&str] = &[
-    SND_FIRE,
-    SND_THUMP,
-    SND_ECHO_CAVE,
-    SND_ECHO_OPEN,
-    SND_LEVER,
-    SND_COCK,
-    SND_BULLET_CRACK,
-    SND_BULLET_WHIZ,
-];
-
-fn stop_or_fade_sound(host: &dyn ClientHost, sound: SoundRef, fade_ticks: u32) {
-    if fade_ticks == 0 {
-        let _ = sound.stop(host);
-    } else {
-        let _ = sound.fade(host, 0.0, fade_ticks);
-    }
-}
-
-fn cancel_action_sound(host: &dyn ClientHost, filter: Option<ActionSoundTag>, fade_ticks: u32) {
-    let prev = {
-        let mut slot = ACTIVE_ACTION_SOUND.lock().unwrap();
-        match *slot {
-            Some((tag, sref)) if filter.is_none_or(|want| want == tag) => {
-                *slot = None;
-                Some(sref)
-            }
-            _ => None,
-        }
-    };
-    if let Some(sref) = prev {
-        stop_or_fade_sound(host, sref, fade_ticks);
-    }
-}
-
-fn clear_all_tracked_sounds(host: &dyn ClientHost) {
-    cancel_action_sound(host, None, 0);
-    let remotes: Vec<SoundRef> = core::mem::take(&mut *REMOTE_ACTION_SOUNDS.lock().unwrap())
-        .into_values()
-        .collect();
-    for sref in remotes {
-        let _ = sref.stop(host);
-    }
-}
-
-fn client_pitch_jitter(salt: u64) -> f32 {
-    let mut h = CLIENT_TICKS
-        .load(Ordering::Relaxed)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(salt.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-    h ^= h >> 30;
-    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
-    h ^= h >> 27;
-    (((h & 0xFFFF) as f32) * (1.0 / 32_767.5) - 1.0).clamp(-1.0, 1.0)
-}
-
-pub(crate) fn play_local_foley_channel(
-    host: &dyn ClientHost,
-    channel: SoundChannel,
-    event_id: &str,
-    volume: f32,
-    pitch: f32,
-) -> Option<SoundRef> {
-    let cfg = client_settings();
-    let (vol, pit) = mix_client_sound(&cfg, channel, volume, pitch)?;
-    let mut sound = SoundPlay::ui(event_id).with_volume(vol).with_pitch(pit);
-    sound.source = SoundSource::Players;
-    host.play_local_sound(&sound, 0)
-}
-
-pub(crate) fn play_local_foley(
-    host: &dyn ClientHost,
-    event_id: &str,
-    volume: f32,
-    pitch: f32,
-) -> Option<SoundRef> {
-    play_local_foley_channel(
-        host,
-        default_channel_for_local_sound(event_id),
-        event_id,
-        volume,
-        pitch,
-    )
-}
-
-fn play_tracked_action_sound(
-    host: &dyn ClientHost,
-    tag: ActionSoundTag,
-    channel: SoundChannel,
-    event_id: &str,
-    volume: f32,
-    pitch: f32,
-) {
-    cancel_action_sound(host, None, 2);
-    if let Some(sref) = play_local_foley_channel(host, channel, event_id, volume, pitch) {
-        *ACTIVE_ACTION_SOUND.lock().unwrap() = Some((tag, sref));
-    }
-}
-
-pub(crate) fn play_local_positional_channel(
-    host: &dyn ClientHost,
-    channel: SoundChannel,
-    event_id: &str,
-    position: [f64; 3],
-    volume: f32,
-    pitch: f32,
-    after_ticks: u32,
-) -> Option<SoundRef> {
-    let cfg = client_settings();
-    let (vol, pit) = mix_client_sound(&cfg, channel, volume, pitch)?;
-    let sound = SoundPlay::at(event_id, SoundSource::Players, position)
-        .with_volume(vol)
-        .with_pitch(pit);
-    host.play_local_sound(&sound, after_ticks)
-}
-
-pub(crate) fn play_local_positional_foley(
-    host: &dyn ClientHost,
-    event_id: &str,
-    position: [f64; 3],
-    volume: f32,
-    pitch: f32,
-    after_ticks: u32,
-) -> Option<SoundRef> {
-    play_local_positional_channel(
-        host,
-        default_channel_for_local_sound(event_id),
-        event_id,
-        position,
-        volume,
-        pitch,
-        after_ticks,
-    )
-}
-
-fn on_rifle_sync(value: RifleSync, cx: &mut dyn IPayloadContext) -> Result<(), String> {
-    let cfg = client_settings();
-    if value.kind.0 == SYNC_HIT_CONFIRM || value.kind.0 == SYNC_HEADSHOT_CONFIRM {
-        let is_headshot = value.kind.0 == SYNC_HEADSHOT_CONFIRM;
-        HEADSHOT_HITMARKER.store(is_headshot, Ordering::Relaxed);
-        HITMARKER_TIMER_BITS.store(
-            (if is_headshot { 0.22_f32 } else { 0.14_f32 }).to_bits(),
-            Ordering::Relaxed,
-        );
-        if let Some((snd, vol, pitch)) = cfg.hit_confirm_sound.sound_spec()
-            && let Ok(host) = cx.client_host()
-        {
-            if is_headshot {
-                let _ = play_local_foley_channel(
-                    host,
-                    SoundChannel::Feedback,
-                    snd,
-                    (vol * 1.18).min(1.0),
-                    (pitch * 1.18).min(2.0),
-                );
-                let _ = play_local_foley_channel(
-                    host,
-                    SoundChannel::Feedback,
-                    SND_HIT_CONFIRM_CHIME,
-                    (vol * 0.85).min(0.85),
-                    1.82,
-                );
-            } else {
-                let _ = play_local_foley_channel(host, SoundChannel::Feedback, snd, vol, pitch);
-            }
-        }
-        return Ok(());
-    }
-
-    let rounds_now = (value.rounds.0.max(0) as u32).min(TUBE_CAPACITY);
-    let mut tracked_foley: Option<(ActionSoundTag, SoundChannel, &'static str, f32, f32)> = None;
-    let mut oneshot_foley: Option<(SoundChannel, &'static str, f32, f32)> = None;
-    let mut stop_tracked = false;
-
-    {
-        let mut anim = client_anim().lock().unwrap();
-        anim.known_rounds = rounds_now;
-        let j = client_pitch_jitter(u64::from(rounds_now) + (value.kind.0 as u64) * 31);
-        match value.kind.0 {
-            SYNC_SHOT => {
-                CLIENT_RELOADING.store(false, Ordering::Relaxed);
-                stop_tracked = true;
-                anim.on_shot(rounds_now);
-            }
-            SYNC_DRY_CLICK => {
-                stop_tracked = true;
-                anim.on_dry_click(rounds_now);
-                if cfg.dry_click_alert {
-                    oneshot_foley = Some((SoundChannel::Feedback, SND_DRY_FIRE, 0.74, 1.0 + 0.03 * j));
-                }
-                if rounds_now == 0 && cfg.auto_reload {
-                    PENDING_AUTO_RELOAD.store(true, Ordering::Relaxed);
-                }
-            }
-            SYNC_WET_MISFIRE => {
-                // World-space Mono `SND_MISFIRE_WET` is already emitted at the flooded breech on
-                // the server (`emit_wet_misfire`); only stop interrupted foley & animate trigger here.
-                CLIENT_RELOADING.store(false, Ordering::Relaxed);
-                stop_tracked = true;
-                anim.on_dry_click(rounds_now);
-            }
-            SYNC_RELOAD_START => {
-                CLIENT_RELOADING.store(true, Ordering::Relaxed);
-                AIMING.store(false, Ordering::Relaxed);
-                TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
-                anim.action = ActionAnim::ReloadIntro { elapsed: 0.0 };
-                tracked_foley = Some((
-                    ActionSoundTag::Reload,
-                    SoundChannel::Reload,
-                    SND_RELOAD_INTRO,
-                    0.90,
-                    1.0 + 0.025 * j,
-                ));
-            }
-            SYNC_SHELL_INSERTED => {
-                CLIENT_RELOADING.store(true, Ordering::Relaxed);
-                anim.action = ActionAnim::ReloadInsert { elapsed: 0.0 };
-                tracked_foley = Some((
-                    ActionSoundTag::Reload,
-                    SoundChannel::Reload,
-                    SND_RELOAD_INSERT,
-                    0.92,
-                    1.0 + 0.03 * j,
-                ));
-            }
-            SYNC_RELOAD_END_NORM => {
-                CLIENT_RELOADING.store(false, Ordering::Relaxed);
-                anim.action = ActionAnim::ReloadEndNorm { elapsed: 0.0 };
-                tracked_foley = Some((
-                    ActionSoundTag::Reload,
-                    SoundChannel::Reload,
-                    SND_RELOAD_END,
-                    0.88,
-                    1.0 + 0.02 * j,
-                ));
-            }
-            SYNC_RELOAD_END_EMPTY => {
-                // Empty-chamber close cycles the lever at `t = 0.15s` + cocks the hammer at `t = 0.40s`
-                // (`Mechanism` channel); fade any tail from the last shell insert instead of overlapping
-                // `SND_RELOAD_END` on top of the lever throw.
-                CLIENT_RELOADING.store(false, Ordering::Relaxed);
-                stop_tracked = true;
-                anim.action = ActionAnim::ReloadEndEmpty {
-                    elapsed: 0.0,
-                    lever_sound_played: false,
-                    cock_sound_played: false,
-                };
-            }
-            SYNC_RELOAD_ABORTED => {
-                CLIENT_RELOADING.store(false, Ordering::Relaxed);
-                stop_tracked = true;
-                if matches!(
-                    anim.action,
-                    ActionAnim::ReloadIntro { .. }
-                        | ActionAnim::ReloadInsert { .. }
-                        | ActionAnim::ReloadEndNorm { .. }
-                        | ActionAnim::ReloadEndEmpty { .. }
-                ) {
-                    anim.action = ActionAnim::None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if let Ok(host) = cx.client_host() {
-        if stop_tracked {
-            cancel_action_sound(host, None, 2);
-        }
-        if let Some((tag, ch, snd, vol, pitch)) = tracked_foley {
-            play_tracked_action_sound(host, tag, ch, snd, vol, pitch);
-        }
-        if let Some((ch, snd, vol, pitch)) = oneshot_foley {
-            let _ = play_local_foley_channel(host, ch, snd, vol, pitch);
-        }
-    }
-    Ok(())
-}
-
-fn on_rifle_skin_sync(value: RifleSkinSync, _: &mut dyn IPayloadContext) -> Result<(), String> {
-    invalidate_skin_sprite_cache();
-    let mut anim = client_anim().lock().unwrap();
-    anim.skin = ResolvedSkin {
-        primary: value.sprite,
-        fallback: value.fallback,
-        slim: value.slim.0 != 0,
-    };
-    Ok(())
-}
-
-fn resolve_remote_breech_pos(host: &dyn ClientHost, eid: u32) -> Option<[f64; 3]> {
-    let ent = host.entity(eid)?;
-    if let Some(eye) = ent.eye_position(host) {
-        Some([eye[0], eye[1] - 0.24, eye[2]])
-    } else {
-        ent.position(host).map(|p| [p[0], p[1] + 1.32, p[2]])
-    }
-}
-
-fn replace_remote_action_sound(host: &dyn ClientHost, eid: u32, next: Option<SoundRef>) {
-    let prev = {
-        let mut map = REMOTE_ACTION_SOUNDS.lock().unwrap();
-        if map.len() >= 64 && !map.contains_key(&eid) {
-            map.clear();
-        }
-        match next {
-            Some(sref) => map.insert(eid, sref),
-            None => map.remove(&eid),
-        }
-    };
-    if let Some(old) = prev {
-        stop_or_fade_sound(host, old, 2);
-    }
-}
-
-fn on_rifle_tp_sync(
-    value: RifleThirdPersonSync,
-    cx: &mut dyn IPayloadContext,
-) -> Result<(), String> {
-    if value.entity_id.0 <= 0 {
-        return Ok(());
-    }
-    let eid = value.entity_id.0 as u32;
-    let now = CLIENT_TICKS.load(Ordering::Relaxed);
-    let cue = value.state.0;
-
-    // 1. Update 3rd-person remote pose table (`TP_CUE_DRY_CLICK` is audio-only, preserving pose).
-    if cue != TP_CUE_DRY_CLICK {
-        let mut map = REMOTE_TP_STATES.lock().unwrap();
-        match cue {
-            TP_STATE_IDLE | TP_CUE_RELOAD_END_NORM | TP_CUE_LAST_SHOT_EJECT => {
-                map.remove(&eid);
-            }
-            TP_STATE_RELOADING | TP_CUE_RELOAD_INSERT => {
-                if map.len() >= 64 {
-                    map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
-                }
-                map.insert(
-                    eid,
-                    RemoteTpState {
-                        state: TP_STATE_RELOADING,
-                        set_tick: now,
-                    },
-                );
-            }
-            TP_STATE_LEVER_CYCLE | TP_CUE_EMPTY_CHAMBER_LEVER => {
-                if map.len() >= 64 {
-                    map.retain(|_, v| now.saturating_sub(v.set_tick) <= 120);
-                }
-                map.insert(
-                    eid,
-                    RemoteTpState {
-                        state: TP_STATE_LEVER_CYCLE,
-                        set_tick: now,
-                    },
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // 2. Emit 3D Mono positional foley & spent brass casings for nearby remote players (`eid != local_eid`).
-    if eid == LOCAL_ENTITY_ID.load(Ordering::Relaxed) {
-        return Ok(());
-    }
-    let Ok(host) = cx.client_host() else {
-        return Ok(());
-    };
-    if cue == TP_STATE_IDLE {
-        replace_remote_action_sound(host, eid, None);
-        return Ok(());
-    }
-    let Some(pos) = resolve_remote_breech_pos(host, eid) else {
-        return Ok(());
-    };
-    let j = client_pitch_jitter(u64::from(eid).wrapping_mul(17) ^ (cue as u64));
-    match cue {
-        TP_STATE_RELOADING => {
-            let sref = play_local_positional_channel(
-                host,
-                SoundChannel::Reload,
-                SND_RELOAD_INTRO,
-                pos,
-                0.78,
-                1.0 + 0.025 * j,
-                0,
-            );
-            replace_remote_action_sound(host, eid, sref);
-        }
-        TP_CUE_RELOAD_INSERT => {
-            let sref = play_local_positional_channel(
-                host,
-                SoundChannel::Reload,
-                SND_RELOAD_INSERT,
-                pos,
-                0.82,
-                1.0 + 0.03 * j,
-                0,
-            );
-            replace_remote_action_sound(host, eid, sref);
-        }
-        TP_CUE_RELOAD_END_NORM => {
-            let sref = play_local_positional_channel(
-                host,
-                SoundChannel::Reload,
-                SND_RELOAD_END,
-                pos,
-                0.76,
-                1.0 + 0.02 * j,
-                0,
-            );
-            replace_remote_action_sound(host, eid, sref);
-        }
-        TP_STATE_LEVER_CYCLE => {
-            replace_remote_action_sound(host, eid, None);
-            spawn_spent_casing_from_remote_actor(host, eid);
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Mechanism,
-                SND_LEVER,
-                pos,
-                0.80,
-                1.0 + 0.025 * j,
-                3,
-            );
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Mechanism,
-                SND_COCK,
-                pos,
-                0.66,
-                1.02 + 0.025 * j,
-                8,
-            );
-        }
-        TP_CUE_LAST_SHOT_EJECT => {
-            replace_remote_action_sound(host, eid, None);
-            spawn_spent_casing_from_remote_actor(host, eid);
-        }
-        TP_CUE_EMPTY_CHAMBER_LEVER => {
-            replace_remote_action_sound(host, eid, None);
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Mechanism,
-                SND_LEVER,
-                pos,
-                0.80,
-                1.0 + 0.025 * j,
-                3,
-            );
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Mechanism,
-                SND_COCK,
-                pos,
-                0.66,
-                1.02 + 0.025 * j,
-                8,
-            );
-        }
-        TP_CUE_DRY_CLICK => {
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Mechanism,
-                SND_DRY_FIRE,
-                pos,
-                0.72,
-                1.0 + 0.03 * j,
-                0,
-            );
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn on_rifle_acoustic_sync(
-    value: RifleAcousticSync,
-    cx: &mut dyn IPayloadContext,
-) -> Result<(), String> {
-    let Ok(host) = cx.client_host() else {
-        return Ok(());
-    };
-    let cfg = client_settings();
-    let pos = [
-        unpack_coord_sub16(value.x_sub16),
-        unpack_coord_sub16(value.y_sub16),
-        unpack_coord_sub16(value.z_sub16),
-    ];
-    let intensity = (value.intensity_pm.0 as f32 * 0.001).clamp(0.0, 1.0);
-
-    let cam = host.camera();
-    let listener_pos = cam
-        .as_ref()
-        .map(|c| c.position)
-        .or_else(|| host.local_player().and_then(|p| p.entity().eye_position(host)));
-    let dist = listener_pos.map_or(0.0, |lp| distance_3d(pos, lp));
-    // Speed of sound (~340 m/s = 17 blocks/tick at 20 Hz) for realistic downrange report arrival.
-    let prop_ticks = (dist / 17.0).floor().clamp(0.0, 12.0) as u32;
-    let salt = (value.x_sub16.0 as u64)
-        .wrapping_mul(31)
-        .wrapping_add(value.z_sub16.0 as u64);
-    let j = client_pitch_jitter(salt);
-
-    match value.cue.0 {
-        ACOUSTIC_CUE_BULLET_CRACK => {
-            let vol = 0.72 + 0.28 * intensity;
-            let pitch = 0.96 + 0.12 * intensity + 0.03 * j;
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::WorldImpact,
-                SND_BULLET_CRACK,
-                pos,
-                vol,
-                pitch,
-                0,
-            );
-            // Very close supersonic graze (`<= ~3m`) trails a subtle aerodynamic slipstream wake.
-            if intensity >= 0.45 {
-                let _ = play_local_positional_channel(
-                    host,
-                    SoundChannel::WorldImpact,
-                    SND_BULLET_WHIZ,
-                    pos,
-                    0.36 * intensity,
-                    1.06 + 0.03 * j,
-                    1,
-                );
-            }
-        }
-        ACOUSTIC_CUE_BULLET_WHIZ => {
-            let vol = 0.42 + 0.50 * intensity;
-            let pitch = 0.90 + 0.18 * intensity + 0.03 * j;
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::WorldImpact,
-                SND_BULLET_WHIZ,
-                pos,
-                vol,
-                pitch,
-                0,
-            );
-        }
-        ACOUSTIC_CUE_SHOT_CONFINED => {
-            let (vol, pitch) = if dist <= 32.0 {
-                (
-                    0.62 + 0.42 * intensity,
-                    0.96 + 0.06 * (1.0 - intensity) + 0.025 * j,
-                )
-            } else {
-                let fade = (1.0 - ((dist - 32.0) / 68.0) as f32).clamp(0.18, 1.0);
-                (1.55 * fade, 0.88 + 0.025 * j)
-            };
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Echo,
-                SND_ECHO_CAVE,
-                pos,
-                vol,
-                pitch,
-                (1 + prop_ticks).min(14),
-            );
-
-            // Subtle indoor/cave blast pressure concussion when detonating right near the listener.
-            if cfg.blast_concussion
-                && cfg.vol_master > 0.01
-                && cfg.vol_fire > 0.01
-                && dist <= 5.0
-                && let Some(lp) = listener_pos
-            {
-                let dim = cam
-                    .as_ref()
-                    .map_or(DEFAULT_DIMENSION, |c| c.dimension.as_str());
-                let lbp = [lp[0].floor() as i32, lp[1].floor() as i32, lp[2].floor() as i32];
-                let listener_sky = host
-                    .level(dim)
-                    .and_then(|lvl| lvl.brightness(host, LightLayer::Sky, lbp))
-                    .unwrap_or(0);
-                if listener_sky <= 9 {
-                    let prox = (1.0 - (dist as f32 / 5.0)).clamp(0.0, 1.0);
-                    let amount = ((0.14 + 0.18 * intensity) * prox).clamp(0.05, 0.34);
-                    let lowpass = ((0.28 + 0.26 * intensity) * prox).clamp(0.10, 0.56);
-                    let ticks = (10.0 + 10.0 * intensity * prox).round().clamp(8.0, 20.0) as u32;
-                    *PENDING_CONCUSSION.lock().unwrap() = Some((amount, lowpass, ticks));
-                }
-            }
-        }
-        ACOUSTIC_CUE_SHOT_SEMI => {
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Echo,
-                SND_ECHO_CAVE,
-                pos,
-                0.30 * intensity,
-                1.07 + 0.02 * j,
-                (1 + prop_ticks).min(14),
-            );
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Echo,
-                SND_ECHO_OPEN,
-                pos,
-                0.46 * intensity,
-                0.98 + 0.02 * j,
-                (3 + prop_ticks).min(16),
-            );
-        }
-        ACOUSTIC_CUE_SHOT_OPEN => {
-            let (vol, pitch, after) = if dist <= 32.0 {
-                let base_delay = if intensity >= 0.72 { 2 } else { 3 };
-                (
-                    0.40 + 0.50 * intensity,
-                    0.98 + 0.025 * j,
-                    base_delay + prop_ticks,
-                )
-            } else {
-                // Distant listeners (>32..96m) hear the rolling valley report arrive at speed of sound.
-                let fade = (1.0 - ((dist - 32.0) / 68.0) as f32).clamp(0.16, 1.0);
-                (
-                    (1.55 + 0.45 * intensity) * fade,
-                    0.91 + 0.025 * j,
-                    prop_ticks.clamp(2, 12),
-                )
-            };
-            let _ = play_local_positional_channel(
-                host,
-                SoundChannel::Echo,
-                SND_ECHO_OPEN,
-                pos,
-                vol,
-                pitch,
-                after,
-            );
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn count_local_reserve_ammo(host: &dyn ClientHost) -> u32 {
-    let Some(cartridge) = CARTRIDGE_KEY.get().copied() else {
-        return 0;
-    };
-    let Some(player) = host.local_player() else {
-        return 0;
-    };
-    if player.is_creative(host).unwrap_or(false) {
-        return u32::MAX;
-    }
-    let mut total: u32 = 0;
-    if let Some(items) = player.inventory(host) {
-        for st in items {
-            if st.item() == cartridge {
-                total = total.saturating_add(st.count());
-            }
-        }
-    }
-    if let Some(liv) = host.living(player.entity())
-        && let Some(off) = liv.hand_item(host, Hand::Off)
-        && off.item() == cartridge
-    {
-        total = total.saturating_add(off.count());
-    }
-    total
-}
-
-fn styled_text(mut text: Text, color_hex: &str, italic: bool) -> Text {
-    text.style.color = Some(color_hex.into());
-    text.style.italic = Some(italic);
-    text
-}
-
-fn pretty_key_fallback(key_id: &str, default_label: &str) -> String {
-    if let Some(rest) = key_id.strip_prefix("key.keyboard.") {
-        if rest.len() == 1 {
-            return rest.to_ascii_uppercase();
-        }
-        return rest.replace('.', " ").to_ascii_uppercase();
-    }
-    if let Some(rest) = key_id.strip_prefix("key.mouse.") {
-        return format!("M:{}", rest.to_ascii_uppercase());
-    }
-    default_label.into()
-}
-
-fn mod_key_component(host: &dyn ClientHost, mapping: &str, fallback_label: &str) -> Text {
-    let base = match host.mod_key(MOD_ID, mapping) {
-        Some((key_id, _)) if !key_id.is_empty() && key_id != "key.keyboard.unknown" => {
-            Text::new(TextContent::Translatable {
-                key: key_id.clone(),
-                fallback: Some(pretty_key_fallback(&key_id, fallback_label)),
-                arguments: Vec::new(),
-            })
-        }
-        _ => Text::literal(fallback_label),
-    };
-    styled_text(base, "#F2D56F", false)
-}
-
-fn vanilla_key_component(mapping: &str) -> Text {
-    styled_text(
-        Text::new(TextContent::Keybind(mapping.into())),
-        "#F2D56F",
-        false,
-    )
-}
-
-fn text_contains_durability(text: &Text) -> bool {
-    if let TextContent::Translatable { key, .. } = &text.content
-        && key == "item.durability"
-    {
-        return true;
-    }
-    text.children.iter().any(text_contains_durability)
-}
-
-/// Draws a crisp pixel-perfect mini `.44-40` brass/copper cartridge icon (`3×9` GUI px) inside
-/// the HUD reserve counter box with zero texture state switches.
-fn draw_hud_mini_cartridge(event: &mut GuiRenderPostEvent<'_>, x: f32, y: f32) {
-    // Copper jacketed soft-lead nose (top 3px)
-    event.batch.fill([x + 0.5, y, 2.0, 1.0], 0xFF_F2_AD_72);
-    event.batch.fill([x, y + 1.0, 3.0, 2.0], 0xFF_DB_89_48);
-    event.batch.fill([x, y + 1.0, 1.0, 2.0], 0xFF_F2_AD_72);
-    // Polished .44-40 bottleneck brass case (middle 5px)
-    event.batch.fill([x, y + 3.0, 3.0, 5.0], 0xFF_BF_95_28);
-    event.batch.fill([x + 0.5, y + 3.0, 1.2, 5.0], 0xFF_F2_D5_6F);
-    // Rimmed centerfire base (bottom 1px, slightly wider)
-    event.batch.fill([x - 0.5, y + 8.0, 4.0, 1.0], 0xFF_99_73_1C);
-    event.batch.fill([x, y + 8.0, 2.0, 1.0], 0xFF_E6_C0_4C);
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,108 +688,7 @@ impl Hooks for Mod {
     }
 
     fn item_tooltip(&self, host: &dyn ClientHost, event: &mut ItemTooltipEvent<'_>) {
-        let rifle = RIFLE_KEY.get().copied();
-        let cartridge = CARTRIDGE_KEY.get().copied();
-        let item = event.stack.item();
-        let is_rifle = rifle == Some(item);
-        let is_cartridge = cartridge == Some(item);
-        if !is_rifle && !is_cartridge {
-            return;
-        }
-
-        // Always hide Vanilla's internal `"item.durability"` line on the Winchester (`F3+H`),
-        // because stack `damage` encodes loaded `.44-40` rounds (`0..=8`), not wear & tear.
-        if is_rifle {
-            event.lines.retain(|(line, _)| !text_contains_durability(line));
-        }
-
-        if !client_settings().hud_rich_tooltips {
-            return;
-        }
-
-        let insert_at = if event.lines.is_empty() { 0 } else { 1 };
-        let mut extra: Vec<(Text, u32)> = Vec::with_capacity(4);
-
-        if is_rifle {
-            let loaded = rounds(event.stack);
-            let reserve = LOCAL_RESERVE_AMMO.load(Ordering::Relaxed);
-            let loaded_color = if loaded == 0 { "#FF6E59" } else { "#F2D56F" };
-            let loaded_arg = styled_text(Text::literal(loaded.to_string()), loaded_color, false);
-            let cap_arg = styled_text(Text::literal(TUBE_CAPACITY.to_string()), "#E6D6B8", false);
-            let reserve_arg = if reserve == u32::MAX {
-                styled_text(Text::literal("∞"), "#FFE082", false)
-            } else if reserve == 0 {
-                styled_text(Text::literal("0"), "#D96B59", false)
-            } else {
-                styled_text(Text::literal(reserve.to_string()), "#E6D6B8", false)
-            };
-
-            extra.push((
-                styled_text(
-                    Text::translate("tooltip.just_a_rifle.winchester.subtitle", Vec::new()),
-                    "#B8A88A",
-                    true,
-                ),
-                u32::MAX,
-            ));
-            extra.push((
-                styled_text(
-                    Text::translate(
-                        "tooltip.just_a_rifle.winchester.ammo",
-                        vec![loaded_arg, cap_arg, reserve_arg],
-                    ),
-                    "#C8BEA8",
-                    false,
-                ),
-                u32::MAX,
-            ));
-            extra.push((
-                styled_text(
-                    Text::translate("tooltip.just_a_rifle.winchester.stats", Vec::new()),
-                    "#969CA6",
-                    false,
-                ),
-                u32::MAX,
-            ));
-            extra.push((
-                styled_text(
-                    Text::translate(
-                        "tooltip.just_a_rifle.winchester.controls",
-                        vec![
-                            vanilla_key_component("key.use"),
-                            mod_key_component(host, RELOAD_MAPPING, "R"),
-                            mod_key_component(host, INSPECT_MAPPING, "I"),
-                            vanilla_key_component("key.swapOffhand"),
-                        ],
-                    ),
-                    "#857E72",
-                    false,
-                ),
-                u32::MAX,
-            ));
-        } else if is_cartridge {
-            extra.push((
-                styled_text(
-                    Text::translate("tooltip.just_a_rifle.cartridge.caliber", Vec::new()),
-                    "#D9B038",
-                    true,
-                ),
-                u32::MAX,
-            ));
-            extra.push((
-                styled_text(
-                    Text::translate(
-                        "tooltip.just_a_rifle.cartridge.usage",
-                        vec![mod_key_component(host, RELOAD_MAPPING, "R")],
-                    ),
-                    "#A89F8D",
-                    false,
-                ),
-                u32::MAX,
-            ));
-        }
-
-        event.lines.splice(insert_at..insert_at, extra);
+        render_item_tooltip(host, event);
     }
 
     fn container_loot_filled(
@@ -1549,15 +708,12 @@ impl Hooks for Mod {
     fn setting_changed(&self, host: &mut dyn ClientHost, _: &mut SettingChangedEvent<'_>) {
         refresh_client_settings(host);
         let cfg = client_settings();
-        if cfg.ads_mode == AdsMode::Hold
-            && TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed)
-        {
+        if cfg.ads_mode == AdsMode::Hold && TOGGLE_AIM_LATCH.swap(false, Ordering::Relaxed) {
             AIMING.store(false, Ordering::Relaxed);
             let _ = host.set_mapping_down("key.use", false);
         }
-        if !cfg.blast_concussion && CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
-            *PENDING_CONCUSSION.lock().unwrap() = None;
-            let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
+        if !cfg.blast_concussion {
+            reset_concussion_state(host);
         }
     }
 
@@ -1683,10 +839,7 @@ impl Hooks for Mod {
 
         if !host.playing() {
             clear_all_tracked_sounds(host);
-            *PENDING_CONCUSSION.lock().unwrap() = None;
-            if CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
-                let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
-            }
+            reset_concussion_state(host);
             PENDING_FIRE.store(false, Ordering::Relaxed);
             PENDING_AUTO_RELOAD.store(false, Ordering::Relaxed);
             TOGGLE_AIM_LATCH.store(false, Ordering::Relaxed);
@@ -1700,8 +853,10 @@ impl Hooks for Mod {
             LOCAL_OFFHAND_PACKED.store(0, Ordering::Relaxed);
             SLUNG_RIFLES.lock().unwrap().clear();
             REMOTE_TP_STATES.lock().unwrap().clear();
+            clear_world_effects();
             crate::ballistics::clear_all_pending_impacts();
-            clear_barrel_heat();
+            reset_server_state();
+            reset_exploration_state();
             let mut anim = client_anim().lock().unwrap();
             anim.was_holding = false;
             anim.was_slung = false;
@@ -1710,17 +865,10 @@ impl Hooks for Mod {
             return;
         }
 
-        if !cfg.blast_concussion || cfg.vol_master <= 0.01 || cfg.vol_fire <= 0.01 {
-            *PENDING_CONCUSSION.lock().unwrap() = None;
-            if CONCUSSION_ACTIVE.swap(false, Ordering::Relaxed) {
-                let _ = host.muffle_sounds(0.0, 0.0, 0, &[]);
-            }
-        } else if let Some((amount, lowpass, muffle_ticks)) =
-            PENDING_CONCUSSION.lock().unwrap().take()
-            && host.muffle_sounds(amount, lowpass, muffle_ticks, CONCUSSION_EXEMPT_SOUNDS)
-        {
-            CONCUSSION_ACTIVE.store(true, Ordering::Relaxed);
-        }
+        flush_pending_concussion(
+            host,
+            cfg.blast_concussion && cfg.vol_master > 0.01 && cfg.vol_fire > 0.01,
+        );
 
         let holding = holding_rifle_recently() || AIMING.load(Ordering::Relaxed);
         let local_eid = host
@@ -1731,10 +879,11 @@ impl Hooks for Mod {
         LOCAL_ENTITY_ID.store(local_eid, Ordering::Relaxed);
         LOCAL_RESERVE_AMMO.store(count_local_reserve_ammo(host), Ordering::Relaxed);
         if tick % 20 == 0 {
-            REMOTE_TP_STATES
+            prune_remote_client_tables(host, tick);
+            SLUNG_RIFLES
                 .lock()
                 .unwrap()
-                .retain(|_, v| tick.saturating_sub(v.set_tick) <= 120);
+                .retain(|_, s| tick.saturating_sub(s.last_tick) <= 60);
         }
         let offhand_status = local_offhand_rifle_status(host);
         let is_slung = offhand_status.is_some();
@@ -1961,7 +1110,11 @@ impl Hooks for Mod {
 
     fn server_tick(&self, _: &mut dyn ServerHost, event: &mut ServerTickEvent<'_>) {
         if matches!(event.phase, ServerTickPhase::ServerTickEnd { .. }) {
-            SERVER_TICKS.fetch_add(1, Ordering::Relaxed);
+            let next = SERVER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            tick_pending_impacts();
+            if next % 200 == 0 {
+                prune_stale_server_maps(next);
+            }
         }
     }
 
@@ -1970,7 +1123,6 @@ impl Hooks for Mod {
             return;
         };
         let now = SERVER_TICKS.load(Ordering::Relaxed);
-        tick_pending_impacts();
         tick_reload_sessions(host, now);
         tick_active_bullets(host, now);
         tick_barrel_heat(host, now);
@@ -2745,173 +1897,10 @@ impl Hooks for Mod {
     /// Hide the vanilla HUD crosshair (`+` and crosshair attack indicator) while aiming down sights
     /// so the Winchester 1873 iron sights (`massa_lamina` + `alca_entalhe_base`) remain unobstructed.
     fn gui_layer_pre(&self, _: &dyn ClientHost, event: &mut GuiLayerPreEvent<'_>) -> Flow {
-        if client_settings().hide_crosshair_ads
-            && (event.layer == "minecraft:crosshair" || event.layer == "crosshair")
-            && (AIMING.load(Ordering::Relaxed)
-                || (holding_rifle_recently() && aim_progress() > 0.08))
-        {
-            return Flow::Cancel;
-        }
-        Flow::Continue
+        render_gui_layer_pre(event)
     }
 
     fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-        if event.gui_hidden || !holding_rifle_recently() {
-            return;
-        }
-        let cfg = client_settings();
-        let aim = aim_progress().clamp(0.0, 1.0);
-        let [wf, hf] = event.batch.size();
-        let (w, h) = (wf as i32, hf as i32);
-
-        if aim >= 0.02 && cfg.ads_vignette_mul > 0.01 {
-            let darken = ((1.0 - AIM_VIGNETTE) * cfg.ads_vignette_mul * aim).clamp(0.0, 0.85);
-            let brightness = ((1.0 - darken) * 255.0).clamp(0.0, 255.0) as u32;
-            let color = 0xFF00_0000 | (brightness << 16) | (brightness << 8) | brightness;
-            let _ = event.batch.gui_paint(&[GuiDraw::Blit {
-                texture: "misc/vignette".into(),
-                blend: mod_api::client::hud_layout::Blend::Vignette,
-                x: 0,
-                y: 0,
-                w,
-                h,
-                uv: [0.0, 0.0],
-                src: [w, h],
-                tex: [w, h],
-                color,
-            }]);
-        }
-
-        // Optional subtle brass hitmarker (or crimson-gold double tick on 1.5x headshots!).
-        let hit_rem = f32::from_bits(HITMARKER_TIMER_BITS.load(Ordering::Relaxed));
-        if cfg.hud_hitmarker && hit_rem > 0.001 {
-            let is_headshot = HEADSHOT_HITMARKER.load(Ordering::Relaxed);
-            let dur = if is_headshot { 0.22_f32 } else { 0.14_f32 };
-            let alpha = ((hit_rem / dur).clamp(0.0, 1.0) * 235.0) as u32;
-            let rgb = if is_headshot {
-                0xFF_6A_4D
-            } else {
-                cfg.hud_accent_color & 0xFF_FFFF
-            };
-            let hm_color = (alpha << 24) | rgb;
-            let cx = wf * 0.5;
-            let cy = hf * 0.5;
-            for step in 2..=5 {
-                let d = step as f32;
-                event.batch.fill([cx - d - 0.5, cy - d - 0.5, 1.2, 1.2], hm_color);
-                event.batch.fill([cx + d - 0.7, cy - d - 0.5, 1.2, 1.2], hm_color);
-                event.batch.fill([cx - d - 0.5, cy + d - 0.7, 1.2, 1.2], hm_color);
-                event.batch.fill([cx + d - 0.7, cy + d - 0.7, 1.2, 1.2], hm_color);
-            }
-            if is_headshot {
-                let gold_color = ((alpha * 4 / 5) << 24) | 0xFF_DF_78;
-                for step in 6..=7 {
-                    let d = step as f32;
-                    event
-                        .batch
-                        .fill([cx - d - 0.5, cy - d - 0.5, 1.3, 1.3], gold_color);
-                    event
-                        .batch
-                        .fill([cx + d - 0.8, cy - d - 0.5, 1.3, 1.3], gold_color);
-                    event
-                        .batch
-                        .fill([cx - d - 0.5, cy + d - 0.8, 1.3, 1.3], gold_color);
-                    event
-                        .batch
-                        .fill([cx + d - 0.8, cy + d - 0.8, 1.3, 1.3], gold_color);
-                }
-            }
-        }
-
-        // Configurable western brass ammo counter (`8 / 8` + optional `.44-40` reserve with mini icon).
-        let (rounds_now, reloading) = {
-            let anim = client_anim().lock().unwrap();
-            (
-                anim.known_rounds,
-                CLIENT_RELOADING.load(Ordering::Relaxed),
-            )
-        };
-        let label = if reloading {
-            format!("{rounds_now}/{TUBE_CAPACITY}+")
-        } else {
-            format!("{rounds_now} / {TUBE_CAPACITY}")
-        };
-        let mag_tw = event.batch.text_width(&label);
-
-        let show_res = cfg.hud_show_reserve;
-        let reserve = LOCAL_RESERVE_AMMO.load(Ordering::Relaxed);
-        let res_label = if show_res {
-            if reserve == u32::MAX {
-                "∞".to_string()
-            } else {
-                reserve.min(9999).to_string()
-            }
-        } else {
-            String::new()
-        };
-        let res_tw = if show_res {
-            event.batch.text_width(&res_label)
-        } else {
-            0.0
-        };
-
-        let left_w = (mag_tw + 12.0).max(46.0);
-        let right_w = if show_res {
-            (13.0 + res_tw + 6.0).max(26.0)
-        } else {
-            0.0
-        };
-        let box_w = if show_res {
-            left_w + 1.0 + right_w
-        } else {
-            52.0_f32.max(left_w)
-        };
-        let box_h = 15.0_f32;
-        let Some([x0, y0]) = cfg.hud_position.layout(wf, hf, box_w, box_h) else {
-            return;
-        };
-
-        let accent = cfg.hud_accent_color & 0xFF_FFFF;
-        let border = if reloading {
-            0xDD00_0000 | accent
-        } else if rounds_now == 0 {
-            0xCC_C9_4A_38
-        } else {
-            0xAE00_0000 | accent
-        };
-        event.batch.fill([x0, y0, box_w, box_h], 0x92_14_11_0E);
-        event.batch.fill([x0, y0, box_w, 1.0], border);
-        event.batch.fill([x0, y0 + box_h - 1.0, box_w, 1.0], border);
-
-        let text_color = if rounds_now == 0 && !reloading {
-            0xFF_FF_6E_59
-        } else {
-            0xFF_F5_E6_C8
-        };
-        let mag_area_w = if show_res { left_w } else { box_w };
-        event.batch.text(
-            &label,
-            [x0 + (mag_area_w - mag_tw) * 0.5, y0 + 4.0],
-            text_color,
-            true,
-        );
-
-        if show_res {
-            let div_x = x0 + left_w;
-            event
-                .batch
-                .fill([div_x, y0 + 2.5, 1.0, box_h - 5.0], 0x6600_0000 | accent);
-            draw_hud_mini_cartridge(event, div_x + 5.0, y0 + 3.0);
-            let res_color = if reserve == u32::MAX {
-                0xFF_FF_E0_82
-            } else if reserve == 0 {
-                0xFF_D9_6B_59
-            } else {
-                0xFF_D8_CB_B2
-            };
-            event
-                .batch
-                .text(&res_label, [div_x + 12.0, y0 + 4.0], res_color, true);
-        }
+        render_gui_post(event);
     }
 }

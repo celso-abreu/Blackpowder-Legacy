@@ -11,17 +11,18 @@ use mod_api::{
     WorldDrawContext,
 };
 
+use crate::client_audio::play_local_positional_foley;
 use crate::constants::*;
 use crate::server::{
     consume_bullet_water_splash_on_impact, find_active_bullet_ray, flush_bullet_flyby_on_impact,
     try_perforate_foliage_on_impact,
 };
 use crate::{
-    holding_rifle_recently, is_point_in_water, play_local_positional_foley, BulletImpactSync,
-    BELL_BLOCK_KEY, BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC,
-    CHORUS_FLOWER_BLOCK_KEY, CRIT_KEY, DECORATED_POT_BLOCK_KEY, FLAME_KEY, LAST_EJECTOR_VIEW_X,
-    LAST_EJECTOR_VIEW_Y, LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POINTED_DRIPSTONE_BLOCK_KEY,
-    POOF_KEY, RIFLE_MODELS, SMOKE_KEY, TARGET_BLOCK_KEY, WHITE_SMOKE_KEY,
+    holding_rifle_recently, is_point_in_water, BulletImpactSync, BELL_BLOCK_KEY,
+    BLOCK_PARTICLE_KEY, BUBBLE_KEY, BUBBLE_POP_KEY, BULLET_IMPACT_SYNC, CHORUS_FLOWER_BLOCK_KEY,
+    CRIT_KEY, DECORATED_POT_BLOCK_KEY, FLAME_KEY, LAST_EJECTOR_VIEW_X, LAST_EJECTOR_VIEW_Y,
+    LAST_EJECTOR_VIEW_Z, LAST_WORLD_FOV_BITS, POINTED_DRIPSTONE_BLOCK_KEY, POOF_KEY,
+    RIFLE_MODELS, SMOKE_KEY, TARGET_BLOCK_KEY, WHITE_SMOKE_KEY,
 };
 
 static WORLD_EFFECTS: OnceLock<Mutex<WorldEffectsState>> = OnceLock::new();
@@ -84,6 +85,17 @@ impl WorldEffectsState {
 
 fn world_effects() -> &'static Mutex<WorldEffectsState> {
     WORLD_EFFECTS.get_or_init(|| Mutex::new(WorldEffectsState::new()))
+}
+
+pub(crate) fn clear_world_effects() {
+    if let Some(lock) = WORLD_EFFECTS.get() {
+        let mut fx = lock.lock().unwrap();
+        fx.active_dimension = DEFAULT_DIMENSION.into();
+        fx.holes.clear();
+        fx.casings.clear();
+        fx.next_slot_bias = 0;
+        fx.prune_timer = 0.0;
+    }
 }
 
 fn normalize_cardinal_face(face: [i32; 3]) -> [i32; 3] {
@@ -1626,6 +1638,83 @@ pub(crate) fn on_bullet_impact_sync(
     Ok(())
 }
 
+fn emit_spent_casing(
+    host: &dyn ClientHost,
+    origin: [f64; 3],
+    yaw_deg: f32,
+    pitch_deg: f32,
+    right: [f64; 3],
+    up: [f64; 3],
+    forward: [f64; 3],
+) {
+    let max_casings = crate::settings::client_settings().max_casings;
+    let mut fx = world_effects().lock().unwrap();
+    if max_casings == 0 {
+        fx.casings.clear();
+        return;
+    }
+
+    let r0 = f64::from(fx.next_unit_f32());
+    let r1 = f64::from(fx.next_unit_f32());
+    let r2 = f64::from(fx.next_unit_f32());
+    let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
+
+    // Authentic Winchester 1873 top-carrier ejection: pops up out of `trava_dorsal` and arcs
+    // off to the right/rear away from the barrel & iron sights.
+    let v_right = 0.92 + 0.38 * r0;
+    let v_up = 1.55 + 0.38 * r1;
+    let v_fwd = -0.18 + 0.24 * r2;
+    let vel = [
+        right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
+        right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
+        right[2] * v_right + up[2] * v_up + forward[2] * v_fwd,
+    ];
+
+    let dim = fx.active_dimension.clone();
+    let block_pos = [
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+    ];
+    let light = sample_world_light(host, &dim, block_pos);
+
+    while fx.casings.len() >= max_casings {
+        fx.casings.remove(0);
+    }
+    // Start aligned with the barrel & carrier slot (`local -Z` hollow mouth pointing forward,
+    // tilted `+18°` upward matching Stage 1's exit angle) before tumbling end-over-end.
+    let init_yaw = 180.0 - yaw_deg - 8.0;
+    let init_pitch = -pitch_deg - 18.0;
+    let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
+    let yaw_vel = (210.0 + 160.0 * fx.next_unit_f32()) * spin_sign;
+    let roll_vel = 560.0 + 240.0 * fx.next_unit_f32();
+
+    fx.casings.push(SpentCasing {
+        dimension: dim,
+        pos: origin,
+        vel,
+        yaw_deg: init_yaw,
+        pitch_deg: init_pitch,
+        roll_deg: 24.0,
+        yaw_vel,
+        pitch_vel,
+        roll_vel,
+        bounces: 0,
+        settled: false,
+        age: 0.0,
+        light,
+    });
+}
+
+fn look_basis(yaw_deg: f32, pitch_deg: f32) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let (sin_y, cos_y) = f64::from(yaw_deg).to_radians().sin_cos();
+    let (sin_p, cos_p) = f64::from(pitch_deg).to_radians().sin_cos();
+    let forward = [-sin_y * cos_p, -sin_p, cos_y * cos_p];
+    let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
+    let right = [-cos_y, 0.0, -sin_y];
+    (right, up, forward)
+}
+
 pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
     let Some(cam) = host.camera_entity() else {
         return;
@@ -1637,15 +1726,7 @@ pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
         return;
     };
 
-    let yaw_rad = f64::from(yaw_deg).to_radians();
-    let pitch_rad = f64::from(pitch_deg).to_radians();
-    let (sin_y, cos_y) = yaw_rad.sin_cos();
-    let (sin_p, cos_p) = pitch_rad.sin_cos();
-
-    let forward = [-sin_y * cos_p, -sin_p, cos_y * cos_p];
-    let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
-    let right = [-cos_y, 0.0, -sin_y];
-
+    let (right, up, forward) = look_basis(yaw_deg, pitch_deg);
     let first_person = host.camera_type() == CameraType::FirstPerson && holding_rifle_recently();
     let (port_right, port_up, port_fwd) = if first_person {
         // Exact 0-pixel handoff from `EJECTOR_HANDOFF_TEXELS` (`trava_dorsal` top carrier port):
@@ -1676,70 +1757,13 @@ pub(crate) fn spawn_spent_casing_from_camera(host: &dyn ClientHost, _aim: f32) {
         eye[1] + right[1] * port_right + up[1] * port_up + forward[1] * port_fwd,
         eye[2] + right[2] * port_right + up[2] * port_up + forward[2] * port_fwd,
     ];
-
-    let mut fx = world_effects().lock().unwrap();
-    let r0 = f64::from(fx.next_unit_f32());
-    let r1 = f64::from(fx.next_unit_f32());
-    let r2 = f64::from(fx.next_unit_f32());
-    let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
-
-    // Authentic Winchester 1873 top-carrier ejection: pops up out of `trava_dorsal` and arcs
-    // off to the right/rear away from the barrel & iron sights.
-    let v_right = 0.92 + 0.38 * r0;
-    let v_up = 1.55 + 0.38 * r1;
-    let v_fwd = -0.18 + 0.24 * r2;
-    let vel = [
-        right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
-        right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
-        right[2] * v_right + up[2] * v_up + forward[2] * v_fwd,
-    ];
-
-    let dim = fx.active_dimension.clone();
-    let block_pos = [
-        origin[0].floor() as i32,
-        origin[1].floor() as i32,
-        origin[2].floor() as i32,
-    ];
-    let light = sample_world_light(host, &dim, block_pos);
-
-    let max_casings = crate::settings::client_settings().max_casings;
-    if max_casings == 0 {
-        fx.casings.clear();
-        return;
-    }
-    while fx.casings.len() >= max_casings {
-        fx.casings.remove(0);
-    }
-    // Start aligned with the barrel & carrier slot (`local -Z` hollow mouth pointing forward,
-    // tilted `+18°` upward matching Stage 1's exit angle) before tumbling end-over-end.
-    let init_yaw = 180.0 - yaw_deg - 8.0;
-    let init_pitch = -pitch_deg - 18.0;
-    let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
-    let yaw_vel = (210.0 + 160.0 * fx.next_unit_f32()) * spin_sign;
-    let roll_vel = 560.0 + 240.0 * fx.next_unit_f32();
-
-    fx.casings.push(SpentCasing {
-        dimension: dim,
-        pos: origin,
-        vel,
-        yaw_deg: init_yaw,
-        pitch_deg: init_pitch,
-        roll_deg: 24.0,
-        yaw_vel,
-        pitch_vel,
-        roll_vel,
-        bounces: 0,
-        settled: false,
-        age: 0.0,
-        light,
-    });
+    emit_spent_casing(host, origin, yaw_deg, pitch_deg, right, up, forward);
 }
 
 /// Spawns a 3D spinning/bouncing `.44-40` brass shell casing from a nearby remote player's
 /// held Winchester top-carrier port so multiplayer observers see and hear brass clinking on the ground.
 pub(crate) fn spawn_spent_casing_from_remote_actor(host: &dyn ClientHost, entity_id: u32) {
-    let cfg = crate::settings::client_settings();
-    if cfg.max_casings == 0 {
+    if crate::settings::client_settings().max_casings == 0 {
         return;
     }
     let Some(ent) = host.entity(entity_id) else {
@@ -1749,69 +1773,13 @@ pub(crate) fn spawn_spent_casing_from_remote_actor(host: &dyn ClientHost, entity
         return;
     };
     let [yaw_deg, pitch_deg] = ent.rotation(host).unwrap_or([0.0, 0.0]);
-
-    let yaw_rad = f64::from(yaw_deg).to_radians();
-    let pitch_rad = f64::from(pitch_deg).to_radians();
-    let (sin_y, cos_y) = yaw_rad.sin_cos();
-    let (sin_p, cos_p) = pitch_rad.sin_cos();
-
-    let forward = [-sin_y * cos_p, -sin_p, cos_y * cos_p];
-    let up = [-sin_y * sin_p, cos_p, cos_y * sin_p];
-    let right = [-cos_y, 0.0, -sin_y];
-
+    let (right, up, forward) = look_basis(yaw_deg, pitch_deg);
     let origin = [
         eye[0] + right[0] * 0.26 + up[0] * -0.26 + forward[0] * 0.56,
         eye[1] + right[1] * 0.26 + up[1] * -0.26 + forward[1] * 0.56,
         eye[2] + right[2] * 0.26 + up[2] * -0.26 + forward[2] * 0.56,
     ];
-
-    let mut fx = world_effects().lock().unwrap();
-    let r0 = f64::from(fx.next_unit_f32());
-    let r1 = f64::from(fx.next_unit_f32());
-    let r2 = f64::from(fx.next_unit_f32());
-    let spin_sign = if fx.next_unit_f32() >= 0.5 { 1.0 } else { -1.0 };
-
-    let v_right = 0.92 + 0.38 * r0;
-    let v_up = 1.55 + 0.38 * r1;
-    let v_fwd = -0.18 + 0.24 * r2;
-    let vel = [
-        right[0] * v_right + up[0] * v_up + forward[0] * v_fwd,
-        right[1] * v_right + up[1] * v_up + forward[1] * v_fwd,
-        right[2] * v_right + up[2] * v_up + forward[2] * v_fwd,
-    ];
-
-    let dim = fx.active_dimension.clone();
-    let block_pos = [
-        origin[0].floor() as i32,
-        origin[1].floor() as i32,
-        origin[2].floor() as i32,
-    ];
-    let light = sample_world_light(host, &dim, block_pos);
-
-    while fx.casings.len() >= cfg.max_casings {
-        fx.casings.remove(0);
-    }
-    let init_yaw = 180.0 - yaw_deg - 8.0;
-    let init_pitch = -pitch_deg - 18.0;
-    let pitch_vel = -(460.0 + 240.0 * fx.next_unit_f32());
-    let yaw_vel = (210.0 + 160.0 * fx.next_unit_f32()) * spin_sign;
-    let roll_vel = 560.0 + 240.0 * fx.next_unit_f32();
-
-    fx.casings.push(SpentCasing {
-        dimension: dim,
-        pos: origin,
-        vel,
-        yaw_deg: init_yaw,
-        pitch_deg: init_pitch,
-        roll_deg: 24.0,
-        yaw_vel,
-        pitch_vel,
-        roll_vel,
-        bounces: 0,
-        settled: false,
-        age: 0.0,
-        light,
-    });
+    emit_spent_casing(host, origin, yaw_deg, pitch_deg, right, up, forward);
 }
 
 fn floor_top_at(host: &dyn ClientHost, x: f64, y: f64, z: f64) -> Option<f64> {

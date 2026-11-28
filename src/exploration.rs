@@ -279,6 +279,12 @@ struct RecentEntityHit {
 static RECENT_SHOTS: Mutex<Vec<RecentShot>> = Mutex::new(Vec::new());
 static RECENT_ENTITY_HITS: Mutex<Vec<RecentEntityHit>> = Mutex::new(Vec::new());
 
+pub(crate) fn reset_exploration_state() {
+    PENDING_RELIC_FINDERS.lock().unwrap().clear();
+    RECENT_SHOTS.lock().unwrap().clear();
+    RECENT_ENTITY_HITS.lock().unwrap().clear();
+}
+
 pub(crate) fn distance_3d(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
