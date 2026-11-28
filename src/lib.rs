@@ -60,9 +60,10 @@ use crate::client_audio::{
 };
 use crate::constants::*;
 use crate::exploration::{
-    flush_pending_exploration_advancements, grant_mod_criterion, handle_living_death_advancements,
-    is_tracked_rifle_bullet, on_container_loot_filled, on_loot_drops, record_bullet_entity_hit,
-    reset_exploration_state, resolve_shooter_and_distance, resolve_shot_origin_for_owner,
+    distance_3d, flush_pending_exploration_advancements, grant_mod_criterion,
+    handle_living_death_advancements, is_tracked_rifle_bullet, on_container_loot_filled,
+    on_loot_drops, record_bullet_entity_hit, reset_exploration_state, resolve_shooter_and_distance,
+    resolve_shot_origin_for_owner,
 };
 use crate::hud::{
     count_local_reserve_ammo, render_gui_layer_pre, render_gui_post, render_item_tooltip,
