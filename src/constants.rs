@@ -86,6 +86,7 @@ pub(crate) const TARGET_BLOCK: &str = "minecraft:target";
 pub(crate) const DECORATED_POT_BLOCK: &str = "minecraft:decorated_pot";
 pub(crate) const CHORUS_FLOWER_BLOCK: &str = "minecraft:chorus_flower";
 pub(crate) const POINTED_DRIPSTONE_BLOCK: &str = "minecraft:pointed_dripstone";
+pub(crate) const CAKE_BLOCK: &str = "minecraft:cake";
 pub(crate) const TNT_BLOCK: &str = "minecraft:tnt";
 pub(crate) const AIR_BLOCK: &str = "minecraft:air";
 pub(crate) const ENTITY_TNT: &str = "minecraft:tnt";

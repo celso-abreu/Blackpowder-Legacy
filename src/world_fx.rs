@@ -13,7 +13,7 @@ use mod_api::{
 
 use crate::constants::*;
 use crate::server::{
-    consume_bullet_water_splash_on_impact, flush_bullet_flyby_on_impact,
+    consume_bullet_water_splash_on_impact, find_active_bullet_ray, flush_bullet_flyby_on_impact,
     try_perforate_foliage_on_impact,
 };
 use crate::{
@@ -484,6 +484,102 @@ fn compute_target_bullseye_power(block: [i32; 3], face: [i32; 3], at: [f64; 3]) 
     (((1.0 - dist * 2.0).clamp(0.0, 1.0) * 15.0).ceil() as i32).clamp(1, 15)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleShotOutcome {
+    /// Hit landed outside the candle (e.g. lower cake base of a `candle_cake`).
+    Ignore,
+    /// Precision graze across the upper wick zone (`>= 62%` candle height) of a lit dry candle:
+    /// snuffs out the flame (`lit=false`) while leaving the candle intact (`Tiro de Salão`).
+    SnuffWick,
+    /// Impact into the center or bottom wax body (`< 62%` height), a steep downward shot straight
+    /// into the candle core, or any hit on an unlit candle: blows the wax candle apart!
+    ExplodeWax,
+}
+
+fn is_candle_cake_block(block_id: &str) -> bool {
+    let id = block_id.strip_prefix("minecraft:").unwrap_or(block_id);
+    id == "candle_cake" || id.ends_with("_candle_cake")
+}
+
+/// Distinguishes a high precision wick graze (`SnuffWick`) from a center/base wax body hit
+/// (`ExplodeWax`) across all 1..=4 standalone `#minecraft:candles` clusters and `*_candle_cake`s.
+fn classify_candle_shot(
+    outline: &[[f64; 6]],
+    is_candle_cake: bool,
+    is_lit: bool,
+    underwater: bool,
+    local_hit: [f64; 3],
+    face: [i32; 3],
+    ray_dir: Option<[f64; 3]>,
+) -> CandleShotOutcome {
+    let (min_x, min_y, min_z, max_x, max_y, max_z) = if is_candle_cake {
+        // `CandleCakeBlock`: cake slab occupies `y = 0..0.50`, candle sits at `y = 0.50..0.875`.
+        if local_hit[1] < 0.495 {
+            return CandleShotOutcome::Ignore;
+        }
+        (0.4375, 0.50, 0.4375, 0.5625, 0.875, 0.5625)
+    } else if !outline.is_empty() {
+        let mut bx0 = 1.0_f64;
+        let mut by0 = 1.0_f64;
+        let mut bz0 = 1.0_f64;
+        let mut bx1 = 0.0_f64;
+        let mut by1 = 0.0_f64;
+        let mut bz1 = 0.0_f64;
+        for b in outline {
+            bx0 = bx0.min(b[0]);
+            by0 = by0.min(b[1]);
+            bz0 = bz0.min(b[2]);
+            bx1 = bx1.max(b[3]);
+            by1 = by1.max(b[4]);
+            bz1 = bz1.max(b[5]);
+        }
+        if bx1 > bx0 && by1 > by0 && bz1 > bz0 {
+            (bx0, by0, bz0, bx1, by1, bz1)
+        } else {
+            (0.4375, 0.0, 0.4375, 0.5625, 0.375, 0.5625)
+        }
+    } else {
+        (0.4375, 0.0, 0.4375, 0.5625, 0.375, 0.5625)
+    };
+
+    let f = normalize_cardinal_face(face);
+    if f == [0, -1, 0] || !is_lit || underwater {
+        return CandleShotOutcome::ExplodeWax;
+    }
+
+    let height = (max_y - min_y).max(0.0625);
+    let rel_y = ((local_hit[1] - min_y) / height).clamp(0.0, 1.0);
+
+    if f == [0, 1, 0] {
+        let down_dot = ray_dir
+            .and_then(|d| {
+                let len_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                (len_sq.is_finite() && len_sq > 1e-8).then(|| (-d[1] / len_sq.sqrt()).clamp(-1.0, 1.0))
+            })
+            .unwrap_or(0.0);
+        let cx = (min_x + max_x) * 0.5;
+        let cz = (min_z + max_z) * 0.5;
+        let half_rx = ((max_x - min_x) * 0.5).max(0.0625);
+        let half_rz = ((max_z - min_z) * 0.5).max(0.0625);
+        let norm_radial = (((local_hit[0] - cx) / half_rx).powi(2)
+            + ((local_hit[2] - cz) / half_rz).powi(2))
+        .sqrt();
+
+        // Steep downward shot (`>= ~44°`) plunging into the candle's core blows the wax apart;
+        // normal horizontal/diagonal wick shots grazing across the top rim snuff the flame!
+        if down_dot >= 0.70 && norm_radial <= 0.80 {
+            return CandleShotOutcome::ExplodeWax;
+        }
+        return CandleShotOutcome::SnuffWick;
+    }
+
+    if rel_y >= 0.62 {
+        CandleShotOutcome::SnuffWick
+    } else {
+        CandleShotOutcome::ExplodeWax
+    }
+}
+
 /// Verifies that at least one collision/outline box at `block` presents a flat surface on `face`
 /// near `local_hit` wide enough (`>= min_span` on both tangent axes) to hold a bullet-hole decal
 /// without overhanging into empty air around thin fences, chains, bars, candles, or bells.
@@ -624,6 +720,7 @@ pub(crate) fn handle_bullet_terrain_impact(
     let Some(level) = host.level(event.dimension) else {
         return;
     };
+    let bullet_ray_dir = find_active_bullet_ray(host, event.at).map(|(_, dir)| dir);
     consume_bullet_water_splash_on_impact(host, level, event.at);
     flush_bullet_flyby_on_impact(host, level, event.owner, event.at, None);
 
@@ -664,6 +761,7 @@ pub(crate) fn handle_bullet_terrain_impact(
     let is_dripstone = POINTED_DRIPSTONE_BLOCK_KEY.get().copied() == Some(hit_block)
         || block_id == POINTED_DRIPSTONE_BLOCK;
     let is_tnt = block_id == TNT_BLOCK;
+    let is_candle_cake = is_candle_cake_block(block_id);
     let in_flower_pots = host.block_in_tag(hit_block, TAG_FLOWER_POTS).unwrap_or(false);
     let in_candles = host.block_in_tag(hit_block, TAG_CANDLES).unwrap_or(false);
     let in_leaves = host.block_in_tag(hit_block, TAG_LEAVES).unwrap_or(false);
@@ -689,6 +787,8 @@ pub(crate) fn handle_bullet_terrain_impact(
         },
     );
 
+    let outline = host.state_outline(hit_state);
+
     // Horizon natively shatters `decorated_pot` and `chorus_flower` right after `projectile_impact`
     // when `can_break` holds; we shatter thin window panes, flower pots, and stalactites directly.
     let native_will_shatter = can_break && (is_decorated_pot || is_chorus_flower);
@@ -697,13 +797,14 @@ pub(crate) fn handle_bullet_terrain_impact(
         || is_bell
         || is_dripstone
         || is_tnt
+        || is_candle_cake
         || in_flower_pots
         || in_candles
         || in_leaves;
 
     if !suppress_decal
-        && let Some(outline) = host.state_outline(hit_state)
-        && !face_supports_bullet_decal(&outline, local_hit, face, BULLET_HOLE_MIN_FACE_SPAN)
+        && let Some(ref boxes) = outline
+        && !face_supports_bullet_decal(boxes, local_hit, face, BULLET_HOLE_MIN_FACE_SPAN)
     {
         suppress_decal = true;
     }
@@ -776,48 +877,200 @@ pub(crate) fn handle_bullet_terrain_impact(
                 1.24,
             );
         }
-    } else if in_candles
-        && !underwater
-        && parse_state_property(&state_str, "lit") == Some("true")
-        && let Some(unlit_str) = replace_state_property(&state_str, "lit", "false")
-        && let Some(unlit_state) = host.block_state_id(&unlit_str)
-        && matches!(
-            level.set_block(
-                host,
-                event.block,
-                unlit_state,
-                BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS,
-            ),
-            Ok(true)
-        )
-    {
-        // Trick-shot: snuff out a lit candle flame without breaking the candle.
-        level.play_sound(
-            host,
-            SND_CANDLE_EXTINGUISH,
-            event.at,
-            SoundSource::Players,
-            0.85,
-            1.05 + 0.06 * jitter,
-        );
-        if let Some((shooter, _)) = shooter_dist {
-            crate::exploration::grant_mod_criterion(host, shooter, TRIG_CANDLE_SNUFFER);
-        }
-        if let Some(smoke) = SMOKE_KEY.get().copied() {
-            let smoke_opts = ParticleOptions::simple(smoke);
-            level.send_particles(
-                host,
-                &smoke_opts,
-                None,
-                [
-                    f64::from(event.block[0]) + 0.5,
-                    f64::from(event.block[1]) + 0.55,
-                    f64::from(event.block[2]) + 0.5,
-                ],
-                [0.04, 0.06, 0.04],
-                0.015,
-                5,
-            );
+    } else if in_candles || is_candle_cake {
+        let was_lit = parse_state_property(&state_str, "lit") == Some("true");
+        let candle_count = parse_state_property(&state_str, "candles")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1)
+            .clamp(1, 4);
+        match classify_candle_shot(
+            outline.as_deref().unwrap_or(&[]),
+            is_candle_cake,
+            was_lit,
+            underwater,
+            local_hit,
+            face,
+            bullet_ray_dir,
+        ) {
+            CandleShotOutcome::SnuffWick => {
+                // Saloon trick-shot: graze the upper wick zone (`>= 62%` height) to snuff out
+                // the flame cleanly without breaking the candle (`Tiro de Salão`).
+                if let Some(unlit_str) = replace_state_property(&state_str, "lit", "false")
+                    && let Some(unlit_state) = host.block_state_id(&unlit_str)
+                    && matches!(
+                        level.set_block(
+                            host,
+                            event.block,
+                            unlit_state,
+                            BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS,
+                        ),
+                        Ok(true)
+                    )
+                {
+                    level.play_sound(
+                        host,
+                        SND_CANDLE_EXTINGUISH,
+                        event.at,
+                        SoundSource::Players,
+                        0.85,
+                        1.05 + 0.06 * jitter,
+                    );
+                    let _ = level.game_event(
+                        host,
+                        GAME_EVENT_BLOCK_CHANGE,
+                        event.at,
+                        GameEventContext {
+                            source_entity: source_ent,
+                            affected_state: Some(unlit_state),
+                        },
+                    );
+                    if let Some((shooter, _)) = shooter_dist {
+                        crate::exploration::grant_mod_criterion(host, shooter, TRIG_CANDLE_SNUFFER);
+                    }
+                    if let Some(smoke) = SMOKE_KEY.get().copied() {
+                        let smoke_opts = ParticleOptions::simple(smoke);
+                        let wick_y = if is_candle_cake { 0.96 } else { 0.55 };
+                        level.send_particles(
+                            host,
+                            &smoke_opts,
+                            None,
+                            [
+                                f64::from(event.block[0]) + 0.5,
+                                f64::from(event.block[1]) + wick_y,
+                                f64::from(event.block[2]) + 0.5,
+                            ],
+                            [0.04, 0.06, 0.04],
+                            0.015,
+                            5,
+                        );
+                    }
+                }
+            }
+            CandleShotOutcome::ExplodeWax if can_break => {
+                // Center / base impact (or steep downward core shot / unlit candle): `.44-40`
+                // soft-lead slug blows the wax candle apart into colored wax shrapnel!
+                let broke_candle = if is_candle_cake {
+                    if let Some(cake_state) = host.block_state_id(CAKE_BLOCK)
+                        && matches!(
+                            level.set_block(
+                                host,
+                                event.block,
+                                cake_state,
+                                BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS,
+                            ),
+                            Ok(true)
+                        )
+                    {
+                        let _ = level.game_event(
+                            host,
+                            GAME_EVENT_BLOCK_CHANGE,
+                            event.at,
+                            GameEventContext {
+                                source_entity: source_ent,
+                                affected_state: Some(cake_state),
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    matches!(
+                        level.destroy_block(host, event.block, false, None, false),
+                        Ok(Some(_))
+                    )
+                };
+
+                if broke_candle {
+                    shattered_now = true;
+                    suppress_decal = true;
+                    let burst_pos = [
+                        f64::from(event.block[0]) + local_hit[0].clamp(0.32, 0.68),
+                        f64::from(event.block[1])
+                            + if is_candle_cake {
+                                local_hit[1].clamp(0.55, 0.85)
+                            } else {
+                                local_hit[1].clamp(0.08, 0.34)
+                            },
+                        f64::from(event.block[2]) + local_hit[2].clamp(0.32, 0.68),
+                    ];
+                    level.play_sound(
+                        host,
+                        break_sound,
+                        burst_pos,
+                        SoundSource::Blocks,
+                        0.95,
+                        (base_pitch * 1.18 + 0.06 * jitter).clamp(0.80, 1.80),
+                    );
+                    level.play_sound(
+                        host,
+                        SND_IMPACT_FLESH,
+                        burst_pos,
+                        SoundSource::Players,
+                        0.36,
+                        1.42 + 0.05 * jitter,
+                    );
+                    if let Some(block_key) = BLOCK_PARTICLE_KEY.get().copied() {
+                        let wax_opts = ParticleOptions::simple(block_key);
+                        level.send_particles(
+                            host,
+                            &wax_opts,
+                            Some(hit_state),
+                            burst_pos,
+                            [0.09, 0.10, 0.09],
+                            0.18,
+                            14 + 4 * candle_count,
+                        );
+                    }
+                    if let Some(poof) = POOF_KEY.get().copied() {
+                        let poof_opts = ParticleOptions::simple(poof);
+                        level.send_particles(
+                            host,
+                            &poof_opts,
+                            None,
+                            burst_pos,
+                            [0.06, 0.07, 0.06],
+                            0.028,
+                            3 + candle_count,
+                        );
+                    }
+                    if was_lit && !underwater {
+                        level.play_sound(
+                            host,
+                            SND_CANDLE_EXTINGUISH,
+                            burst_pos,
+                            SoundSource::Players,
+                            0.90,
+                            0.92 + 0.06 * jitter,
+                        );
+                        if let Some(flame) = FLAME_KEY.get().copied() {
+                            let flame_opts = ParticleOptions::simple(flame);
+                            level.send_particles(
+                                host,
+                                &flame_opts,
+                                None,
+                                burst_pos,
+                                [0.07, 0.08, 0.07],
+                                0.055,
+                                5 + 2 * candle_count,
+                            );
+                        }
+                        if let Some(smoke) = SMOKE_KEY.get().copied() {
+                            let smoke_opts = ParticleOptions::simple(smoke);
+                            level.send_particles(
+                                host,
+                                &smoke_opts,
+                                None,
+                                burst_pos,
+                                [0.07, 0.09, 0.07],
+                                0.025,
+                                5 + 2 * candle_count,
+                            );
+                        }
+                    }
+                }
+            }
+            CandleShotOutcome::ExplodeWax | CandleShotOutcome::Ignore => {}
         }
     } else if in_leaves && !underwater {
         // Soft-lead `.44-40` shears cleanly through up to 2 dry canopy leaf blocks (`72%` speed
@@ -2128,5 +2381,147 @@ mod world_effects_tests {
             [0, 0, 1],
             BULLET_HOLE_MIN_FACE_SPAN
         ));
+    }
+
+    #[test]
+    fn candle_wick_snuff_vs_center_and_base_wax_explosion() {
+        let single_candle = [[0.4375, 0.0, 0.4375, 0.5625, 0.375, 0.5625]];
+
+        // 1. Side graze on upper wick zone (`y = 0.32 / 0.375 = 85%`) of a lit candle -> SnuffWick!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.32, 0.4375],
+                [0, 0, -1],
+                Some([0.0, -0.5, 15.0]),
+            ),
+            CandleShotOutcome::SnuffWick
+        );
+
+        // 2. Shallow standing-angle shot clipping across the top wick plane (`face = [0, 1, 0]`) -> SnuffWick!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.375, 0.49],
+                [0, 1, 0],
+                Some([0.0, -3.5, 14.6]),
+            ),
+            CandleShotOutcome::SnuffWick
+        );
+
+        // 3. Center body hit (`y = 0.18 / 0.375 = 48%`) on a lit candle -> ExplodeWax!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.18, 0.4375],
+                [0, 0, -1],
+                Some([0.0, -1.0, 15.0]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+
+        // 4. Bottom base hit (`y = 0.05`) and upward bottom-face hit (`face = [0, -1, 0]`) -> ExplodeWax!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.05, 0.4375],
+                [0, 0, -1],
+                Some([0.0, -2.0, 15.0]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.0, 0.50],
+                [0, -1, 0],
+                Some([0.0, 12.0, 9.0]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+
+        // 5. Steep downward shot (`> 45°`) straight into the candle core -> ExplodeWax!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                true,
+                false,
+                [0.50, 0.375, 0.50],
+                [0, 1, 0],
+                Some([0.0, -13.0, 7.5]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+
+        // 6. Any hit on an already-unlit candle -> ExplodeWax!
+        assert_eq!(
+            classify_candle_shot(
+                &single_candle,
+                false,
+                false,
+                false,
+                [0.50, 0.34, 0.4375],
+                [0, 0, -1],
+                Some([0.0, 0.0, 15.0]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+
+        // 7. `candle_cake` (`minecraft:*_candle_cake`): wick -> SnuffWick, candle body -> ExplodeWax, cake base -> Ignore!
+        assert!(is_candle_cake_block("minecraft:candle_cake"));
+        assert!(is_candle_cake_block("minecraft:red_candle_cake"));
+        assert!(!is_candle_cake_block("minecraft:cake"));
+        assert_eq!(
+            classify_candle_shot(
+                &[],
+                true,
+                true,
+                false,
+                [0.50, 0.82, 0.4375],
+                [0, 0, -1],
+                Some([0.0, 0.0, 15.0]),
+            ),
+            CandleShotOutcome::SnuffWick
+        );
+        assert_eq!(
+            classify_candle_shot(
+                &[],
+                true,
+                true,
+                false,
+                [0.50, 0.62, 0.4375],
+                [0, 0, -1],
+                Some([0.0, 0.0, 15.0]),
+            ),
+            CandleShotOutcome::ExplodeWax
+        );
+        assert_eq!(
+            classify_candle_shot(
+                &[],
+                true,
+                true,
+                false,
+                [0.50, 0.25, 0.0625],
+                [0, 0, -1],
+                Some([0.0, 0.0, 15.0]),
+            ),
+            CandleShotOutcome::Ignore
+        );
     }
 }
